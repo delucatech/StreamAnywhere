@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>StreamAnywhere – Canvas Video Lab</title>
+    
+    <script type="module" crossorigin src="/player/assets/index-ea1a91be.js"></script>
+    <link rel="stylesheet" href="/player/assets/index-b87353f8.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo">▶</span>
+        <div>
+          <h1>StreamAnywhere</h1>
+          <p>Experimental browser-side video pipeline: fetch → mp4box demux → WebCodecs → Canvas + Web Audio</p>
+        </div>
+      </div>
+      <div class="support">
+        <div id="support"></div>
+        <label class="api"><span>API base URL (blank = same origin)</span><input id="apiBase" type="text" placeholder="https://your-app.onrender.com" spellcheck="false" /></label>
+        <div id="apiStatus"></div>
+      </div>
+    </header>
+
+    <main>
+      <section class="card loader">
+        <div class="row">
+          <label class="grow">
+            <span>Video URL (TikTok or direct MP4)</span>
+            <input id="url" type="url" placeholder="https://www.tiktok.com/@user/video/…  or  https://host/file.mp4" spellcheck="false" />
+          </label>
+          <button id="load" class="primary">Load Video</button>
+        </div>
+        <div class="row wrap">
+          <label>
+            <span>Source</span>
+            <select id="source">
+              <option value="auto">Auto (direct CDN, then proxy)</option>
+              <option value="direct">Direct CDN only</option>
+              <option value="proxy">Proxy only</option>
+              <option value="test">Test MP4</option>
+              <option value="local">Local file</option>
+            </select>
+          </label>
+          <label>
+            <span>Renderer</span>
+            <select id="renderer">
+              <option value="webcodecs">Mode B – WebCodecs → Canvas</option>
+              <option value="video">Mode A – &lt;video&gt; → Canvas</option>
+              <option value="embed">Mode C – TikTok official iframe</option>
+            </select>
+          </label>
+          <label id="testWrap">
+            <span>Test MP4</span>
+            <select id="test"></select>
+          </label>
+          <label id="localWrap" class="hidden">
+            <span>Local file</span>
+            <input id="file" type="file" accept="video/mp4,video/*" />
+          </label>
+          <label id="formatWrap" class="hidden">
+            <span>Format</span>
+            <select id="format"></select>
+          </label>
+        </div>
+        <div id="resolveInfo" class="resolve-info hidden"></div>
+      </section>
+
+      <section class="card player-card">
+        <div class="stage" id="stage">
+          <canvas id="canvas" width="720" height="1280"></canvas>
+          <div class="overlay" id="overlay">Load a video to start</div>
+        </div>
+        <div class="controls">
+          <button id="playPause" title="Play / pause" disabled>▶</button>
+          <span class="time" id="timeNow">0:00</span>
+          <input id="seek" type="range" min="0" max="1000" value="0" step="1" disabled />
+          <span class="time" id="timeTotal">0:00</span>
+          <label class="volume" title="Volume">🔊 <input id="volume" type="range" min="0" max="1" step="0.01" value="1" /></label>
+          <button id="fullscreen" title="Fullscreen">⛶</button>
+        </div>
+        <div class="stats" id="stats"></div>
+      </section>
+
+      <section class="card diagnostics">
+        <div class="section-head">
+          <h2>Experiments</h2>
+          <div>
+            <button id="runTests">Run all experiments</button>
+            <button id="copyResults" class="ghost">Copy results JSON</button>
+          </div>
+        </div>
+        <p class="muted">
+          Each test is executed in this browser against live URLs. TikTok tests use the last resolved TikTok video (or the URL above if it is a
+          TikTok link). Results are measured, not assumed.
+        </p>
+        <table id="results">
+          <thead>
+            <tr>
+              <th>Test</th>
+              <th>Expected</th>
+              <th>Result</th>
+              <th>Details / explanation</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+
+      <section class="card log-card">
+        <div class="section-head">
+          <h2>Log</h2>
+          <button id="clearLog" class="ghost">Clear</button>
+        </div>
+        <pre id="log"></pre>
+      </section>
+    </main>
+    
+  </body>
+</html>
