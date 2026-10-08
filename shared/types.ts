@@ -235,6 +235,8 @@ export interface SessionStatus {
   /** While a QR login is pending: the current QR code as a data: URL (PNG), refreshed as TikTok rotates it */
   qr?: string;
   qrState?: 'new' | 'scanned' | 'expired';
+  /** ms epoch when TikTok retires the current QR (the server fetches a new one just before) */
+  qrExpiresAt?: number;
   /** While a QR login shows no QR: a small screenshot (data: URL, JPEG) of what TikTok served the server */
   pageShot?: string;
 }

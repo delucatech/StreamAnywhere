@@ -218,6 +218,7 @@ export function sessionStatus(): SessionStatus {
     if (s.loginMode === 'qr') {
       base.qr = s.qr;
       base.qrState = s.qrState;
+      if (s.qr && s.qrExpireAt) base.qrExpiresAt = s.qrExpireAt;
       if (!s.qr && s.qrPageShot) base.pageShot = s.qrPageShot;
       base.message = s.qrState === 'scanned' ? 'Scanned – confirm the sign-in in the TikTok app.' : s.qr ? 'Scan the QR code with the TikTok app.' : s.qrPageHint ? `TikTok did not show a QR code. The page says: ${s.qrPageHint}` : 'Loading the QR code…';
     } else base.message = 'Finish signing in inside the TikTok window that opened on the server machine.';
@@ -376,15 +377,31 @@ async function qrLoop(page: Page, browser: Browser, log: (m: string) => void): P
       // Reload for a fresh QR only when TikTok says the current one expired (or it is past the expiry
       // it announced). Never while a scan is being confirmed: a reload there threw the login away.
       const scanning = (s.qrState as string) === 'scanned' && Date.now() - (s.scannedAt || 0) < 90_000;
-      const expired = (s.qrState as string) === 'expired' || /expired|refresh/.test(text) || (s.qrExpireAt ? Date.now() > s.qrExpireAt + 3000 : Date.now() - lastReload > QR_RELOAD_MS);
+      // Refresh a little BEFORE TikTok's expiry (codes live ~55 s; a reload on a small VM takes as long),
+      // so there is always a scannable code on screen.
+      const expired = (s.qrState as string) === 'expired' || /expired|refresh/.test(text) || (s.qrExpireAt ? Date.now() > s.qrExpireAt - 6000 : Date.now() - lastReload > QR_RELOAD_MS);
       if (!scanning && expired) {
         s.qr = undefined;
         s.qrExpireAt = undefined;
         s.scannedAt = undefined;
-        log('QR expired - loading a fresh one');
-        await page.goto(QR_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => undefined);
-        lastReload = Date.now();
         s.qrState = 'new';
+        // TikTok's page shows an "expired, tap to refresh" overlay on the QR; a click on it asks for a
+        // new code without reloading (faster, keeps the session). Reload only if that brings nothing.
+        const clicked = await page
+          .click('[data-e2e="qr-code"]', { delay: 30 })
+          .then(() => true)
+          .catch(() => false);
+        let fresh = false;
+        for (let i = 0; clicked && i < 8 && !fresh; i++) {
+          await new Promise((r) => setTimeout(r, 500));
+          fresh = Boolean(s.qr);
+        }
+        if (fresh) log('QR expired - refreshed in place');
+        else {
+          log('QR expired - loading a fresh one');
+          await page.goto(QR_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => undefined);
+          lastReload = Date.now();
+        }
       } else if (/confirm|scanned/.test(text) && !/1\. scan with/.test(text)) {
         s.qrState = 'scanned';
         s.scannedAt = s.scannedAt || Date.now();

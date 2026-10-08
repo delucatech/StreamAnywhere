@@ -281,8 +281,8 @@ function renderSession(): void {
     if (img && el.sessionQrImg.src !== img) el.sessionQrImg.src = img;
     el.sessionQrImg.classList.toggle('page-shot', !s.qr && Boolean(s.pageShot));
     if (!img) el.sessionQrImg.removeAttribute('src');
-    el.sessionQrHint.textContent =
-      s.qrState === 'scanned' ? 'Scanned – confirm on your phone, then wait a moment' : s.qr ? 'Waiting for the scan…' : s.pageShot ? 'No QR code yet – this is what TikTok shows the server; retrying automatically' : 'Loading the QR code… (up to a minute)';
+    qrExpiresAt = s.qr ? s.qrExpiresAt || 0 : 0;
+    renderQrHint(s);
   }
   const idle = s.supported && s.state !== 'logged_in' && s.state !== 'login_pending';
   el.sessionLogin.classList.toggle('hidden', !idle);
@@ -291,6 +291,24 @@ function renderSession(): void {
   el.navProfileLabel.textContent = s.state === 'logged_in' ? `@${(s.username || 'me').slice(0, 12)}` : s.state === 'login_pending' ? 'Signing in…' : 'Profile';
   el.navProfile.classList.toggle('active', s.state === 'logged_in');
 }
+let qrExpiresAt = 0;
+function renderQrHint(s: SessionStatus): void {
+  const left = qrExpiresAt ? Math.max(0, Math.round((qrExpiresAt - Date.now()) / 1000)) : 0;
+  el.sessionQrHint.textContent =
+    s.qrState === 'scanned'
+      ? 'Scanned – confirm on your phone, then wait a moment'
+      : s.qr
+        ? left > 0
+          ? `Scan within ${left} s – a new code appears automatically`
+          : 'Getting a new code…'
+        : s.pageShot
+          ? 'No QR code yet – this is what TikTok shows the server; retrying automatically'
+          : 'Loading the QR code… (up to a minute)';
+}
+window.setInterval(() => {
+  if (state.session && !el.session.classList.contains('hidden') && !el.sessionQr.classList.contains('hidden')) renderQrHint(state.session);
+}, 1000);
+
 async function refreshSession(announce = false): Promise<SessionStatus | undefined> {
   try {
     const prev = state.session?.state;
