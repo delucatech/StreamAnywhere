@@ -138,14 +138,22 @@ select:focus,
   scroll-snap-align: start;
   scroll-snap-stop: always;
   background: #000;
-  display: grid;
-  place-items: center;
+  /* flex, not grid: a grid's auto row makes the video's height:100% resolve to auto, so the video
+     took its poster's full height and was clipped instead of scaled to fit */
+  display: flex;
+  align-items: center;
+  justify-content: center;
   overflow: hidden;
 }
 .item video {
+  display: block;
   width: 100%;
   height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  /* the frame is always fully visible at its own aspect ratio; black bars fill the rest */
   object-fit: contain;
+  object-position: center;
   background: #000;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;

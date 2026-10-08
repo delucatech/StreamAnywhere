@@ -744,6 +744,27 @@ el.feed.addEventListener(
   { passive: true },
 );
 
+// ---------- resize: keep the active video exactly in view ----------
+// Items are sized to the feed viewport (height: 100%), so when the window, orientation or
+// fullscreen state changes, the scroll offset must be re-aligned to the active item or the video
+// ends up partly off-screen. The video element itself keeps its aspect ratio (object-fit: contain).
+let resizeTimer = 0;
+function realign(): void {
+  if (state.active < 0) return;
+  const top = state.active * el.feed.clientHeight;
+  if (Math.abs(el.feed.scrollTop - top) > 1) el.feed.scrollTo({ top, behavior: 'auto' });
+}
+function onViewportChange(): void {
+  realign();
+  clearTimeout(resizeTimer);
+  resizeTimer = window.setTimeout(realign, 150); // after the browser settles (mobile toolbars, snap)
+}
+window.addEventListener('resize', onViewportChange);
+window.addEventListener('orientationchange', onViewportChange);
+document.addEventListener('fullscreenchange', onViewportChange);
+window.visualViewport?.addEventListener('resize', onViewportChange);
+new ResizeObserver(onViewportChange).observe(el.feed);
+
 // Pause when the tab is hidden; resume on return.
 document.addEventListener('visibilitychange', () => {
   const cur = state.entries[state.active];
