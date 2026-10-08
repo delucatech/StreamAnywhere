@@ -80,6 +80,9 @@ interface SessionInternal {
   qrPageShot?: string;
   /** Last answer of TikTok's QR API seen on the page (status + body snippet) */
   qrApi?: string;
+  /** Expiry of the current QR (ms epoch) as announced by TikTok's API; the page is only reloaded after it */
+  qrExpireAt?: number;
+  scannedAt?: number;
   headless?: Browser;
   feedPage?: Page;
   explorePage?: Page;
@@ -286,6 +289,8 @@ async function startQrLogin(log: (m: string) => void): Promise<SessionStatus> {
   s.qr = undefined;
   s.qrPageHint = undefined;
   s.qrPageShot = undefined;
+  s.qrExpireAt = undefined;
+  s.scannedAt = undefined;
   s.qrState = 'new';
   s.loginStartedAt = Date.now();
   const browser = await headlessBrowser();
@@ -317,10 +322,15 @@ async function startQrLogin(log: (m: string) => void): Promise<SessionStatus> {
           s.qrState = 'new';
           s.qrPageHint = undefined;
           s.qrPageShot = undefined;
-          log(`QR code received from TikTok's API (${d.qrcode.length} chars)`);
+          s.scannedAt = undefined;
+          s.qrExpireAt = typeof d.expire_time === 'number' && d.expire_time > 1e9 ? d.expire_time * 1000 : Date.now() + 110_000;
+          log(`QR code received from TikTok's API (${d.qrcode.length} chars, valid ${Math.round((s.qrExpireAt - Date.now()) / 1000)} s)`);
         } else if (typeof d.status === 'string') {
-          if (d.status === 'scanned' || d.status === 'confirmed') s.qrState = 'scanned';
-          else if (d.status === 'expired') s.qrState = 'expired';
+          if (d.status === 'scanned' || d.status === 'confirmed') {
+            if (s.qrState !== 'scanned') log(`QR ${d.status} - waiting for TikTok to finish the sign-in`);
+            s.qrState = 'scanned';
+            s.scannedAt = s.scannedAt || Date.now();
+          } else if (d.status === 'expired') s.qrState = 'expired';
         } else if (json?.message === 'error' || d.error_code) {
           log('QR API error: ' + s.qrApi);
         }
@@ -363,13 +373,21 @@ async function qrLoop(page: Page, browser: Browser, log: (m: string) => void): P
         }
       }
       const text = String(await page.evaluate('document.body.innerText').catch(() => '')).toLowerCase();
-      if ((s.qrState as string) === 'expired' || /expired|refresh/.test(text) || Date.now() - lastReload > QR_RELOAD_MS) {
+      // Reload for a fresh QR only when TikTok says the current one expired (or it is past the expiry
+      // it announced). Never while a scan is being confirmed: a reload there threw the login away.
+      const scanning = (s.qrState as string) === 'scanned' && Date.now() - (s.scannedAt || 0) < 90_000;
+      const expired = (s.qrState as string) === 'expired' || /expired|refresh/.test(text) || (s.qrExpireAt ? Date.now() > s.qrExpireAt + 3000 : Date.now() - lastReload > QR_RELOAD_MS);
+      if (!scanning && expired) {
         s.qr = undefined;
+        s.qrExpireAt = undefined;
+        s.scannedAt = undefined;
+        log('QR expired - loading a fresh one');
         await page.goto(QR_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => undefined);
         lastReload = Date.now();
         s.qrState = 'new';
       } else if (/confirm|scanned/.test(text) && !/1\. scan with/.test(text)) {
         s.qrState = 'scanned';
+        s.scannedAt = s.scannedAt || Date.now();
       }
       const qr = s.qr && (s.qrState as string) !== 'expired' ? undefined : await captureQr(page);
       if (s.qr && !qr) {
@@ -396,7 +414,7 @@ async function qrLoop(page: Page, browser: Browser, log: (m: string) => void): P
           lastReload = Date.now();
         }
       }
-      await new Promise((r) => setTimeout(r, 2000));
+      await new Promise((r) => setTimeout(r, (s.qrState as string) === 'scanned' ? 700 : 2000));
     }
     if (s.qrPage === page && s.state === 'login_pending') {
       s.state = 'none';

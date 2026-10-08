@@ -2,12 +2,15 @@
  * Feed page: a TikTok-style vertical stream.
  *
  *  - Source "Explore" (no sign-in) or "For You" (the signed-in account's feed; needs the Node
- *    server with a Chrome/Edge session, see server/src/session.ts).
+ *    server with a Chrome/Edge session, see server/src/session.ts). Tabs in the transparent top bar.
  *  - One full-height <video> per item, scroll-snap; the item that fills the viewport plays, the
- *    others pause. Items near the end trigger the next batch.
- *  - Tap/click a video to pause/resume. ↑/↓ (or J/K) move, Space pauses, M mutes, F fullscreen,
- *    D downloads.
- *  - Auto-scroll: when on, a finished video advances to the next one; when off, it loops.
+ *    others pause. Items near the end trigger the next batch, and a batch that brings nothing is
+ *    retried with a growing delay, so the feed never "ends" (like the app).
+ *  - Swipe (touch) or drag (mouse) up/down = next/previous video. Tap/click = pause/resume.
+ *    ↑/↓ (or J/K) move, Space pauses, M mutes, F fullscreen, D downloads, A toggles auto-scroll,
+ *    W hides the bars.
+ *  - Right-hand action column: sound, save (download), auto-scroll, fullscreen. Bottom bar: Home,
+ *    Friends, +, Inbox (placeholders for later), Profile (sign-in panel).
  *  - Download: fetches the cookie-free CDN URL (CORS *) as a blob and saves it as @author_id.mp4;
  *    falls back to the server proxy when the direct fetch fails.
  *
@@ -26,12 +29,22 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
 const el = {
   app: $('app'),
   feed: $('feed'),
-  source: $<HTMLSelectElement>('source'),
-  category: $<HTMLSelectElement>('category'),
-  autoscroll: $<HTMLInputElement>('autoscroll'),
-  signin: $<HTMLButtonElement>('signin'),
-  fullwindow: $<HTMLButtonElement>('fullwindow'),
-  fullscreen: $<HTMLButtonElement>('fullscreen'),
+  tabs: $('tabs'),
+  chips: $('chips'),
+  searchBtn: $<HTMLButtonElement>('searchBtn'),
+  actMute: $<HTMLButtonElement>('actMute'),
+  actMuteIco: $('actMuteIco'),
+  actDownload: $<HTMLButtonElement>('actDownload'),
+  actDownloadIco: $('actDownloadIco'),
+  actAuto: $<HTMLButtonElement>('actAuto'),
+  actAutoLabel: $('actAutoLabel'),
+  actFull: $<HTMLButtonElement>('actFull'),
+  navHome: $<HTMLButtonElement>('navHome'),
+  navFriends: $<HTMLButtonElement>('navFriends'),
+  navPlus: $<HTMLButtonElement>('navPlus'),
+  navInbox: $<HTMLButtonElement>('navInbox'),
+  navProfile: $<HTMLButtonElement>('navProfile'),
+  navProfileLabel: $('navProfileLabel'),
   session: $('session'),
   sessionText: $('sessionText'),
   sessionLogin: $<HTMLButtonElement>('sessionLogin'),
@@ -54,7 +67,6 @@ interface Entry {
   video: HTMLVideoElement;
   progress: HTMLElement;
   err: HTMLElement;
-  dlBtn: HTMLButtonElement;
   /** Which URL the video element currently uses */
   src?: { url: string; kind: 'direct' | 'proxy' };
   triedProxy: boolean;
@@ -96,6 +108,11 @@ const state = {
   session: undefined as SessionStatus | undefined,
   sessionPoll: 0,
   userPaused: false,
+  /** The viewer asked for a video past the end; advance as soon as one arrives */
+  wantNext: false,
+  /** Consecutive batches that brought nothing (drives the retry delay) */
+  emptyBatches: 0,
+  retryTimer: 0,
 };
 
 // ---------- helpers ----------
@@ -109,6 +126,7 @@ function toast(msg: string, isError = false, ms = 3500): void {
 }
 const fmtCount = (n?: number): string => (n === undefined ? '' : n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : String(n));
 const errMsg = (e: unknown): string => (e instanceof ApiError ? `${e.message} (HTTP ${e.status})` : (e as Error)?.message || String(e));
+const esc = (s: string): string => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 
 /** Prefer H.264 (the formats are already sorted that way), then anything with a direct or proxy URL. */
 function pickFormat(item: FeedItem): MediaFormat | undefined {
@@ -122,50 +140,69 @@ function sourceCandidates(item: FeedItem): { url: string; kind: 'direct' | 'prox
   if (f.proxyUrl) out.push({ url: apiUrl(f.proxyUrl), kind: 'proxy' });
   return out;
 }
+const activeEntry = (): Entry | undefined => state.entries[state.active];
+/** Timestamp of the last user-driven scroll (touch, wheel, key, drag); realign() stays out of the way for a while after it. */
+let userScrollAt = 0;
+/** Clicks before this time are the tail of a drag or a seek and must not toggle pause. */
+let suppressClickUntil = 0;
 
-// ---------- setup ----------
-for (const c of EXPLORE_CATEGORIES) {
-  const o = document.createElement('option');
-  o.value = String(c.id);
-  o.textContent = c.label;
-  el.category.appendChild(o);
+// ---------- top bar: source tabs + explore categories ----------
+function renderSourceUi(): void {
+  for (const b of el.tabs.querySelectorAll<HTMLButtonElement>('.tab')) b.classList.toggle('active', b.dataset.source === prefs.source);
+  el.chips.classList.toggle('hidden', prefs.source !== 'explore');
+  for (const c of el.chips.querySelectorAll<HTMLButtonElement>('.chip')) c.classList.toggle('active', Number(c.dataset.id) === prefs.category);
 }
-el.source.value = prefs.source;
-el.category.value = String(prefs.category);
-el.autoscroll.checked = prefs.autoscroll;
-updateSourceUi();
-
-el.source.addEventListener('change', () => {
-  const src = el.source.value as FeedSource;
+function setSource(src: FeedSource, announce = true): void {
   if (src === 'foryou' && state.session?.state !== 'logged_in') {
-    // Keep the selector on explore until a session exists; the panel switches it once signed in.
-    el.source.value = prefs.source;
+    // Keep Explore until a session exists; the panel switches once signed in.
     void openSessionPanel();
     return;
   }
+  if (prefs.source === src) return;
   prefs.source = src;
   savePrefs();
-  updateSourceUi();
+  renderSourceUi();
+  if (announce) toast(src === 'foryou' ? 'For You' : 'Explore');
   void reload();
+}
+for (const c of EXPLORE_CATEGORIES) {
+  const b = document.createElement('button');
+  b.className = 'chip';
+  b.type = 'button';
+  b.dataset.id = String(c.id);
+  b.textContent = c.label;
+  b.addEventListener('click', () => {
+    if (prefs.category === c.id) return;
+    prefs.category = c.id;
+    savePrefs();
+    renderSourceUi();
+    void reload();
+  });
+  el.chips.appendChild(b);
+}
+el.tabs.addEventListener('click', (e) => {
+  const b = (e.target as HTMLElement).closest<HTMLButtonElement>('.tab');
+  if (b?.dataset.source) setSource(b.dataset.source as FeedSource);
 });
-el.category.addEventListener('change', () => {
-  prefs.category = Number(el.category.value);
-  savePrefs();
-  void reload();
+el.searchBtn.addEventListener('click', () => toast('Search is coming later'));
+renderSourceUi();
+
+// ---------- actions column + bottom bar ----------
+el.actMute.addEventListener('click', () => toggleMute());
+el.actDownload.addEventListener('click', () => {
+  const cur = activeEntry();
+  if (cur) void download(cur);
 });
-el.autoscroll.addEventListener('change', () => {
-  prefs.autoscroll = el.autoscroll.checked;
-  savePrefs();
-  applyLoopMode();
-  toast(prefs.autoscroll ? 'Auto-scroll on: next video plays when this one ends' : 'Auto-scroll off: videos loop');
+el.actAuto.addEventListener('click', () => toggleAutoscroll());
+el.actFull.addEventListener('click', () => toggleFullscreen());
+el.navHome.addEventListener('click', () => {
+  if (state.active > 0) goTo(0);
+  else void reload();
 });
-el.fullwindow.addEventListener('click', () => {
-  const on = el.app.classList.toggle('fullwindow');
-  el.fullwindow.setAttribute('aria-pressed', String(on));
-  if (on) toast('Full window. Press Esc or W to show the bar again');
-});
-el.fullscreen.addEventListener('click', () => toggleFullscreen());
-el.signin.addEventListener('click', () => void openSessionPanel());
+el.navFriends.addEventListener('click', () => toast('Friends is coming later'));
+el.navPlus.addEventListener('click', () => toast('Upload is coming later'));
+el.navInbox.addEventListener('click', () => toast('Inbox is coming later'));
+el.navProfile.addEventListener('click', () => void openSessionPanel());
 el.sessionClose.addEventListener('click', () => closeSessionPanel());
 el.sessionRefresh.addEventListener('click', () => void refreshSession(true));
 el.sessionLogin.addEventListener('click', () => void startLogin('qr'));
@@ -176,8 +213,19 @@ el.start.addEventListener('click', (e) => {
   if (e.target === el.start) start();
 });
 
-function updateSourceUi(): void {
-  el.category.classList.toggle('hidden', prefs.source !== 'explore');
+function syncActionButtons(): void {
+  el.actMuteIco.textContent = prefs.muted ? '🔇' : '🔊';
+  el.actAuto.classList.toggle('on', prefs.autoscroll);
+  el.actAutoLabel.textContent = prefs.autoscroll ? 'Auto on' : 'Auto off';
+}
+syncActionButtons();
+
+function toggleAutoscroll(): void {
+  prefs.autoscroll = !prefs.autoscroll;
+  savePrefs();
+  for (const e of state.entries) e.video.loop = !prefs.autoscroll;
+  syncActionButtons();
+  toast(prefs.autoscroll ? 'Auto-scroll on: next video plays when this one ends' : 'Auto-scroll off: videos loop');
 }
 
 function toggleFullscreen(): void {
@@ -185,11 +233,16 @@ function toggleFullscreen(): void {
   else void el.app.requestFullscreen().catch((e) => toast(`Fullscreen refused: ${(e as Error).message}`, true));
 }
 
+function toggleBars(): void {
+  const on = el.app.classList.toggle('fullwindow');
+  if (on) toast('Bars hidden. Press W or Esc to show them again');
+}
+
 function start(): void {
   state.started = true;
   el.start.classList.add('hidden');
   el.feed.focus();
-  const cur = state.entries[state.active];
+  const cur = activeEntry();
   if (cur) void playEntry(cur);
 }
 
@@ -211,6 +264,7 @@ function renderSession(): void {
   } else if (s.state === 'login_pending' && s.loginMode === 'qr') {
     lines.push('<b>Scan to sign in.</b>');
     lines.push('In the TikTok app: Profile → ☰ menu → My QR code → scan icon (or point the in-app camera at this code), then confirm. The code refreshes by itself; this page updates automatically.');
+    if (!s.qr && /did not show/i.test(s.message || '')) lines.push(`<span style="color:var(--muted)">${esc(s.message || '')}</span>`);
   } else if (s.state === 'login_pending') {
     lines.push('<b>Waiting for sign-in…</b>');
     lines.push('A TikTok window opened on the machine running the server. Sign in there (any method). This page updates automatically.');
@@ -227,18 +281,16 @@ function renderSession(): void {
     if (img && el.sessionQrImg.src !== img) el.sessionQrImg.src = img;
     el.sessionQrImg.classList.toggle('page-shot', !s.qr && Boolean(s.pageShot));
     if (!img) el.sessionQrImg.removeAttribute('src');
-    el.sessionQrHint.textContent = s.qrState === 'scanned' ? 'Scanned – confirm on your phone' : s.qr ? 'Waiting for the scan…' : s.pageShot ? 'No QR code yet – this is what TikTok shows the server; retrying automatically' : 'Loading the QR code…';
+    el.sessionQrHint.textContent =
+      s.qrState === 'scanned' ? 'Scanned – confirm on your phone, then wait a moment' : s.qr ? 'Waiting for the scan…' : s.pageShot ? 'No QR code yet – this is what TikTok shows the server; retrying automatically' : 'Loading the QR code… (up to a minute)';
   }
   const idle = s.supported && s.state !== 'logged_in' && s.state !== 'login_pending';
   el.sessionLogin.classList.toggle('hidden', !idle);
   el.sessionLoginWindow.classList.toggle('hidden', !idle);
   el.sessionLogout.classList.toggle('hidden', !s.supported || s.state === 'none' || s.state === 'unsupported');
-  el.signin.textContent = s.state === 'logged_in' ? `@${s.username || 'account'}` : s.state === 'login_pending' ? 'Signing in…' : 'Sign in';
+  el.navProfileLabel.textContent = s.state === 'logged_in' ? `@${(s.username || 'me').slice(0, 12)}` : s.state === 'login_pending' ? 'Signing in…' : 'Profile';
+  el.navProfile.classList.toggle('active', s.state === 'logged_in');
 }
-function esc(s: string): string {
-  return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
-}
-
 async function refreshSession(announce = false): Promise<SessionStatus | undefined> {
   try {
     const prev = state.session?.state;
@@ -246,13 +298,11 @@ async function refreshSession(announce = false): Promise<SessionStatus | undefin
     renderSession();
     if (announce) toast(state.session.message || state.session.state);
     if (state.session.state === 'logged_in' && prev === 'login_pending') {
-      // Freshly signed in: switch to For You.
-      prefs.source = 'foryou';
-      el.source.value = 'foryou';
-      savePrefs();
-      updateSourceUi();
       closeSessionPanel();
       toast(`Signed in as @${state.session.username || '?'} – loading your For You feed`);
+      prefs.source = 'foryou';
+      savePrefs();
+      renderSourceUi();
       void reload();
     }
     return state.session;
@@ -288,6 +338,7 @@ async function startLogin(mode: LoginMode): Promise<void> {
     pollSession();
   } catch (e) {
     toast(`Sign-in could not start: ${errMsg(e)}`, true, 6000);
+    renderSession();
   } finally {
     el.sessionLogin.disabled = el.sessionLoginWindow.disabled = false;
   }
@@ -301,9 +352,8 @@ async function signOut(): Promise<void> {
     renderSession();
     if (prefs.source === 'foryou') {
       prefs.source = 'explore';
-      el.source.value = 'explore';
       savePrefs();
-      updateSourceUi();
+      renderSourceUi();
       void reload();
     }
     toast('Signed out');
@@ -318,6 +368,7 @@ async function signOut(): Promise<void> {
 // ---------- feed loading ----------
 async function reload(): Promise<void> {
   state.generation++;
+  clearTimeout(state.retryTimer);
   for (const e of state.entries) {
     e.video.pause();
     e.video.removeAttribute('src');
@@ -327,21 +378,24 @@ async function reload(): Promise<void> {
   state.ids = new Set();
   state.active = -1;
   state.exhausted = false;
+  state.emptyBatches = 0;
+  state.wantNext = false;
   el.feed.innerHTML = '';
   el.feed.scrollTop = 0;
   await loadMore();
 }
 
-async function loadMore(): Promise<void> {
-  if (state.loading || state.exhausted) return;
+/** Fetches the next batch; returns how many videos were added. */
+async function loadMore(): Promise<number> {
+  if (state.loading || state.exhausted) return 0;
   state.loading = true;
   const gen = state.generation;
   el.loading.classList.remove('hidden');
   el.loading.textContent = state.entries.length ? 'Loading more…' : 'Loading feed…';
+  let added = 0;
   try {
     const r = await api.feed({ source: prefs.source, category: prefs.source === 'explore' ? prefs.category : undefined, count: 12 });
-    if (gen !== state.generation) return;
-    let added = 0;
+    if (gen !== state.generation) return 0;
     for (const item of r.items) {
       if (state.ids.has(item.id) || !sourceCandidates(item).length) continue;
       state.ids.add(item.id);
@@ -349,25 +403,47 @@ async function loadMore(): Promise<void> {
       added++;
     }
     for (const w of r.warnings) console.warn('[feed]', w);
-    if (!added && !r.items.length) {
-      if (!r.hasMore) state.exhausted = true;
-      else if (r.warnings.length) toast(r.warnings[r.warnings.length - 1], true, 5000);
-    }
-    if (!state.entries.length) showEmpty(r.warnings[0] || 'The feed returned no playable videos. Try again or pick another category.');
+    if (!added) {
+      state.emptyBatches++;
+      if (!r.items.length && !r.hasMore) state.exhausted = true;
+    } else state.emptyBatches = 0;
+    if (!state.entries.length && state.emptyBatches >= 3) showEmpty(r.warnings[0] || 'The feed returned no playable videos. Try again or pick another category.');
     if (state.active < 0 && state.entries.length) setActive(0);
   } catch (e) {
-    if (gen !== state.generation) return;
+    if (gen !== state.generation) return 0;
+    state.emptyBatches++;
     const msg = errMsg(e);
-    toast(`Feed failed: ${msg}`, true, 7000);
-    if (!state.entries.length) showEmpty(`Feed failed: ${msg}`);
+    console.warn('[feed] batch failed:', msg);
+    if (state.emptyBatches === 1 || state.emptyBatches % 4 === 0) toast(`Feed: ${msg} – retrying`, true, 5000);
+    if (!state.entries.length && state.emptyBatches >= 3) showEmpty(`Feed failed: ${msg}`);
     if (prefs.source === 'foryou' && /not signed in|session/i.test(msg)) void openSessionPanel();
   } finally {
     state.loading = false;
     el.loading.classList.add('hidden');
   }
+  if (added && state.wantNext) {
+    state.wantNext = false;
+    goTo(state.active + 1);
+  }
+  scheduleMoreIfNeeded();
+  return added;
+}
+
+/**
+ * Like the app, the feed never ends: when the viewer is close to the last loaded video and the
+ * previous batch brought nothing (TikTok's soft limits, duplicates), retry with a growing delay.
+ */
+function scheduleMoreIfNeeded(): void {
+  clearTimeout(state.retryTimer);
+  if (state.exhausted || state.loading) return;
+  const nearEnd = state.active >= state.entries.length - 3;
+  if (!nearEnd) return;
+  const delay = state.emptyBatches === 0 ? 0 : Math.min(20_000, 3000 * 2 ** (state.emptyBatches - 1));
+  state.retryTimer = window.setTimeout(() => void loadMore(), delay);
 }
 
 function showEmpty(text: string): void {
+  if (el.feed.querySelector('.empty-state')) return;
   const d = document.createElement('div');
   d.className = 'item empty-state';
   d.textContent = text;
@@ -422,65 +498,80 @@ function makeEntry(item: FeedItem): Entry {
   }
   const meta = document.createElement('div');
   meta.className = 'meta';
-  const f = pickFormat(item);
-  meta.textContent = [item.music ? `♫ ${item.music}` : '', item.stats.plays !== undefined ? `${fmtCount(item.stats.plays)} plays` : '', item.stats.likes !== undefined ? `${fmtCount(item.stats.likes)} likes` : '', f ? f.id : '']
+  meta.textContent = [item.music ? `♫ ${item.music}` : '', item.stats.plays !== undefined ? `${fmtCount(item.stats.plays)} plays` : '', item.stats.likes !== undefined ? `${fmtCount(item.stats.likes)} likes` : '']
     .filter(Boolean)
     .join(' · ');
   info.appendChild(meta);
   root.appendChild(info);
 
-  const side = document.createElement('div');
-  side.className = 'side';
-  const muteBtn = sideButton(prefs.muted ? '🔇' : '🔊', 'Mute / unmute (M)', () => toggleMute());
-  muteBtn.dataset.role = 'mute';
-  const dlBtn = sideButton('⬇', 'Download this video (D)', () => void download(entry));
-  dlBtn.dataset.role = 'download';
-  side.appendChild(muteBtn);
-  side.appendChild(dlBtn);
-  root.appendChild(side);
-
+  // Progress bar: click or drag anywhere on it to seek (touch too; it never scrolls the feed).
   const progress = document.createElement('div');
   progress.className = 'progress';
   const bar = document.createElement('i');
   progress.appendChild(bar);
   root.appendChild(progress);
+  let seeking = false;
+  const seekTo = (clientX: number) => {
+    const r = progress.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (clientX - r.left) / Math.max(1, r.width)));
+    bar.style.width = `${ratio * 100}%`;
+    if (Number.isFinite(video.duration) && video.duration > 0) video.currentTime = ratio * video.duration;
+  };
+  progress.addEventListener('pointerdown', (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    seeking = true;
+    root.classList.add('seeking');
+    progress.setPointerCapture(e.pointerId);
+    suppressClickUntil = Date.now() + 600;
+    userScrollAt = Date.now();
+    seekTo(e.clientX);
+  });
+  progress.addEventListener('pointermove', (e) => {
+    if (!seeking) return;
+    e.stopPropagation();
+    userScrollAt = Date.now();
+    seekTo(e.clientX);
+  });
+  const endSeek = (e: PointerEvent) => {
+    if (!seeking) return;
+    seeking = false;
+    root.classList.remove('seeking');
+    seekTo(e.clientX);
+    suppressClickUntil = Date.now() + 400;
+    if (activeEntry() === entry && !state.userPaused && video.paused) void playEntry(entry);
+  };
+  progress.addEventListener('pointerup', endSeek);
+  progress.addEventListener('pointercancel', endSeek);
+  // keep the feed's own drag/click handlers out of it
+  for (const type of ['mousedown', 'touchstart', 'click'] as const) progress.addEventListener(type, (e) => e.stopPropagation(), { passive: type === 'touchstart' });
 
   const err = document.createElement('div');
   err.className = 'err hidden';
   root.appendChild(err);
 
-  const entry: Entry = { item, root, video, progress: bar, err, dlBtn, triedProxy: false, failed: false };
+  const entry: Entry = { item, root, video, progress: bar, err, triedProxy: false, failed: false };
 
-  video.addEventListener('click', () => togglePause(entry));
+  video.addEventListener('click', () => {
+    if (suppressClickUntil > Date.now()) return; // the click that ends a drag
+    togglePause(entry);
+  });
   video.addEventListener('timeupdate', () => {
-    if (video.duration) bar.style.width = `${(100 * video.currentTime) / video.duration}%`;
+    if (video.duration && !seeking) bar.style.width = `${(100 * video.currentTime) / video.duration}%`;
   });
   video.addEventListener('ended', () => {
-    if (state.entries[state.active] !== entry) return;
+    if (activeEntry() !== entry) return;
     if (prefs.autoscroll) goTo(state.active + 1);
   });
   video.addEventListener('error', () => onVideoError(entry));
   video.addEventListener('play', () => root.classList.remove('paused'));
   video.addEventListener('pause', () => {
-    if (state.entries[state.active] === entry && state.userPaused) root.classList.add('paused');
+    if (activeEntry() === entry && state.userPaused) root.classList.add('paused');
   });
 
   el.feed.appendChild(root);
   observer.observe(root);
   return entry;
-}
-
-function sideButton(icon: string, title: string, onClick: () => void): HTMLButtonElement {
-  const b = document.createElement('button');
-  b.className = 'side-btn';
-  b.type = 'button';
-  b.title = title;
-  b.textContent = icon;
-  b.addEventListener('click', (e) => {
-    e.stopPropagation();
-    onClick();
-  });
-  return b;
 }
 
 function attachSource(entry: Entry, which: 'direct' | 'proxy' | 'auto' = 'auto'): boolean {
@@ -501,13 +592,13 @@ function onVideoError(entry: Entry): void {
     entry.triedProxy = true;
     console.warn(`[feed] direct URL failed for ${entry.item.id} (${detail}); retrying through the proxy`);
     attachSource(entry, 'proxy');
-    if (state.entries[state.active] === entry && state.started) void playEntry(entry);
+    if (activeEntry() === entry && state.started) void playEntry(entry);
     return;
   }
   entry.failed = true;
   entry.err.textContent = `This video could not be loaded (${detail}).`;
   entry.err.classList.remove('hidden');
-  if (state.entries[state.active] === entry && prefs.autoscroll) window.setTimeout(() => state.entries[state.active] === entry && goTo(state.active + 1), 1500);
+  if (activeEntry() === entry && prefs.autoscroll) window.setTimeout(() => activeEntry() === entry && goTo(state.active + 1), 1500);
 }
 
 async function playEntry(entry: Entry): Promise<void> {
@@ -523,7 +614,7 @@ async function playEntry(entry: Entry): Promise<void> {
       // Autoplay with sound was refused: continue muted and tell the user.
       prefs.muted = true;
       savePrefs();
-      syncMuteButtons();
+      syncActionButtons();
       entry.video.muted = true;
       toast('Playing muted (browser autoplay rule). Press M or the speaker button for sound.');
       try {
@@ -539,7 +630,7 @@ async function playEntry(entry: Entry): Promise<void> {
 
 function setActive(idx: number): void {
   if (idx < 0 || idx >= state.entries.length) return;
-  const prev = state.entries[state.active];
+  const prev = activeEntry();
   if (prev && prev !== state.entries[idx]) {
     prev.video.pause();
     prev.root.classList.remove('paused');
@@ -565,12 +656,16 @@ function setActive(idx: number): void {
       e.src = undefined;
     }
   });
-  if (idx >= state.entries.length - 3) void loadMore();
+  scheduleMoreIfNeeded();
 }
 
 function goTo(idx: number): void {
   if (idx < 0) return;
   if (idx >= state.entries.length) {
+    // Past the end: fetch more and advance when it arrives (the feed never stops).
+    state.wantNext = true;
+    el.loading.classList.remove('hidden');
+    el.loading.textContent = 'Loading more…';
     void loadMore();
     return;
   }
@@ -594,19 +689,12 @@ function togglePause(entry: Entry): void {
   }
 }
 
-function applyLoopMode(): void {
-  for (const e of state.entries) e.video.loop = !prefs.autoscroll;
-}
-
 function toggleMute(): void {
   prefs.muted = !prefs.muted;
   savePrefs();
   for (const e of state.entries) e.video.muted = prefs.muted;
-  syncMuteButtons();
+  syncActionButtons();
   toast(prefs.muted ? 'Muted' : 'Sound on');
-}
-function syncMuteButtons(): void {
-  for (const b of el.feed.querySelectorAll<HTMLButtonElement>('button[data-role="mute"]')) b.textContent = prefs.muted ? '🔇' : '🔊';
 }
 
 // ---------- download ----------
@@ -615,8 +703,8 @@ async function download(entry: Entry): Promise<void> {
   const cands = sourceCandidates(item);
   if (!cands.length) return toast('No downloadable URL for this video', true);
   const name = `@${(item.author.uniqueId || 'tiktok').replace(/[^\w.-]+/g, '_')}_${item.id}.mp4`;
-  entry.dlBtn.disabled = true;
-  entry.dlBtn.textContent = '…';
+  el.actDownload.disabled = true;
+  el.actDownloadIco.textContent = '…';
   const errors: string[] = [];
   try {
     for (const c of cands) {
@@ -633,7 +721,7 @@ async function download(entry: Entry): Promise<void> {
             if (done) break;
             chunks.push(value as BlobPart);
             got += value.length;
-            entry.dlBtn.textContent = total ? `${Math.round((100 * got) / total)}%` : `${(got / 1048576).toFixed(1)}M`;
+            el.actDownloadIco.textContent = total ? `${Math.round((100 * got) / total)}%` : `${(got / 1048576).toFixed(1)}M`;
           }
         } else {
           chunks.push(new Uint8Array(await res.arrayBuffer()));
@@ -655,15 +743,15 @@ async function download(entry: Entry): Promise<void> {
     }
     toast(`Download failed – ${errors.join('; ')}`, true, 7000);
   } finally {
-    entry.dlBtn.disabled = false;
-    entry.dlBtn.textContent = '⬇';
+    el.actDownload.disabled = false;
+    el.actDownloadIco.textContent = '⬇';
   }
 }
 
 // ---------- keyboard ----------
 document.addEventListener('keydown', (e) => {
   if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement) return;
-  const cur = state.entries[state.active];
+  const cur = activeEntry();
   switch (e.key) {
     case 'ArrowDown':
     case 'j':
@@ -671,6 +759,7 @@ document.addEventListener('keydown', (e) => {
     case 'PageDown':
       e.preventDefault();
       if (!state.started) start();
+      userScrollAt = Date.now();
       goTo(state.active + 1);
       break;
     case 'ArrowUp':
@@ -678,6 +767,7 @@ document.addEventListener('keydown', (e) => {
     case 'K':
     case 'PageUp':
       e.preventDefault();
+      userScrollAt = Date.now();
       goTo(state.active - 1);
       break;
     case ' ':
@@ -694,10 +784,10 @@ document.addEventListener('keydown', (e) => {
       break;
     case 'w':
     case 'W':
-      el.fullwindow.click();
+      toggleBars();
       break;
     case 'Escape':
-      if (el.app.classList.contains('fullwindow')) el.fullwindow.click();
+      if (el.app.classList.contains('fullwindow')) toggleBars();
       if (!el.session.classList.contains('hidden')) closeSessionPanel();
       break;
     case 'd':
@@ -706,7 +796,7 @@ document.addEventListener('keydown', (e) => {
       break;
     case 'a':
     case 'A':
-      el.autoscroll.click();
+      toggleAutoscroll();
       break;
   }
 });
@@ -719,10 +809,16 @@ let touchStartX = 0;
 let touchStartAt = 0;
 let touchStartIdx = 0;
 let touchMoved = false;
-/** Timestamp of the last user-driven scroll (touch, wheel, key); realign() stays out of the way for a while after it. */
-let userScrollAt = 0;
 let touching = false;
 let swipeTimer = 0;
+function settleAfterSwipe(target: number): void {
+  // The browser's own snap animation runs after the gesture; only step in if it settles elsewhere.
+  clearTimeout(swipeTimer);
+  swipeTimer = window.setTimeout(() => {
+    const h = Math.max(1, el.feed.clientHeight);
+    if (Math.round(el.feed.scrollTop / h) !== target) goTo(target);
+  }, 450);
+}
 el.feed.addEventListener(
   'touchstart',
   (e) => {
@@ -757,21 +853,56 @@ el.feed.addEventListener(
     if (Math.abs(dy) < 30 || Math.abs(dy) < Math.abs(dx) || dt > 1200) return;
     if (!state.started) start();
     const target = Math.max(0, Math.min(state.entries.length - 1, touchStartIdx + (dy > 0 ? 1 : -1)));
-    // The browser's own snap animation runs after touchend; only step in if it settled on the wrong item.
-    clearTimeout(swipeTimer);
-    swipeTimer = window.setTimeout(() => {
-      const h = Math.max(1, el.feed.clientHeight);
-      if (Math.round(el.feed.scrollTop / h) !== target) goTo(target);
-    }, 450);
+    if (touchStartIdx + (dy > 0 ? 1 : -1) >= state.entries.length) goTo(state.entries.length);
+    else settleAfterSwipe(target);
   },
   { passive: true },
 );
-el.feed.addEventListener('touchcancel', () => {
-  touching = false;
-}, { passive: true });
-el.feed.addEventListener('wheel', () => {
+el.feed.addEventListener(
+  'touchcancel',
+  () => {
+    touching = false;
+  },
+  { passive: true },
+);
+el.feed.addEventListener(
+  'wheel',
+  () => {
+    userScrollAt = Date.now();
+  },
+  { passive: true },
+);
+
+// ---------- mouse: press, drag up/down, release = next/previous video ----------
+let dragStartY = 0;
+let dragStartIdx = 0;
+let dragging = false;
+el.feed.addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
+  if ((e.target as HTMLElement).closest('a, button')) return;
+  dragging = true;
+  dragStartY = e.clientY;
+  dragStartIdx = Math.round(el.feed.scrollTop / Math.max(1, el.feed.clientHeight));
   userScrollAt = Date.now();
-}, { passive: true });
+  el.feed.classList.add('dragging');
+});
+window.addEventListener('mousemove', (e) => {
+  if (!dragging) return;
+  userScrollAt = Date.now();
+  if (Math.abs(e.clientY - dragStartY) > 6) e.preventDefault();
+});
+window.addEventListener('mouseup', (e) => {
+  if (!dragging) return;
+  dragging = false;
+  el.feed.classList.remove('dragging');
+  const dy = dragStartY - e.clientY;
+  if (Math.abs(dy) < 40) return; // a click, handled by the video's click listener
+  suppressClickUntil = Date.now() + 400;
+  if (!state.started) start();
+  const next = dragStartIdx + (dy > 0 ? 1 : -1);
+  if (next < 0) return;
+  goTo(next);
+});
 
 // ---------- resize: keep the active video exactly in view ----------
 // Items are sized to the feed viewport (height: 100%), so when the window, orientation or
@@ -793,7 +924,7 @@ function realign(): void {
   if (!h || !state.entries.length) return;
   if (h === knownHeight) return; // nothing changed (e.g. a scroll-driven observer callback)
   // Phones resize the viewport while the user flicks (toolbar collapses): never fight that.
-  if (touching || Date.now() - userScrollAt < 900) {
+  if (touching || dragging || Date.now() - userScrollAt < 900) {
     clearTimeout(resizeTimer);
     resizeTimer = window.setTimeout(realign, 400);
     return;
@@ -815,7 +946,7 @@ new ResizeObserver(onViewportChange).observe(el.feed);
 
 // Pause when the tab is hidden; resume on return.
 document.addEventListener('visibilitychange', () => {
-  const cur = state.entries[state.active];
+  const cur = activeEntry();
   if (!cur) return;
   if (document.hidden) cur.video.pause();
   else if (!state.userPaused) void playEntry(cur);
@@ -828,8 +959,7 @@ void (async () => {
   const wanted = prefs.source;
   if (wanted === 'foryou') {
     prefs.source = 'explore';
-    el.source.value = 'explore';
-    updateSourceUi();
+    renderSourceUi();
   }
   const feedReady = loadMore();
   const s = await refreshSession();
@@ -844,15 +974,14 @@ void (async () => {
   if (wanted === 'foryou') {
     if (state.session?.state === 'logged_in') {
       prefs.source = 'foryou';
-      el.source.value = 'foryou';
       savePrefs();
-      updateSourceUi();
+      renderSourceUi();
       await feedReady;
       toast(`Signed in as @${state.session.username || '?'} – loading your For You feed`);
       void reload();
     } else {
       savePrefs();
-      if (state.session?.supported) toast('Sign in to see your For You feed; showing Explore meanwhile.', false, 5000);
+      if (state.session?.supported) toast('Sign in (Profile) to see your For You feed; showing Explore meanwhile.', false, 5000);
     }
   }
 })();

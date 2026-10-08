@@ -6,28 +6,53 @@
     <meta name="theme-color" content="#000000" />
     <title>StreamAnywhere – Feed</title>
     
-    <script type="module" crossorigin src="/player/assets/feed-68c08922.js"></script>
+    <script type="module" crossorigin src="/player/assets/feed-df60b0c4.js"></script>
     <link rel="modulepreload" crossorigin href="/player/assets/api-31a4d8af.js">
-    <link rel="stylesheet" href="/player/assets/feed-48f23a97.css">
+    <link rel="stylesheet" href="/player/assets/feed-99ee52b7.css">
   </head>
   <body class="feed-body">
     <div id="app" class="app">
-      <header class="bar" id="bar">
-        <a class="bar-brand" href="./index.html" title="Back to the lab player">▶ StreamAnywhere</a>
-        <div class="bar-source">
-          <select id="source" title="Feed source">
-            <option value="explore">Explore</option>
-            <option value="foryou">For You (signed in)</option>
-          </select>
-          <select id="category" title="Explore category"></select>
-        </div>
-        <div class="bar-right">
-          <label class="toggle" title="Advance to the next video automatically when one ends"><input id="autoscroll" type="checkbox" /><span>Auto-scroll</span></label>
-          <button id="signin" class="bar-btn" type="button">Sign in</button>
-          <button id="fullwindow" class="bar-btn" type="button" title="Hide the top bar (full window)">Full window</button>
-          <button id="fullscreen" class="bar-btn" type="button" title="Fullscreen (F)">⛶</button>
-        </div>
+      <!-- transparent top bar over the video, like the app -->
+      <header class="topbar" id="topbar">
+        <a class="top-icon brand" href="./index.html" title="Lab player" aria-label="Lab player">
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M8 5v14l11-7z" /></svg>
+        </a>
+        <nav class="tabs" id="tabs" aria-label="Feed source">
+          <button class="tab" data-source="explore" type="button">Explore</button>
+          <button class="tab" data-source="foryou" type="button">For You</button>
+        </nav>
+        <button class="top-icon" id="searchBtn" type="button" title="Search – coming later" aria-label="Search">
+          <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" d="M10.5 4a6.5 6.5 0 1 1 0 13 6.5 6.5 0 0 1 0-13zm5.3 11.3L20 19.5" /></svg>
+        </button>
       </header>
+      <div class="chips hidden" id="chips" aria-label="Explore categories"></div>
+
+      <main id="feed" class="feed" tabindex="0" aria-label="Video feed"></main>
+
+      <!-- right-hand action column (acts on the video in view) -->
+      <aside class="actions" id="actions">
+        <button class="act" id="actMute" type="button" title="Sound on/off (M)"><span class="ico" id="actMuteIco">🔊</span><small>Sound</small></button>
+        <button class="act" id="actDownload" type="button" title="Download this video (D)"><span class="ico" id="actDownloadIco">⬇</span><small>Save</small></button>
+        <button class="act" id="actAuto" type="button" title="Auto-scroll to the next video when one ends (A)"><span class="ico">⏭</span><small id="actAutoLabel">Auto</small></button>
+        <button class="act" id="actFull" type="button" title="Fullscreen (F)"><span class="ico">⛶</span><small>Full</small></button>
+      </aside>
+
+      <!-- bottom bar with icons, like the app -->
+      <nav class="bottombar" id="bottombar" aria-label="Main">
+        <button class="nav active" id="navHome" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 3 2 12h3v8h5v-6h4v6h5v-8h3z" /></svg><span>Home</span>
+        </button>
+        <button class="nav" id="navFriends" type="button" title="Coming later">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm7 1a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM1 20c0-3.3 3.6-6 8-6s8 2.7 8 6v1H1zm16.5-5c3.1.3 5.5 2.3 5.5 4.8V21h-4v-1c0-1.6-.6-3.2-1.5-5z" /></svg><span>Friends</span>
+        </button>
+        <button class="nav plus" id="navPlus" type="button" title="Coming later" aria-label="Create"><span class="plus-box">+</span></button>
+        <button class="nav" id="navInbox" type="button" title="Coming later">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-5 4v-4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z" /></svg><span>Inbox</span>
+        </button>
+        <button class="nav" id="navProfile" type="button" title="Sign in / account">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 12a5 5 0 1 0 0-10 5 5 0 0 0 0 10zm-9 9c0-4 4-7 9-7s9 3 9 7v1H3z" /></svg><span id="navProfileLabel">Profile</span>
+        </button>
+      </nav>
 
       <div id="session" class="session hidden">
         <div class="session-inner">
@@ -46,11 +71,9 @@
         </div>
       </div>
 
-      <main id="feed" class="feed" tabindex="0" aria-label="Video feed"></main>
-
       <div id="start" class="start">
         <button id="startBtn" class="start-btn" type="button">Tap to start</button>
-        <p class="start-hint">Scroll or use ↑ ↓ to move between videos · tap a video to pause · F for fullscreen</p>
+        <p class="start-hint">Swipe or drag up/down for the next video · tap to pause · F for fullscreen</p>
       </div>
 
       <div id="toast" class="toast hidden"></div>
