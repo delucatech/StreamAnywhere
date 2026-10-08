@@ -8,19 +8,32 @@
 #   4. a systemd service "streamanywhere" running the Node server on 127.0.0.1:8787 as user "streamanywhere"
 #   5. Caddy in front of it: HTTPS on 443 for https://<VM-IP with dashes>.sslip.io (Let's Encrypt, no DNS setup)
 #
-# Usage (as root on the VM, e.g. through the console's SSH-in-browser):
-#   curl -fsSL https://raw.githubusercontent.com/delucatech/StreamAnywhere/main/deploy/gcp/setup-vm.sh | sudo bash
-# or after cloning:  sudo bash deploy/gcp/setup-vm.sh
+# Usage: as the instance's *startup script* (Compute Engine -> instance -> Edit -> Automation):
+#   #!/bin/bash
+#   curl -fsSL https://raw.githubusercontent.com/delucatech/StreamAnywhere/main/deploy/gcp/setup-vm.sh | bash > /var/log/streamanywhere-setup.log 2>&1
+# It then runs on every boot (a Reset = redeploy of the latest main). Or run it once over SSH with sudo.
 #
-# Env overrides: REPO_URL, BRANCH, PUBLIC_HOST (default <ip>.sslip.io), CLIENT_ORIGINS (extra origins, comma-separated)
+# Settings come from env vars or, more conveniently, from instance metadata keys (console -> Edit -> Metadata):
+#   public-host     stable hostname to serve (default <ip>.sslip.io, which follows the ephemeral IP)
+#   duckdns-domain  + duckdns-token : keeps <domain>.duckdns.org pointed at this VM (free dynamic DNS;
+#                   the host is then https://<domain>.duckdns.org; add a CNAME from your own domain if you like)
+#   client-origins  extra browser origins allowed to call the API (comma-separated)
+#   repo-url / branch
 set -euo pipefail
 
-REPO_URL="${REPO_URL:-https://github.com/delucatech/StreamAnywhere.git}"
-BRANCH="${BRANCH:-main}"
+meta() { curl -fsS -H 'Metadata-Flavor: Google' "http://169.254.169.254/computeMetadata/v1/instance/attributes/$1" 2>/dev/null || true; }
+REPO_URL="${REPO_URL:-$(meta repo-url)}"; REPO_URL="${REPO_URL:-https://github.com/delucatech/StreamAnywhere.git}"
+BRANCH="${BRANCH:-$(meta branch)}"; BRANCH="${BRANCH:-main}"
+CLIENT_ORIGINS="${CLIENT_ORIGINS:-$(meta client-origins)}"
+DUCKDNS_DOMAIN="${DUCKDNS_DOMAIN:-$(meta duckdns-domain)}"
+DUCKDNS_TOKEN="${DUCKDNS_TOKEN:-$(meta duckdns-token)}"
 APP_DIR=/opt/streamanywhere
 APP_USER=streamanywhere
 EXTERNAL_IP="$(curl -fsS -H 'Metadata-Flavor: Google' 'http://169.254.169.254/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip' 2>/dev/null || curl -fsS https://api.ipify.org || echo '')"
+PUBLIC_HOST="${PUBLIC_HOST:-$(meta public-host)}"
+if [ -z "$PUBLIC_HOST" ] && [ -n "$DUCKDNS_DOMAIN" ]; then PUBLIC_HOST="${DUCKDNS_DOMAIN%.duckdns.org}.duckdns.org"; fi
 PUBLIC_HOST="${PUBLIC_HOST:-${EXTERNAL_IP//./-}.sslip.io}"
+echo "== setup $(date -Is): host=$PUBLIC_HOST ip=$EXTERNAL_IP branch=$BRANCH"
 
 if [ "$(id -u)" -ne 0 ]; then echo "run as root (sudo)"; exit 1; fi
 export DEBIAN_FRONTEND=noninteractive
@@ -56,6 +69,21 @@ cd "$APP_DIR"
 npm ci --no-audit --no-fund --loglevel=error
 npm run build >/dev/null
 chown -R "$APP_USER:$APP_USER" "$APP_DIR" /var/lib/streamanywhere
+
+echo "== 3b. dynamic dns"
+if [ -n "$DUCKDNS_DOMAIN" ] && [ -n "$DUCKDNS_TOKEN" ]; then
+  DD="${DUCKDNS_DOMAIN%.duckdns.org}"
+  cat > /usr/local/bin/duckdns-update <<EOF
+#!/bin/sh
+curl -fsS "https://www.duckdns.org/update?domains=${DD}&token=${DUCKDNS_TOKEN}&ip=" > /var/log/duckdns.log 2>&1
+EOF
+  chmod 700 /usr/local/bin/duckdns-update
+  echo '*/5 * * * * root /usr/local/bin/duckdns-update' > /etc/cron.d/duckdns
+  /usr/local/bin/duckdns-update || true
+  echo "duckdns: $(cat /var/log/duckdns.log 2>/dev/null) for ${DD}.duckdns.org"
+else
+  rm -f /etc/cron.d/duckdns /usr/local/bin/duckdns-update
+fi
 
 echo "== 4. service"
 cat > /etc/streamanywhere.env <<EOF

@@ -136,20 +136,29 @@ Google Cloud's *Always Free* `e2-micro` (us-west1 / us-central1 / us-east1, 30 G
 1. Console → Compute Engine → *Create instance*: name `streamanywhere`, region `us-central1`,
    machine `e2-micro`, boot disk Debian 12 (standard persistent disk, 30 GB), firewall: allow
    HTTP and HTTPS. Keep the default ephemeral external IP (a reserved static IP is billed).
-2. Open the instance's *SSH* (in-browser) and run:
+2. Instance → *Edit* → *Automation* → *Startup script*:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/delucatech/StreamAnywhere/main/deploy/gcp/setup-vm.sh | sudo bash
+#!/bin/bash
+curl -fsSL https://raw.githubusercontent.com/delucatech/StreamAnywhere/main/deploy/gcp/setup-vm.sh | bash > /var/log/streamanywhere-setup.log 2>&1
 ```
 
-   [`deploy/gcp/setup-vm.sh`](deploy/gcp/setup-vm.sh) adds 2 GB swap, installs Node 20, Chromium
-   and Caddy, builds the app into `/opt/streamanywhere`, runs it as a systemd service
-   (`journalctl -u streamanywhere -f`), and serves it over HTTPS at
-   `https://<external-ip-with-dashes>.sslip.io` (Let's Encrypt, no DNS needed).
+   Save, then *Reset* the VM. [`deploy/gcp/setup-vm.sh`](deploy/gcp/setup-vm.sh) adds 2 GB swap,
+   installs Node 20, Chromium and Caddy, builds the app into `/opt/streamanywhere`, runs it as a
+   systemd service (`journalctl -u streamanywhere -f`), and serves it over HTTPS at
+   `https://<external-ip-with-dashes>.sslip.io` (Let's Encrypt, no DNS needed). The first run
+   takes about 10 minutes on an e2-micro; it runs again on every boot, so a *Reset* redeploys the
+   latest `main`. (The same command also works once over SSH with `sudo`.)
 3. Open `https://<that host>/feed.html` → Sign in → Sign in with QR code → scan with the app.
 
-Re-running the script updates the deployment. The IIS or GitHub Pages copy of the client can use
-this server too: `https://delucatech.com/player/feed.html?api=https://<that host>`. Untested from
+**Stable address without a paid static IP:** the ephemeral IP changes when the VM is stopped and
+started. Create a free [DuckDNS](https://www.duckdns.org) subdomain, then add two instance
+metadata keys (*Edit → Metadata*): `duckdns-domain` = `yourname` and `duckdns-token` = your token,
+and Reset. The VM then keeps `yourname.duckdns.org` pointed at itself (cron, every 5 minutes) and
+Caddy serves `https://yourname.duckdns.org`. Your own domain can CNAME to it (`feed.delucatech.com
+→ yourname.duckdns.org`; then set metadata `public-host` = `feed.delucatech.com`). The IIS or
+GitHub Pages copy of the client can use this server too: build it with
+`VITE_API_BASE=https://<that host>` or open `.../feed.html?api=https://<that host>`. Untested from
 my side: whether TikTok treats Google's IP range like a datacenter (captcha at sign-in or an
 empty For You feed); the Explore feed and the resolver are unaffected by that.
 
