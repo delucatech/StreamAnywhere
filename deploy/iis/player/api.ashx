@@ -488,23 +488,27 @@ namespace StreamAnywhere
                 Match tm = Regex.Match(html, "<title[^>]*>(.*?)</title>", RegexOptions.Singleline);
                 throw new HttpError(502, "No embedded video JSON found in the TikTok page (title: " + (tm.Success ? tm.Groups[1].Value.Trim() : "n/a") + "). TikTok may have served a bot-check or changed its markup.");
             }
-            object json;
-            try { json = NewSerializer().DeserializeObject(jm.Groups[1].Value); } catch (Exception e) { throw new HttpError(502, "Embedded JSON could not be parsed: " + e.Message); }
-
+            // The whole page JSON exceeds the 1000-members-per-object cap that the MS11-100 security update
+            // imposes on JavaScriptSerializer (the i18n table alone has thousands of keys), so only the
+            // "webapp.video-detail" object (or legacy "ItemModule") is cut out and parsed.
+            string rawJson = jm.Groups[1].Value;
             object item = null;
-            object scope = Get(json, "__DEFAULT_SCOPE__");
-            if (scope != null)
+            string detailJson = ExtractObject(rawJson, "\"webapp.video-detail\"");
+            if (detailJson != null)
             {
-                object detail = Get(scope, "webapp.video-detail");
-                if (detail == null) throw new HttpError(502, "Page JSON has no webapp.video-detail (login wall or unsupported post type?)");
+                object detail;
+                try { detail = NewSerializer().DeserializeObject(detailJson); } catch (Exception e) { throw new HttpError(502, "webapp.video-detail JSON could not be parsed: " + e.Message); }
                 int code = (int)Num(Get(detail, "statusCode"));
                 if (code != 0) throw new HttpError(404, "TikTok reports status " + code + ": " + StatusMessage(code, Str(detail, "statusMsg")));
                 item = Get(Get(detail, "itemInfo"), "itemStruct");
             }
             else
             {
-                object im = Get(json, "ItemModule");
-                if (im != null) item = Get(im, videoId);
+                string moduleJson = ExtractObject(rawJson, "\"ItemModule\"");
+                if (moduleJson == null) throw new HttpError(502, "Page JSON has no webapp.video-detail (login wall or unsupported post type?)");
+                object im;
+                try { im = NewSerializer().DeserializeObject(moduleJson); } catch (Exception e) { throw new HttpError(502, "ItemModule JSON could not be parsed: " + e.Message); }
+                item = Get(im, videoId);
             }
             object video = Get(item, "video");
             if (video == null) throw new HttpError(502, "No video item in page JSON");
@@ -593,6 +597,31 @@ namespace StreamAnywhere
                 "title", Str(item, "desc"), "author", authorName,
                 "duration", Get(video, "duration"), "width", Get(video, "width"), "height", Get(video, "height"), "cover", Str(video, "cover"),
                 "formats", fl, "warnings", warnings, "elapsedMs", 0, "attempts", new List<object>());
+        }
+
+        /// Returns the JSON object literal that follows `"key":` in json (brace-balanced, string-aware), or null.
+        static string ExtractObject(string json, string quotedKey)
+        {
+            int idx = json.IndexOf(quotedKey + ":", StringComparison.Ordinal);
+            if (idx < 0) return null;
+            int start = json.IndexOf('{', idx + quotedKey.Length);
+            if (start < 0) return null;
+            int depth = 0; bool inStr = false; bool esc = false;
+            for (int i = start; i < json.Length; i++)
+            {
+                char c = json[i];
+                if (inStr)
+                {
+                    if (esc) esc = false;
+                    else if (c == '\\') esc = true;
+                    else if (c == '"') inStr = false;
+                    continue;
+                }
+                if (c == '"') inStr = true;
+                else if (c == '{') depth++;
+                else if (c == '}') { depth--; if (depth == 0) return json.Substring(start, i - start + 1); }
+            }
+            return null;
         }
 
         static string StatusMessage(int code, string fallback)
