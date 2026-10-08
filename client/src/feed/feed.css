@@ -593,6 +593,32 @@ button {
   padding: 0;
   image-rendering: auto;
 }
+/* Live view of the server's sign-in page while TikTok asks for a verification there: clickable */
+.session-qr img.live {
+  cursor: crosshair;
+  touch-action: none;
+  outline: 2px solid var(--accent-2);
+  outline-offset: 2px;
+}
+.session-qr img.live.busy {
+  opacity: 0.7;
+}
+.session-input {
+  display: flex;
+  gap: 6px;
+  width: 100%;
+  max-width: 420px;
+}
+.session-input input {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: #0f1218;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 14px;
+}
 .session-qr-hint {
   font-size: 13px;
   color: var(--muted);

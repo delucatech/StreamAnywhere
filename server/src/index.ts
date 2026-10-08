@@ -3,7 +3,7 @@ import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
-import type { FeedRequest, FeedResponse, HealthResponse, ProbeRequest, ReportRequest, ResolveRequest, ResolveResponse, SessionLoginRequest, SessionStatus } from '../../shared/types';
+import type { FeedRequest, FeedResponse, HealthResponse, ProbeRequest, ReportRequest, ResolveRequest, ResolveResponse, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
 import { config, findUp } from './config';
 import { registerProxyRoutes } from './proxy';
 import { isTikTokUrl, probeUrl, resolveTikTokNative, TikTokError } from './tiktok';
@@ -11,7 +11,7 @@ import { detectYtDlp, resolveWithYtDlp } from './ytdlp';
 import { defaultExpiry, mediaCount, registerMedia } from './mediaStore';
 import { hostAllowed } from './ssrf';
 import { FeedError, fetchExploreFeed, normalizeExploreOptions } from './feed';
-import { fetchExploreViaBrowser, fetchForYou, logout, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
+import { fetchExploreViaBrowser, fetchForYou, logout, sessionInput, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
 
 /** After the browser path rescued an explore request, prefer it for a while (datacenter IPs). */
 let exploreViaBrowserUntil = 0;
@@ -193,6 +193,14 @@ export async function buildServer() {
     }
   });
   app.post('/api/session/logout', async () => logout());
+  // Clicks / typing for TikTok's verification modal on the headless sign-in page (see SessionInputRequest).
+  app.post<{ Body: SessionInputRequest }>('/api/session/input', async (req, reply) => {
+    try {
+      return await sessionInput(req.body || { type: 'shot' });
+    } catch (e) {
+      return reply.code(409).send({ ...sessionStatus(), error: (e as Error).message });
+    }
+  });
 
   registerProxyRoutes(app);
 

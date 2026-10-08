@@ -28,7 +28,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { FeedItem, LoginMode, SessionStatus } from '../../shared/types';
+import type { FeedItem, LoginMode, SessionInputRequest, SessionStatus } from '../../shared/types';
 import { exploreApiUrl, itemToFeedItem, parseExploreBody, type ExploreResult } from './feed';
 
 type Browser = import('puppeteer-core').Browser;
@@ -44,6 +44,8 @@ const QR_RELOAD_MS = 110 * 1000;
 const FEED_URL = 'https://www.tiktok.com/foryou';
 const QR_URL = 'https://www.tiktok.com/login/qrcode';
 const QR_SELECTOR = '[data-e2e="qr-code"] canvas';
+/** Viewport of the headless login page = pixel size of the screenshots the UI shows (clicks map 1:1) */
+const QR_VIEWPORT = { width: 760, height: 860 };
 
 export function findBrowserExecutable(): string | undefined {
   if (process.env.BROWSER_PATH && fs.existsSync(process.env.BROWSER_PATH)) return process.env.BROWSER_PATH;
@@ -92,6 +94,10 @@ interface SessionInternal {
   qrRateLimitedAt?: number;
   /** redirect_url from a confirmed check_qrconnect answer */
   qrRedirect?: string;
+  /** When TikTok last answered the status check with 2135 (identity verification required on the page) */
+  qrVerifyAt?: number;
+  /** TikTok's verification decision (x-tt-verify-idv-decision-conf header), for the log */
+  qrVerifyConf?: string;
   headless?: Browser;
   feedPage?: Page;
   explorePage?: Page;
@@ -228,11 +234,16 @@ export function sessionStatus(): SessionStatus {
       base.qr = s.qr;
       base.qrState = s.qrState;
       if (s.qr && s.qrExpireAt) base.qrExpiresAt = s.qrExpireAt;
-      if (!s.qr && s.qrPageShot) base.pageShot = s.qrPageShot;
+      if ((!s.qr || s.qrState === 'verify') && s.qrPageShot) {
+        base.pageShot = s.qrPageShot;
+        base.pageShotSize = { w: QR_VIEWPORT.width, h: QR_VIEWPORT.height };
+      }
       const limited = s.qrRateLimitedAt && Date.now() - s.qrRateLimitedAt < 30_000;
       base.message = limited
         ? 'TikTok is temporarily refusing sign-in status checks from this server ("maximum number of attempts"). Scans are not noticed while this lasts; wait 10–15 minutes, then try again.'
-        : s.qrState === 'scanned'
+        : s.qrState === 'verify'
+          ? 'TikTok wants an extra verification before it signs this browser in. Complete it in the live view below (tap or click on the picture, type with the box under it).'
+          : s.qrState === 'scanned'
           ? 'Scanned – confirm the sign-in in the TikTok app.'
           : s.qr
             ? 'Scan the QR code with the TikTok app.'
@@ -315,6 +326,8 @@ async function startQrLogin(log: (m: string) => void): Promise<SessionStatus> {
   s.qrGetUrl = undefined;
   s.qrCheckUrl = undefined;
   s.qrRedirect = undefined;
+  s.qrVerifyAt = undefined;
+  s.qrVerifyConf = undefined;
   s.qrState = 'new';
   s.loginStartedAt = Date.now();
   const browser = await headlessBrowser();
@@ -322,6 +335,7 @@ async function startQrLogin(log: (m: string) => void): Promise<SessionStatus> {
   await closeSecondaryPages();
   const page = await browser.newPage();
   await preparePage(page, browser);
+  await page.setViewport({ ...QR_VIEWPORT, deviceScaleFactor: 1 }).catch(() => undefined);
   s.qrPage = page;
   // Diagnostic: what TikTok's QR API answers (datacenter IPs get rate-limited / empty answers).
   // The QR comes from TikTok's own API answer (data.qrcode = base64 PNG) - no need to wait for the
@@ -349,6 +363,8 @@ async function startQrLogin(log: (m: string) => void): Promise<SessionStatus> {
           s.qrPageHint = undefined;
           s.qrPageShot = undefined;
           s.scannedAt = undefined;
+          if (s.qrVerifyAt) log('verification abandoned - TikTok issued a new QR code');
+          s.qrVerifyAt = undefined;
           if (typeof d.token === 'string') s.qrToken = d.token;
           s.qrExpireAt = typeof d.expire_time === 'number' && d.expire_time > 1e9 ? d.expire_time * 1000 : Date.now() + 55_000;
           log(`QR code received from TikTok's API (${d.qrcode.length} chars, valid ${Math.round((s.qrExpireAt - Date.now()) / 1000)} s)`);
@@ -368,7 +384,17 @@ async function startQrLogin(log: (m: string) => void): Promise<SessionStatus> {
             if (d.status === 'confirmed' && typeof d.redirect_url === 'string' && d.redirect_url.startsWith('http')) s.qrRedirect = d.redirect_url;
           } else if (d.status === 'expired' && (s.qrState as string) !== 'scanned') s.qrState = 'expired';
         } else if (json?.message === 'error' || d.error_code) {
-          if (d.error_code === 7 || /maximum number of attempts/i.test(String(d.description || ''))) {
+          if (d.error_code === 2135 && res.url().includes('qrconnect')) {
+            // "IDV required": the phone confirmed, but TikTok wants an identity verification (captcha,
+            // code, ...) inside THIS page before it hands over the session. Its SDK renders that as a
+            // modal; the UI shows the page live and forwards the user's clicks/typing (sessionInput).
+            const conf = res.headers()['x-tt-verify-idv-decision-conf'] || '';
+            if (s.qrState !== 'verify') log(`QR confirmed on the phone, but TikTok requires a verification on the page (2135)${conf ? ' decision=' + conf.slice(0, 300) : ''}`);
+            s.qrState = 'verify';
+            s.qrVerifyAt = Date.now();
+            s.qrVerifyConf = conf || s.qrVerifyConf;
+            s.scannedAt = s.scannedAt || Date.now();
+          } else if (d.error_code === 7 || /maximum number of attempts/i.test(String(d.description || ''))) {
             if (!s.qrRateLimitedAt) log('TikTok rate-limits the QR status checks for this session: ' + s.qrApi);
             s.qrRateLimitedAt = Date.now();
           } else log('QR API error: ' + s.qrApi);
@@ -452,8 +478,69 @@ export async function pollQrToken(page: Page): Promise<{ status?: string; redire
   }
 }
 
+/** Screenshot of the whole login-page viewport into the status (what the user sees in the live view). */
+async function captureShot(page: Page): Promise<void> {
+  try {
+    const shot = await page.screenshot({ type: 'jpeg', quality: 55, encoding: 'base64' });
+    if (s.qrPage === page) s.qrPageShot = `data:image/jpeg;base64,${shot}`;
+  } catch {
+    /* page busy or gone */
+  }
+}
+
+let inputChain: Promise<void> = Promise.resolve();
+
+/**
+ * Forwards one user input to the headless login page (TikTok's verification modal lives there) and
+ * answers with a fresh screenshot. Inputs are serialised so a drag is not interleaved with a click.
+ */
+export async function sessionInput(req: SessionInputRequest): Promise<SessionStatus> {
+  const page = s.qrPage;
+  if (!page || page.isClosed() || s.state !== 'login_pending' || s.loginMode !== 'qr') throw new Error('No QR sign-in page is open.');
+  const clamp = (v: unknown, max: number): number => Math.max(0, Math.min(max, Math.round(Number(v) || 0)));
+  const run = async (): Promise<void> => {
+    switch (req.type) {
+      case 'click':
+        await page.mouse.click(clamp(req.x, QR_VIEWPORT.width), clamp(req.y, QR_VIEWPORT.height), { delay: 40 });
+        break;
+      case 'drag': {
+        // Slider captchas want a human-looking drag: several moves, not one jump.
+        const x1 = clamp(req.x, QR_VIEWPORT.width);
+        const y1 = clamp(req.y, QR_VIEWPORT.height);
+        const x2 = clamp(req.x2, QR_VIEWPORT.width);
+        const y2 = clamp(req.y2, QR_VIEWPORT.height);
+        await page.mouse.move(x1, y1);
+        await page.mouse.down();
+        const steps = 12;
+        for (let i = 1; i <= steps; i++) {
+          await page.mouse.move(x1 + ((x2 - x1) * i) / steps, y1 + ((y2 - y1) * i) / steps);
+          await new Promise((r) => setTimeout(r, 25));
+        }
+        await page.mouse.up();
+        break;
+      }
+      case 'type':
+        await page.keyboard.type(String(req.text || '').slice(0, 200), { delay: 35 });
+        break;
+      case 'key':
+        if (['Enter', 'Backspace', 'Tab', 'Escape'].includes(req.key)) await page.keyboard.press(req.key);
+        break;
+      case 'shot':
+      default:
+        break;
+    }
+    await new Promise((r) => setTimeout(r, req.type === 'shot' ? 0 : 350));
+    await captureShot(page);
+  };
+  const job = inputChain.then(run, run);
+  inputChain = job.catch(() => undefined);
+  await job;
+  return sessionStatus();
+}
+
 async function qrLoop(page: Page, browser: Browser, log: (m: string) => void): Promise<void> {
   let lastReload = Date.now();
+  let lastShotAt = 0;
   let misses = 0;
   let confirmingNavigated = false;
   try {
@@ -461,7 +548,8 @@ async function qrLoop(page: Page, browser: Browser, log: (m: string) => void): P
       if (!browser.isConnected() || page.isClosed()) break;
       // --- TikTok's page drives the cycle (one poll stream = no extra rate-limit pressure). We only
       //     react: when its code expired, click the code area (TikTok's refresh) and wait for the new one.
-      const confirming = (s.qrState as string) === 'scanned' && Date.now() - (s.scannedAt || 0) < 120_000;
+      const verifying = (s.qrState as string) === 'verify';
+      const confirming = verifying || ((s.qrState as string) === 'scanned' && Date.now() - (s.scannedAt || 0) < 120_000);
       const expiredNow = (s.qrState as string) === 'expired' || (s.qrExpireAt ? Date.now() > s.qrExpireAt + 1500 : false);
       if (s.qrRedirect && !confirmingNavigated) {
         // TikTok confirmed the scan and told the page where to go; follow it ourselves in case the page
@@ -487,7 +575,7 @@ async function qrLoop(page: Page, browser: Browser, log: (m: string) => void): P
           await page.goto(QR_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => undefined);
           lastReload = Date.now();
         }
-      } else if (!s.qr && s.qrGetUrl && !s.qrRateLimitedAt && misses >= 20) {
+      } else if (!s.qr && s.qrGetUrl && !s.qrRateLimitedAt && misses >= 20 && !verifying) {
         // No code for ~40 s although the page is up: ask TikTok directly (signed by the page).
         if (await requestNewQr(page, log)) misses = 0;
       }
@@ -506,7 +594,7 @@ async function qrLoop(page: Page, browser: Browser, log: (m: string) => void): P
       const text = String(await page.evaluate('document.body.innerText').catch(() => '')).toLowerCase();
       // Reload for a fresh QR only when TikTok says the current one expired (or it is past the expiry
       // it announced). Never while a scan is being confirmed: a reload there threw the login away.
-      const scanning = (s.qrState as string) === 'scanned' && Date.now() - (s.scannedAt || 0) < 90_000;
+      const scanning = verifying || ((s.qrState as string) === 'scanned' && Date.now() - (s.scannedAt || 0) < 90_000);
       // Refresh a little BEFORE TikTok's expiry (codes live ~55 s; a reload on a small VM takes as long),
       // so there is always a scannable code on screen.
       const expired = !s.qrGetUrl && !s.qr && ((s.qrState as string) === 'expired' || /expired|refresh/.test(text) || Date.now() - lastReload > QR_RELOAD_MS);
@@ -532,9 +620,19 @@ async function qrLoop(page: Page, browser: Browser, log: (m: string) => void): P
           await page.goto(QR_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => undefined);
           lastReload = Date.now();
         }
-      } else if (/confirm|scanned/.test(text) && !/1\. scan with/.test(text)) {
+      } else if (/confirm|scanned/.test(text) && !/1\. scan with/.test(text) && !verifying) {
         s.qrState = 'scanned';
         s.scannedAt = s.scannedAt || Date.now();
+      }
+      if (verifying) {
+        // Live view for the UI (the user completes TikTok's verification through it).
+        if (Date.now() - lastShotAt > 1200) {
+          await captureShot(page);
+          lastShotAt = Date.now();
+        }
+        misses = 0;
+        await new Promise((r) => setTimeout(r, 400));
+        continue;
       }
       const qr = s.qr && (s.qrState as string) !== 'expired' ? undefined : await captureQr(page);
       if (s.qr && !qr) {
@@ -550,12 +648,7 @@ async function qrLoop(page: Page, browser: Browser, log: (m: string) => void): P
         const body = text.replace(/\s+/g, ' ').trim().slice(0, 160);
         s.qrPageHint = (`${title}${body ? ' – ' + body : ''}`.slice(0, 160) || `${page.url()} (empty page)`) + (s.qrApi ? ` | QR API: ${s.qrApi.slice(0, 200)}` : ' | QR API: no answer seen');
         log(`QR page shows no QR code: ${s.qrPageHint}`);
-        try {
-          const shot = await page.screenshot({ type: 'jpeg', quality: 45, encoding: 'base64', clip: { x: 0, y: 0, width: 900, height: 700 } });
-          s.qrPageShot = `data:image/jpeg;base64,${shot}`;
-        } catch {
-          /* ignore */
-        }
+        await captureShot(page);
         if (misses % 30 === 0) {
           await page.goto(QR_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => undefined);
           lastReload = Date.now();

@@ -1,4 +1,4 @@
-import type { FeedRequest, FeedResponse, HealthResponse, LoginMode, ReportRequest, ResolveRequest, ResolveResponse, ServerProbe, SessionStatus } from '../../shared/types';
+import type { FeedRequest, FeedResponse, HealthResponse, LoginMode, ReportRequest, ResolveRequest, ResolveResponse, ServerProbe, SessionInputRequest, SessionStatus } from '../../shared/types';
 
 /**
  * API base URL. Empty = same origin (dev server proxy or SERVE_CLIENT deployments). When the
@@ -79,4 +79,5 @@ export const api = {
   },
   sessionLogin: (mode: LoginMode): Promise<SessionStatus> => post('/api/session/login', { mode }),
   sessionLogout: (): Promise<SessionStatus> => post('/api/session/logout', {}),
+  sessionInput: (req: SessionInputRequest): Promise<SessionStatus> => post('/api/session/input', req),
 };

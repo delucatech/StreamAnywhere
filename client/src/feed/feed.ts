@@ -17,7 +17,7 @@
  * Playback uses the browser's <video> element (not the WebCodecs lab pipeline) so that several
  * items can be kept warm at once and so that H.265-only variants still play where the browser can.
  */
-import { EXPLORE_CATEGORIES, type FeedItem, type FeedSource, type LoginMode, type MediaFormat, type SessionStatus } from '../../../shared/types';
+import { EXPLORE_CATEGORIES, type FeedItem, type FeedSource, type LoginMode, type MediaFormat, type SessionInputRequest, type SessionStatus } from '../../../shared/types';
 import { api, ApiError, apiUrl } from '../api';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
@@ -52,6 +52,11 @@ const el = {
   sessionQr: $('sessionQr'),
   sessionQrImg: $<HTMLImageElement>('sessionQrImg'),
   sessionQrHint: $('sessionQrHint'),
+  sessionInput: $('sessionInput'),
+  sessionInputText: $<HTMLInputElement>('sessionInputText'),
+  sessionInputType: $<HTMLButtonElement>('sessionInputType'),
+  sessionInputEnter: $<HTMLButtonElement>('sessionInputEnter'),
+  sessionInputBack: $<HTMLButtonElement>('sessionInputBack'),
   sessionRefresh: $<HTMLButtonElement>('sessionRefresh'),
   sessionCancel: $<HTMLButtonElement>('sessionCancel'),
   sessionLogout: $<HTMLButtonElement>('sessionLogout'),
@@ -212,6 +217,57 @@ el.sessionLogin.addEventListener('click', () => void startLogin('qr'));
 el.sessionLoginWindow.addEventListener('click', () => void startLogin('window'));
 el.sessionLogout.addEventListener('click', () => void signOut());
 el.sessionCancel.addEventListener('click', () => void signOut(true));
+// Live view (TikTok verification on the server's page): clicks and drags on the picture, typing below it.
+let liveDown: { x: number; y: number; id: number } | undefined;
+el.sessionQrImg.addEventListener('pointerdown', (e) => {
+  if (!el.sessionQrImg.classList.contains('live')) return;
+  e.preventDefault();
+  liveDown = { ...livePoint(e), id: e.pointerId };
+  el.sessionQrImg.setPointerCapture(e.pointerId);
+});
+el.sessionQrImg.addEventListener('pointerup', (e) => {
+  if (!liveDown || liveDown.id !== e.pointerId) return;
+  const from = liveDown;
+  liveDown = undefined;
+  const to = livePoint(e);
+  const moved = Math.hypot(to.x - from.x, to.y - from.y) > 6;
+  void sendLiveInput(moved ? { type: 'drag', x: from.x, y: from.y, x2: to.x, y2: to.y } : { type: 'click', x: to.x, y: to.y });
+});
+el.sessionQrImg.addEventListener('pointercancel', () => (liveDown = undefined));
+el.sessionInputType.addEventListener('click', () => {
+  const text = el.sessionInputText.value;
+  if (!text) return;
+  el.sessionInputText.value = '';
+  void sendLiveInput({ type: 'type', text });
+});
+el.sessionInputText.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    const text = el.sessionInputText.value;
+    el.sessionInputText.value = '';
+    void (text ? sendLiveInput({ type: 'type', text }).then(() => sendLiveInput({ type: 'key', key: 'Enter' })) : sendLiveInput({ type: 'key', key: 'Enter' }));
+  }
+});
+el.sessionInputEnter.addEventListener('click', () => void sendLiveInput({ type: 'key', key: 'Enter' }));
+el.sessionInputBack.addEventListener('click', () => void sendLiveInput({ type: 'key', key: 'Backspace' }));
+
+/** Pointer position in page pixels (the picture is the server's viewport, scaled to fit). */
+function livePoint(e: PointerEvent): { x: number; y: number } {
+  const r = el.sessionQrImg.getBoundingClientRect();
+  const size = state.session?.pageShotSize || { w: el.sessionQrImg.naturalWidth || 1, h: el.sessionQrImg.naturalHeight || 1 };
+  return { x: Math.round(((e.clientX - r.left) / Math.max(1, r.width)) * size.w), y: Math.round(((e.clientY - r.top) / Math.max(1, r.height)) * size.h) };
+}
+async function sendLiveInput(req: SessionInputRequest): Promise<void> {
+  el.sessionQrImg.classList.add('busy');
+  try {
+    state.session = await api.sessionInput(req);
+    renderSession();
+  } catch (e) {
+    toast(`Could not reach the sign-in page: ${errMsg(e)}`, true);
+  } finally {
+    el.sessionQrImg.classList.remove('busy');
+  }
+}
 el.startBtn.addEventListener('click', () => start());
 el.start.addEventListener('click', (e) => {
   if (e.target === el.start) start();
@@ -281,11 +337,14 @@ function renderSession(): void {
   const showQr = s.state === 'login_pending' && s.loginMode === 'qr';
   el.sessionQr.classList.toggle('hidden', !showQr);
   if (showQr) {
-    const img = s.qr || s.pageShot || '';
+    const live = s.qrState === 'verify' && Boolean(s.pageShot);
+    const img = (live ? s.pageShot : s.qr || s.pageShot) || '';
     if (img && el.sessionQrImg.src !== img) el.sessionQrImg.src = img;
-    el.sessionQrImg.classList.toggle('page-shot', !s.qr && Boolean(s.pageShot));
+    el.sessionQrImg.classList.toggle('page-shot', live || (!s.qr && Boolean(s.pageShot)));
+    el.sessionQrImg.classList.toggle('live', live);
+    el.sessionInput.classList.toggle('hidden', !live);
     if (!img) el.sessionQrImg.removeAttribute('src');
-    qrExpiresAt = s.qr ? s.qrExpiresAt || 0 : 0;
+    qrExpiresAt = s.qr && !live ? s.qrExpiresAt || 0 : 0;
     renderQrHint(s);
   }
   const idle = s.supported && s.state !== 'logged_in' && s.state !== 'login_pending';
@@ -301,7 +360,9 @@ let qrExpiresAt = 0;
 function renderQrHint(s: SessionStatus): void {
   const left = qrExpiresAt ? Math.max(0, Math.round((qrExpiresAt - Date.now()) / 1000)) : 0;
   el.sessionQrHint.textContent =
-    s.qrState === 'scanned'
+    s.qrState === 'verify'
+      ? 'TikTok asks for a verification – this is the server\'s page, live. Tap or click on it; type below.'
+      : s.qrState === 'scanned'
       ? 'Scanned – confirm on your phone, then wait a moment'
       : s.qr
         ? left > 0

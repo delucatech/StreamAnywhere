@@ -215,6 +215,15 @@ export interface SessionLoginRequest {
   mode?: LoginMode;
 }
 
+/** Input forwarded to the server's sign-in page while TikTok asks for an extra verification there.
+ *  Coordinates are pixels of the `pageShot` image (see SessionStatus.pageShotSize). */
+export type SessionInputRequest =
+  | { type: 'click'; x: number; y: number }
+  | { type: 'drag'; x: number; y: number; x2: number; y2: number }
+  | { type: 'type'; text: string }
+  | { type: 'key'; key: 'Enter' | 'Backspace' | 'Tab' | 'Escape' }
+  | { type: 'shot' };
+
 /** State of the server-side TikTok browser session (Node server only). */
 export interface SessionStatus {
   /** false on servers that cannot run a browser (IIS handler, hosted containers without Chrome) */
@@ -234,9 +243,13 @@ export interface SessionStatus {
   loginMode?: LoginMode;
   /** While a QR login is pending: the current QR code as a data: URL (PNG), refreshed as TikTok rotates it */
   qr?: string;
-  qrState?: 'new' | 'scanned' | 'expired';
+  /** 'verify' = the phone confirmed but TikTok wants an extra identity verification inside the server's
+   *  browser page (error 2135); `pageShot` then shows that page live and POST /api/session/input drives it. */
+  qrState?: 'new' | 'scanned' | 'expired' | 'verify';
   /** ms epoch when TikTok retires the current QR (the server fetches a new one just before) */
   qrExpiresAt?: number;
-  /** While a QR login shows no QR: a small screenshot (data: URL, JPEG) of what TikTok served the server */
+  /** While a QR login shows no QR (or a verification is pending): a screenshot (data: URL, JPEG) of the server's page */
   pageShot?: string;
+  /** Pixel size of `pageShot` (= the page viewport), for mapping clicks */
+  pageShotSize?: { w: number; h: number };
 }

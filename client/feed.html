@@ -55,8 +55,14 @@
         <div class="session-inner">
           <div id="sessionText" class="session-text"></div>
           <div id="sessionQr" class="session-qr hidden">
-            <img id="sessionQrImg" alt="TikTok login QR code" />
+            <img id="sessionQrImg" alt="TikTok login QR code" draggable="false" />
             <div id="sessionQrHint" class="session-qr-hint"></div>
+            <div id="sessionInput" class="session-input hidden">
+              <input id="sessionInputText" type="text" autocomplete="one-time-code" placeholder="Text to type into the page (e.g. a code)" />
+              <button id="sessionInputType" class="btn" type="button">Type</button>
+              <button id="sessionInputEnter" class="btn" type="button" title="Press Enter in the page">Enter</button>
+              <button id="sessionInputBack" class="btn" type="button" title="Press Backspace in the page">⌫</button>
+            </div>
           </div>
           <div class="session-actions">
             <button id="sessionLogin" class="btn primary" type="button">Sign in with QR code</button>
