@@ -75,6 +75,8 @@ interface SessionInternal {
   qrPage?: Page;
   qr?: string;
   qrState?: SessionStatus['qrState'];
+  /** What the login page shows when no QR could be captured (title + first words), for the UI */
+  qrPageHint?: string;
   headless?: Browser;
   feedPage?: Page;
   explorePage?: Page;
@@ -112,11 +114,40 @@ function profileExists(): boolean {
   return fs.existsSync(path.join(PROFILE_DIR, 'Default')) || fs.existsSync(path.join(PROFILE_DIR, 'Local State'));
 }
 
+/**
+ * Chrome leaves Singleton* lock files in the profile when it did not exit cleanly (hard reset,
+ * OOM kill). With a stale lock the next launch prints nothing and exits at once, which puppeteer
+ * reports as "Failed to launch the browser process!" with an empty log. We own the profile, so
+ * when none of OUR browsers is running the locks are stale and can go.
+ */
+function clearStaleProfileLocks(): void {
+  if (s.headless?.isConnected() || s.loginBrowser?.isConnected()) return;
+  for (const f of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
+    try {
+      fs.rmSync(path.join(PROFILE_DIR, f), { force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 async function launch(headless: boolean): Promise<Browser> {
+  try {
+    return await launchOnce(headless);
+  } catch (e) {
+    // One retry: boot-time CPU starvation on tiny VMs and stale locks are both transient.
+    feedLog?.(`browser launch failed (${(e as Error).message.split('\n')[0]}); retrying once`);
+    await new Promise((r) => setTimeout(r, 3000));
+    return launchOnce(headless);
+  }
+}
+
+async function launchOnce(headless: boolean): Promise<Browser> {
   const sup = sessionSupported();
   if (!sup.ok) throw new Error(sup.reason);
   const p = await puppeteer();
   fs.mkdirSync(PROFILE_DIR, { recursive: true });
+  clearStaleProfileLocks();
   // Verified 2026-10-08: with the UA fix (see preparePage), --disable-blink-features=AutomationControlled
   // and without --enable-automation, the headless page gets real feed batches; plain headless got
   // "Something went wrong".
@@ -132,6 +163,9 @@ async function launch(headless: boolean): Promise<Browser> {
     defaultViewport: headless ? { width: 1280, height: 900 } : null,
     args,
     ignoreDefaultArgs: ['--enable-automation'],
+    // Cold starts on a 0.25-vCPU VM took >20 s; puppeteer's default is 30 s.
+    timeout: 90_000,
+    protocolTimeout: 120_000,
   });
 }
 
@@ -178,7 +212,7 @@ export function sessionStatus(): SessionStatus {
     if (s.loginMode === 'qr') {
       base.qr = s.qr;
       base.qrState = s.qrState;
-      base.message = s.qrState === 'scanned' ? 'Scanned – confirm the sign-in in the TikTok app.' : s.qr ? 'Scan the QR code with the TikTok app.' : 'Loading the QR code…';
+      base.message = s.qrState === 'scanned' ? 'Scanned – confirm the sign-in in the TikTok app.' : s.qr ? 'Scan the QR code with the TikTok app.' : s.qrPageHint ? `TikTok did not show a QR code. The page says: ${s.qrPageHint}` : 'Loading the QR code…';
     } else base.message = 'Finish signing in inside the TikTok window that opened on the server machine.';
   }
   if (s.state === 'logged_in') base.message = `Signed in as @${s.username || '?'}`;
@@ -246,6 +280,7 @@ async function startQrLogin(log: (m: string) => void): Promise<SessionStatus> {
   s.loginMode = 'qr';
   s.error = undefined;
   s.qr = undefined;
+  s.qrPageHint = undefined;
   s.qrState = 'new';
   s.loginStartedAt = Date.now();
   const browser = await headlessBrowser();
@@ -272,6 +307,7 @@ async function captureQr(page: Page): Promise<string | undefined> {
 
 async function qrLoop(page: Page, browser: Browser, log: (m: string) => void): Promise<void> {
   let lastReload = Date.now();
+  let misses = 0;
   try {
     while (s.qrPage === page && Date.now() - (s.loginStartedAt || 0) < LOGIN_TIMEOUT_MS) {
       if (!browser.isConnected() || page.isClosed()) break;
@@ -295,7 +331,21 @@ async function qrLoop(page: Page, browser: Browser, log: (m: string) => void): P
         s.qrState = 'scanned';
       }
       const qr = await captureQr(page);
-      if (qr) s.qr = qr;
+      if (qr) {
+        s.qr = qr;
+        s.qrPageHint = undefined;
+        misses = 0;
+      } else if (++misses === 2 || misses % 10 === 0) {
+        // No QR canvas: tell the UI (and the log) what TikTok served instead (captcha, error page, ...)
+        const title = String(await page.title().catch(() => ''));
+        const body = text.replace(/\s+/g, ' ').trim().slice(0, 160);
+        s.qrPageHint = `${title}${body ? ' – ' + body : ''}`.slice(0, 220) || `${page.url()} (empty page)`;
+        log(`QR page shows no QR code: ${s.qrPageHint}`);
+        if (misses % 10 === 0) {
+          await page.goto(QR_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => undefined);
+          lastReload = Date.now();
+        }
+      }
       await new Promise((r) => setTimeout(r, 2000));
     }
     if (s.qrPage === page && s.state === 'login_pending') {
@@ -567,4 +617,12 @@ export async function fetchForYou(count: number, log: (m: string) => void): Prom
 
 export function profileDir(): string {
   return PROFILE_DIR;
+}
+
+/** Closes every browser this process started (process shutdown). The profile stays on disk. */
+export async function shutdownBrowsers(): Promise<void> {
+  const lb = s.loginBrowser;
+  s.loginBrowser = undefined;
+  if (lb) await lb.close().catch(() => undefined);
+  await closeHeadless();
 }

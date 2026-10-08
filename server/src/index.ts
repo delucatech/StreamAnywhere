@@ -11,7 +11,7 @@ import { detectYtDlp, resolveWithYtDlp } from './ytdlp';
 import { defaultExpiry, mediaCount, registerMedia } from './mediaStore';
 import { hostAllowed } from './ssrf';
 import { FeedError, fetchExploreFeed, normalizeExploreOptions } from './feed';
-import { fetchExploreViaBrowser, fetchForYou, logout, sessionProbe, sessionStatus, sessionSupported, startLogin } from './session';
+import { fetchExploreViaBrowser, fetchForYou, logout, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
 
 /** After the browser path rescued an explore request, prefer it for a while (datacenter IPs). */
 let exploreViaBrowserUntil = 0;
@@ -213,8 +213,18 @@ export async function buildServer() {
 
 if (require.main === module) {
   buildServer()
-    .then((app) => app.listen({ port: config.port, host: config.host }))
-    .then((addr) => console.log(`StreamAnywhere resolver/proxy listening on ${addr}`))
+    .then(async (app) => {
+      const addr = await app.listen({ port: config.port, host: config.host });
+      console.log(`StreamAnywhere resolver/proxy listening on ${addr}`);
+      // systemd stop/restart: close the headless browsers first, otherwise the stop waits for the
+      // 90 s SIGTERM timeout and Chromium gets SIGKILLed (leaving stale profile locks behind).
+      for (const sig of ['SIGTERM', 'SIGINT'] as const) {
+        process.once(sig, () => {
+          app.log.info({ sig }, 'shutting down');
+          void Promise.race([shutdownBrowsers(), new Promise((r) => setTimeout(r, 8000))]).finally(() => process.exit(0));
+        });
+      }
+    })
     .catch((e) => {
       console.error(e);
       process.exit(1);
