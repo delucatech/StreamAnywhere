@@ -99,6 +99,23 @@ SERVE_CLIENT=true npm start      # PowerShell: $env:SERVE_CLIENT='true'; npm sta
   (the value is remembered; the header field shows the API status). Test MP4 and local-file modes
   work on Pages without any server because they never touch the API.
 
+### Deploy to an existing IIS / ASP.NET site (no Node on the server)
+
+`deploy/iis/player/` is a self-contained copy of the app for IIS: the built client plus
+`api.ashx`, a single-file ASP.NET generic handler that re-implements the resolver and the
+streaming proxy (C# 3 / .NET 3.5 syntax, so it compiles inside an ASP.NET 2.0/3.5 application;
+verified against Windows Server 2016 / IIS 10 / .NET 2.0.50727 at https://delucatech.com/player/).
+
+- Upload the folder (or unzip `deploy/iis/player.zip`) to `<site root>\player\`. No IIS
+  application, app pool or server setting is needed; the handler routes by path info
+  (`/player/api.ashx/api/resolve`, `/player/api.ashx/api/media/<id>`).
+- Rebuild the client for another path with `VITE_BASE=/other/ VITE_API_BASE=/other/api.ashx npm run build -w client`.
+- Differences from the Node server: no yt-dlp fallback; media ids live in the app domain and
+  are lost on app-pool recycle (the client simply re-resolves); CORS origins and limits are
+  constants at the top of `api.ashx`.
+- `deploy/iis/probe.aspx` is a diagnostic page that reports the runtime, TLS and TikTok
+  reachability from the server. Delete it after use.
+
 ### Deploy to a free host (no PC required)
 
 Because playback goes straight from the viewer's browser to TikTok's CDN, the server only
