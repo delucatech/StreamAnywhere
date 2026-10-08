@@ -77,6 +77,9 @@ interface SessionInternal {
   qrState?: SessionStatus['qrState'];
   /** What the login page shows when no QR could be captured (title + first words), for the UI */
   qrPageHint?: string;
+  qrPageShot?: string;
+  /** Last answer of TikTok's QR API seen on the page (status + body snippet) */
+  qrApi?: string;
   headless?: Browser;
   feedPage?: Page;
   explorePage?: Page;
@@ -212,6 +215,7 @@ export function sessionStatus(): SessionStatus {
     if (s.loginMode === 'qr') {
       base.qr = s.qr;
       base.qrState = s.qrState;
+      if (!s.qr && s.qrPageShot) base.pageShot = s.qrPageShot;
       base.message = s.qrState === 'scanned' ? 'Scanned – confirm the sign-in in the TikTok app.' : s.qr ? 'Scan the QR code with the TikTok app.' : s.qrPageHint ? `TikTok did not show a QR code. The page says: ${s.qrPageHint}` : 'Loading the QR code…';
     } else base.message = 'Finish signing in inside the TikTok window that opened on the server machine.';
   }
@@ -281,12 +285,25 @@ async function startQrLogin(log: (m: string) => void): Promise<SessionStatus> {
   s.error = undefined;
   s.qr = undefined;
   s.qrPageHint = undefined;
+  s.qrPageShot = undefined;
   s.qrState = 'new';
   s.loginStartedAt = Date.now();
   const browser = await headlessBrowser();
   const page = await browser.newPage();
   await preparePage(page, browser);
   s.qrPage = page;
+  // Diagnostic: what TikTok's QR API answers (datacenter IPs get rate-limited / empty answers).
+  page.on('response', (res) => {
+    if (!/passport\/web\/get_qrcode|qrconnect/.test(res.url())) return;
+    void res
+      .text()
+      .then((body) => {
+        const line = `${res.status()} ${new URL(res.url()).pathname} ${body.replace(/\s+/g, ' ').slice(0, 160)}`;
+        s.qrApi = line;
+        if (!/"error_code":0|"status":"new"|"status":"scanned"|"status":"confirmed"/.test(body)) log('QR API: ' + line);
+      })
+      .catch(() => undefined);
+  });
   await page.goto(QR_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 });
   log('QR sign-in page opened');
   void qrLoop(page, browser, log);
@@ -334,14 +351,21 @@ async function qrLoop(page: Page, browser: Browser, log: (m: string) => void): P
       if (qr) {
         s.qr = qr;
         s.qrPageHint = undefined;
+        s.qrPageShot = undefined;
         misses = 0;
-      } else if (++misses === 2 || misses % 10 === 0) {
+      } else if (++misses === 2 || misses % 30 === 0) {
         // No QR canvas: tell the UI (and the log) what TikTok served instead (captcha, error page, ...)
         const title = String(await page.title().catch(() => ''));
         const body = text.replace(/\s+/g, ' ').trim().slice(0, 160);
-        s.qrPageHint = `${title}${body ? ' – ' + body : ''}`.slice(0, 220) || `${page.url()} (empty page)`;
+        s.qrPageHint = (`${title}${body ? ' – ' + body : ''}`.slice(0, 160) || `${page.url()} (empty page)`) + (s.qrApi ? ` | QR API: ${s.qrApi.slice(0, 200)}` : ' | QR API: no answer seen');
         log(`QR page shows no QR code: ${s.qrPageHint}`);
-        if (misses % 10 === 0) {
+        try {
+          const shot = await page.screenshot({ type: 'jpeg', quality: 45, encoding: 'base64', clip: { x: 0, y: 0, width: 900, height: 700 } });
+          s.qrPageShot = `data:image/jpeg;base64,${shot}`;
+        } catch {
+          /* ignore */
+        }
+        if (misses % 30 === 0) {
           await page.goto(QR_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => undefined);
           lastReload = Date.now();
         }

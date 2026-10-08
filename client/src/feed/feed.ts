@@ -223,8 +223,11 @@ function renderSession(): void {
   const showQr = s.state === 'login_pending' && s.loginMode === 'qr';
   el.sessionQr.classList.toggle('hidden', !showQr);
   if (showQr) {
-    if (s.qr && el.sessionQrImg.src !== s.qr) el.sessionQrImg.src = s.qr;
-    el.sessionQrHint.textContent = s.qrState === 'scanned' ? 'Scanned – confirm on your phone' : s.qr ? 'Waiting for the scan…' : 'Loading the QR code…';
+    const img = s.qr || s.pageShot || '';
+    if (img && el.sessionQrImg.src !== img) el.sessionQrImg.src = img;
+    el.sessionQrImg.classList.toggle('page-shot', !s.qr && Boolean(s.pageShot));
+    if (!img) el.sessionQrImg.removeAttribute('src');
+    el.sessionQrHint.textContent = s.qrState === 'scanned' ? 'Scanned – confirm on your phone' : s.qr ? 'Waiting for the scan…' : s.pageShot ? 'No QR code yet – this is what TikTok shows the server; retrying automatically' : 'Loading the QR code…';
   }
   const idle = s.supported && s.state !== 'logged_in' && s.state !== 'login_pending';
   el.sessionLogin.classList.toggle('hidden', !idle);
@@ -278,6 +281,7 @@ function pollSession(): void {
 
 async function startLogin(mode: LoginMode): Promise<void> {
   el.sessionLogin.disabled = el.sessionLoginWindow.disabled = true;
+  el.sessionText.innerHTML = mode === 'qr' ? '<b>Starting TikTok on the server…</b>\nThis can take up to a minute the first time (the browser has to start).' : '<b>Opening the sign-in window on the server…</b>';
   try {
     state.session = await api.sessionLogin(mode);
     renderSession();
@@ -290,6 +294,8 @@ async function startLogin(mode: LoginMode): Promise<void> {
 }
 
 async function signOut(): Promise<void> {
+  el.sessionLogout.disabled = true;
+  el.sessionText.innerHTML = '<b>Signing out…</b>\nClosing the browser session on the server (a few seconds).';
   try {
     state.session = await api.sessionLogout();
     renderSession();
@@ -303,6 +309,9 @@ async function signOut(): Promise<void> {
     toast('Signed out');
   } catch (e) {
     toast(`Sign-out failed: ${errMsg(e)}`, true);
+    renderSession();
+  } finally {
+    el.sessionLogout.disabled = false;
   }
 }
 
@@ -710,10 +719,16 @@ let touchStartX = 0;
 let touchStartAt = 0;
 let touchStartIdx = 0;
 let touchMoved = false;
+/** Timestamp of the last user-driven scroll (touch, wheel, key); realign() stays out of the way for a while after it. */
+let userScrollAt = 0;
+let touching = false;
+let swipeTimer = 0;
 el.feed.addEventListener(
   'touchstart',
   (e) => {
     if (e.touches.length !== 1) return;
+    touching = true;
+    userScrollAt = Date.now();
     touchStartY = e.touches[0].clientY;
     touchStartX = e.touches[0].clientX;
     touchStartAt = Date.now();
@@ -726,12 +741,15 @@ el.feed.addEventListener(
   'touchmove',
   () => {
     touchMoved = true;
+    userScrollAt = Date.now();
   },
   { passive: true },
 );
 el.feed.addEventListener(
   'touchend',
   (e) => {
+    touching = false;
+    userScrollAt = Date.now();
     if (!touchMoved || !e.changedTouches.length) return;
     const dy = touchStartY - e.changedTouches[0].clientY;
     const dx = touchStartX - e.changedTouches[0].clientX;
@@ -739,25 +757,55 @@ el.feed.addEventListener(
     if (Math.abs(dy) < 30 || Math.abs(dy) < Math.abs(dx) || dt > 1200) return;
     if (!state.started) start();
     const target = Math.max(0, Math.min(state.entries.length - 1, touchStartIdx + (dy > 0 ? 1 : -1)));
-    goTo(target);
+    // The browser's own snap animation runs after touchend; only step in if it settled on the wrong item.
+    clearTimeout(swipeTimer);
+    swipeTimer = window.setTimeout(() => {
+      const h = Math.max(1, el.feed.clientHeight);
+      if (Math.round(el.feed.scrollTop / h) !== target) goTo(target);
+    }, 450);
   },
   { passive: true },
 );
+el.feed.addEventListener('touchcancel', () => {
+  touching = false;
+}, { passive: true });
+el.feed.addEventListener('wheel', () => {
+  userScrollAt = Date.now();
+}, { passive: true });
 
 // ---------- resize: keep the active video exactly in view ----------
 // Items are sized to the feed viewport (height: 100%), so when the window, orientation or
 // fullscreen state changes, the scroll offset must be re-aligned to the active item or the video
 // ends up partly off-screen. The video element itself keeps its aspect ratio (object-fit: contain).
 let resizeTimer = 0;
+let knownHeight = el.feed.clientHeight;
+let knownIdx = 0;
+el.feed.addEventListener(
+  'scroll',
+  () => {
+    // Remember which item the user is on in the current geometry (independent of the observer lag).
+    if (knownHeight > 0) knownIdx = Math.round(el.feed.scrollTop / knownHeight);
+  },
+  { passive: true },
+);
 function realign(): void {
-  if (state.active < 0) return;
-  const top = state.active * el.feed.clientHeight;
+  const h = el.feed.clientHeight;
+  if (!h || !state.entries.length) return;
+  if (h === knownHeight) return; // nothing changed (e.g. a scroll-driven observer callback)
+  // Phones resize the viewport while the user flicks (toolbar collapses): never fight that.
+  if (touching || Date.now() - userScrollAt < 900) {
+    clearTimeout(resizeTimer);
+    resizeTimer = window.setTimeout(realign, 400);
+    return;
+  }
+  const idx = Math.max(0, Math.min(state.entries.length - 1, knownIdx));
+  knownHeight = h;
+  const top = idx * h;
   if (Math.abs(el.feed.scrollTop - top) > 1) el.feed.scrollTo({ top, behavior: 'auto' });
 }
 function onViewportChange(): void {
-  realign();
   clearTimeout(resizeTimer);
-  resizeTimer = window.setTimeout(realign, 150); // after the browser settles (mobile toolbars, snap)
+  resizeTimer = window.setTimeout(realign, 120); // after the browser settles (toolbars, snap)
 }
 window.addEventListener('resize', onViewportChange);
 window.addEventListener('orientationchange', onViewportChange);

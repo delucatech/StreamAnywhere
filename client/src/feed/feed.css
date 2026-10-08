@@ -376,6 +376,13 @@ select:focus,
   border-radius: 12px;
   image-rendering: pixelated;
 }
+.session-qr img.page-shot {
+  width: 100%;
+  max-width: 420px;
+  height: auto;
+  padding: 0;
+  image-rendering: auto;
+}
 .session-qr-hint {
   font-size: 13px;
   color: var(--muted);
