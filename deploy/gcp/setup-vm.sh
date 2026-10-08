@@ -117,8 +117,7 @@ EnvironmentFile=/etc/streamanywhere.env
 ExecStart=/usr/bin/node $APP_DIR/server/dist/server/src/index.js
 Restart=always
 RestartSec=5
-# headless Chromium + Node comfortably fit in this; the swap covers spikes
-MemoryMax=900M
+# No MemoryMax: a cgroup cap made Chromium launches fail on the 1 GB e2-micro; the 2 GB swap absorbs spikes.
 NoNewPrivileges=false
 
 [Install]

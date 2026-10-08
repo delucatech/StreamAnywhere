@@ -121,8 +121,10 @@ async function launch(headless: boolean): Promise<Browser> {
   // and without --enable-automation, the headless page gets real feed batches; plain headless got
   // "Something went wrong".
   const args = ['--no-first-run', '--no-default-browser-check', '--disable-blink-features=AutomationControlled', '--mute-audio', `--window-size=${headless ? '1280,900' : '1100,860'}`];
-  // Linux servers usually run this as a service user without a sandboxed user namespace.
-  if (process.platform === 'linux' && (process.getuid?.() === 0 || /^(1|true|yes)$/i.test(process.env.BROWSER_NO_SANDBOX || ''))) args.push('--no-sandbox', '--disable-dev-shm-usage');
+  if (headless) args.push('--disable-gpu', '--disable-extensions', '--disable-background-networking', '--disable-sync', '--renderer-process-limit=3');
+  // Linux servers: /dev/shm is tiny on small VMs; a service user has no sandboxed user namespace.
+  if (process.platform === 'linux') args.push('--disable-dev-shm-usage');
+  if (process.platform === 'linux' && (process.getuid?.() === 0 || /^(1|true|yes)$/i.test(process.env.BROWSER_NO_SANDBOX || ''))) args.push('--no-sandbox');
   return p.launch({
     executablePath: sup.executable,
     headless: headless ? 'new' : false,
@@ -365,22 +367,38 @@ async function startWindowLogin(log: (m: string) => void): Promise<SessionStatus
 }
 
 // ---------------------------------------------------------------- headless browser + feed page
+let headlessLaunch: Promise<Browser> | undefined;
+
+/**
+ * One shared headless browser. Concurrent callers (the saved-profile probe, an explore request and
+ * a QR login can all arrive within the same second after a restart) wait for the same launch:
+ * two launches on one profile directory fail with "Failed to launch the browser process" (profile
+ * lock) - observed on the Google Cloud VM 2026-10-08.
+ */
 async function headlessBrowser(): Promise<Browser> {
   if (s.headless?.isConnected()) return s.headless;
-  await closeHeadless();
-  feedLog?.('launching headless browser');
-  const browser = await launch(true);
-  feedLog?.('headless browser launched: ' + (await browser.version()));
-  s.headless = browser;
-  browser.on('disconnected', () => {
-    if (s.headless === browser) {
-      s.headless = undefined;
-      s.feedPage = undefined;
-      s.qrPage = undefined;
-      s.explorePage = undefined;
+  if (headlessLaunch) return headlessLaunch;
+  headlessLaunch = (async () => {
+    try {
+      await closeHeadless();
+      feedLog?.('launching headless browser');
+      const browser = await launch(true);
+      feedLog?.('headless browser launched: ' + (await browser.version()));
+      s.headless = browser;
+      browser.on('disconnected', () => {
+        if (s.headless === browser) {
+          s.headless = undefined;
+          s.feedPage = undefined;
+          s.qrPage = undefined;
+          s.explorePage = undefined;
+        }
+      });
+      return browser;
+    } finally {
+      headlessLaunch = undefined;
     }
-  });
-  return browser;
+  })();
+  return headlessLaunch;
 }
 
 async function closeHeadless(): Promise<void> {
@@ -403,8 +421,18 @@ async function resetFeedPage(): Promise<void> {
 }
 
 /** The headless page that stays on /foryou; feed responses are captured as they happen. */
+let feedPageOpening: Promise<Page> | undefined;
+
 async function feedPage(): Promise<Page> {
   if (s.feedPage && !s.feedPage.isClosed() && s.headless?.isConnected()) return s.feedPage;
+  if (feedPageOpening) return feedPageOpening;
+  feedPageOpening = openFeedPage().finally(() => {
+    feedPageOpening = undefined;
+  });
+  return feedPageOpening;
+}
+
+async function openFeedPage(): Promise<Page> {
   const browser = await headlessBrowser();
   const first = (await browser.pages())[0];
   const page = first && !s.qrPage && first.url() === 'about:blank' ? first : await browser.newPage();

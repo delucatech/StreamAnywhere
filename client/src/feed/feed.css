@@ -150,12 +150,8 @@ select:focus,
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
 }
-@media (max-width: 640px) and (orientation: portrait) {
-  /* fill the phone screen like the app (portrait videos are 9:16 anyway) */
-  .item video {
-    object-fit: cover;
-  }
-}
+/* object-fit: contain everywhere: the whole frame stays visible at its true aspect ratio
+   (letterboxed when the phone screen is taller or wider than the video). */
 .item .pause-badge {
   position: absolute;
   inset: 0;
