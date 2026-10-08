@@ -56,12 +56,15 @@ const el = {
   sessionCodeText: $<HTMLInputElement>('sessionCodeText'),
   sessionCodeSend: $<HTMLButtonElement>('sessionCodeSend'),
   sessionInput: $('sessionInput'),
+  sessionManualToggle: $<HTMLButtonElement>('sessionManualToggle'),
   sessionInputText: $<HTMLInputElement>('sessionInputText'),
   sessionInputType: $<HTMLButtonElement>('sessionInputType'),
   sessionInputEnter: $<HTMLButtonElement>('sessionInputEnter'),
   sessionInputBack: $<HTMLButtonElement>('sessionInputBack'),
   sessionRefresh: $<HTMLButtonElement>('sessionRefresh'),
   sessionCancel: $<HTMLButtonElement>('sessionCancel'),
+  sessionRestart: $<HTMLButtonElement>('sessionRestart'),
+  sessionNotice: $('sessionNotice'),
   sessionLogout: $<HTMLButtonElement>('sessionLogout'),
   sessionClose: $<HTMLButtonElement>('sessionClose'),
   start: $('start'),
@@ -214,12 +217,39 @@ el.navFriends.addEventListener('click', () => toast('Friends is coming later'));
 el.navPlus.addEventListener('click', () => toast('Upload is coming later'));
 el.navInbox.addEventListener('click', () => toast('Inbox is coming later'));
 el.navProfile.addEventListener('click', () => void openSessionPanel());
+/**
+ * Runs `work` for a button press: the button shows a spinner and "<label>…" and ignores further presses
+ * until the work has answered, so one tap never fires twice while the server is slow.
+ */
+function pressed(btn: HTMLButtonElement, label: string, work: () => Promise<unknown>): void {
+  if (btn.classList.contains('busy')) return;
+  const text = btn.textContent;
+  btn.classList.add('busy');
+  btn.disabled = true;
+  btn.textContent = label + '…';
+  void work().finally(() => {
+    btn.classList.remove('busy');
+    btn.disabled = false;
+    btn.textContent = text;
+  });
+}
 el.sessionClose.addEventListener('click', () => closeSessionPanel());
-el.sessionRefresh.addEventListener('click', () => void refreshSession(true));
-el.sessionLogin.addEventListener('click', () => void startLogin('qr'));
-el.sessionLoginWindow.addEventListener('click', () => void startLogin('window'));
-el.sessionLogout.addEventListener('click', () => void signOut());
-el.sessionCancel.addEventListener('click', () => void signOut(true));
+el.sessionRefresh.addEventListener('click', () => pressed(el.sessionRefresh, 'Checking', () => refreshSession(true)));
+el.sessionLogin.addEventListener('click', () => pressed(el.sessionLogin, 'Starting', () => startLogin('qr')));
+el.sessionLoginWindow.addEventListener('click', () => pressed(el.sessionLoginWindow, 'Opening', () => startLogin('window')));
+el.sessionLogout.addEventListener('click', () => pressed(el.sessionLogout, 'Signing out', () => signOut()));
+el.sessionCancel.addEventListener('click', () => pressed(el.sessionCancel, 'Cancelling', () => signOut(true)));
+el.sessionRestart.addEventListener('click', () =>
+  pressed(el.sessionRestart, 'Restarting', async () => {
+    await signOut(true);
+    await startLogin('qr');
+  }),
+);
+let manualOpen = false;
+el.sessionManualToggle.addEventListener('click', () => {
+  manualOpen = !manualOpen;
+  renderSession();
+});
 // Live view (TikTok verification on the server's page): clicks and drags on the picture, typing below it.
 let liveDown: { x: number; y: number; id: number } | undefined;
 el.sessionQrImg.addEventListener('pointerdown', (e) => {
@@ -241,7 +271,7 @@ el.sessionInputType.addEventListener('click', () => {
   const text = el.sessionInputText.value;
   if (!text) return;
   el.sessionInputText.value = '';
-  void sendLiveInput({ type: 'type', text });
+  pressed(el.sessionInputType, 'Typing', () => sendLiveInput({ type: 'type', text }));
 });
 el.sessionInputText.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
@@ -251,27 +281,27 @@ el.sessionInputText.addEventListener('keydown', (e) => {
     void (text ? sendLiveInput({ type: 'type', text }).then(() => sendLiveInput({ type: 'key', key: 'Enter' })) : sendLiveInput({ type: 'key', key: 'Enter' }));
   }
 });
-el.sessionInputEnter.addEventListener('click', () => void sendLiveInput({ type: 'key', key: 'Enter' }));
-async function sendVerifyCode(): Promise<void> {
+el.sessionInputEnter.addEventListener('click', () => pressed(el.sessionInputEnter, 'Pressing', () => sendLiveInput({ type: 'key', key: 'Enter' })));
+function sendVerifyCode(): void {
   const code = el.sessionCodeText.value.replace(/\s+/g, '');
-  if (!code) return;
-  el.sessionCodeSend.disabled = true;
-  try {
+  if (!code) {
+    el.sessionCodeText.focus();
+    return;
+  }
+  pressed(el.sessionCodeSend, 'Verifying', async () => {
     await sendLiveInput({ type: 'code', code });
     el.sessionCodeText.value = '';
-    toast('Code sent to TikTok – finishing the sign-in…');
-  } finally {
-    el.sessionCodeSend.disabled = false;
-  }
+    toast('Code handed to TikTok – finishing the sign-in…');
+  });
 }
-el.sessionCodeSend.addEventListener('click', () => void sendVerifyCode());
+el.sessionCodeSend.addEventListener('click', () => sendVerifyCode());
 el.sessionCodeText.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
     e.preventDefault();
-    void sendVerifyCode();
+    sendVerifyCode();
   }
 });
-el.sessionInputBack.addEventListener('click', () => void sendLiveInput({ type: 'key', key: 'Backspace' }));
+el.sessionInputBack.addEventListener('click', () => pressed(el.sessionInputBack, 'Deleting', () => sendLiveInput({ type: 'key', key: 'Backspace' })));
 
 /** Pointer position in page pixels (the picture is the server's viewport, scaled to fit). */
 function livePoint(e: PointerEvent): { x: number; y: number } {
@@ -359,13 +389,20 @@ function renderSession(): void {
   const showQr = s.state === 'login_pending' && s.loginMode === 'qr';
   el.sessionQr.classList.toggle('hidden', !showQr);
   if (showQr) {
+    el.sessionNotice.textContent = s.notice || '';
+    el.sessionNotice.classList.toggle('hidden', !s.notice);
     const live = s.qrState === 'verify' && Boolean(s.pageShot);
     const img = (live ? s.pageShot : s.qr || s.pageShot) || '';
     if (img && el.sessionQrImg.src !== img) el.sessionQrImg.src = img;
     el.sessionQrImg.classList.toggle('page-shot', live || (!s.qr && Boolean(s.pageShot)));
     el.sessionQrImg.classList.toggle('live', live);
-    el.sessionInput.classList.toggle('hidden', !live);
     const codeStep = live && s.verifyStep === 'code';
+    // Manual controls: shown when the server cannot drive the dialog itself (step 'choose' for a while),
+    // otherwise behind a "Having trouble?" toggle so the code box stays the one obvious thing to do.
+    el.sessionManualToggle.classList.toggle('hidden', !live);
+    el.sessionManualToggle.textContent = manualOpen ? 'Hide manual controls' : 'Having trouble? Show manual controls';
+    el.sessionInput.classList.toggle('hidden', !(live && manualOpen));
+    if (!live) manualOpen = false;
     const codeWasHidden = el.sessionCode.classList.contains('hidden');
     el.sessionCode.classList.toggle('hidden', !codeStep);
     if (codeStep && codeWasHidden) {
@@ -382,6 +419,7 @@ function renderSession(): void {
   // "Sign out" only when there is a session to end; while a sign-in is pending the button is "Cancel".
   el.sessionLogout.classList.toggle('hidden', s.state !== 'logged_in');
   el.sessionCancel.classList.toggle('hidden', s.state !== 'login_pending');
+  el.sessionRestart.classList.toggle('hidden', !(s.state === 'login_pending' && s.loginMode === 'qr'));
   el.navProfileLabel.textContent = s.state === 'logged_in' ? `@${(s.username || 'me').slice(0, 12)}` : s.state === 'login_pending' ? 'Signing in…' : 'Profile';
   el.navProfile.classList.toggle('active', s.state === 'logged_in');
 }

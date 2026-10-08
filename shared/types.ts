@@ -260,4 +260,7 @@ export interface SessionStatus {
   verifyStep?: 'choose' | 'sending' | 'code';
   /** Text of TikTok's verification dialog (what it asks for, masked address the code went to) */
   verifyText?: string;
+  /** Something the user should know about the current attempt (e.g. "started over: TikTok's QR session
+   *  expired while waiting for the e-mail code; the verification is re-used") */
+  notice?: string;
 }
