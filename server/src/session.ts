@@ -338,6 +338,14 @@ async function startQrLogin(log: (m: string) => void): Promise<SessionStatus> {
           s.qrExpireAt = typeof d.expire_time === 'number' && d.expire_time > 1e9 ? d.expire_time * 1000 : Date.now() + 55_000;
           log(`QR code received from TikTok's API (${d.qrcode.length} chars, valid ${Math.round((s.qrExpireAt - Date.now()) / 1000)} s)`);
         } else if (typeof d.status === 'string') {
+          // The page keeps polling ITS token; once we drive our own, only answers for our token count.
+          let urlToken: string | null = null;
+          try {
+            urlToken = new URL(res.url()).searchParams.get('token');
+          } catch {
+            /* ignore */
+          }
+          if (s.qrToken && urlToken && urlToken !== s.qrToken) return;
           if (d.status === 'scanned' || d.status === 'confirmed') {
             if (s.qrState !== 'scanned') log(`QR ${d.status} - waiting for TikTok to finish the sign-in`);
             s.qrState = 'scanned';
@@ -381,7 +389,7 @@ let lastQrRequestAt = 0;
 async function requestNewQr(page: Page, log: (m: string) => void): Promise<boolean> {
   if (!s.qrGetUrl) return false;
   // Never more often than every 20 s, and not during a rate-limit back-off.
-  if (Date.now() < qrBackoffUntil || Date.now() - lastQrRequestAt < 20_000) return false;
+  if (Date.now() < qrBackoffUntil || Date.now() - lastQrRequestAt < 15_000) return false;
   lastQrRequestAt = Date.now();
   try {
     const json: any = await page.evaluate(`fetch(${JSON.stringify(unsignedUrl(s.qrGetUrl))}, { credentials: 'include' }).then((r) => r.json())`);
@@ -451,7 +459,7 @@ async function qrLoop(page: Page, browser: Browser, log: (m: string) => void): P
         } else if (r.status === 'expired') {
           s.qrState = 'expired';
         }
-        const nearExpiry = s.qrExpireAt ? Date.now() > s.qrExpireAt - 8000 : false;
+        const nearExpiry = s.qrExpireAt ? Date.now() > s.qrExpireAt - 12_000 : false;
         if ((s.qrState as string) !== 'scanned' && (nearExpiry || (s.qrState as string) === 'expired')) {
           if (!(await requestNewQr(page, log))) {
             s.qr = undefined;
