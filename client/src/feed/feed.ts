@@ -19,6 +19,7 @@
  */
 import { EXPLORE_CATEGORIES, type FeedItem, type FeedSource, type LoginMode, type MediaFormat, type SessionInputRequest, type SessionStatus } from '../../../shared/types';
 import { api, ApiError, apiUrl } from '../api';
+import { pressed } from '../busy';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const el = document.getElementById(id);
@@ -166,10 +167,10 @@ function renderSourceUi(): void {
   el.chips.classList.toggle('hidden', prefs.source !== 'explore');
   for (const c of el.chips.querySelectorAll<HTMLButtonElement>('.chip')) c.classList.toggle('active', Number(c.dataset.id) === prefs.category);
 }
-function setSource(src: FeedSource, announce = true): void {
+async function setSource(src: FeedSource, announce = true): Promise<void> {
   if (src === 'foryou' && state.session?.state !== 'logged_in') {
     // Keep Explore until a session exists; the panel switches once signed in.
-    void openSessionPanel();
+    await openSessionPanel();
     return;
   }
   if (prefs.source === src) return;
@@ -177,7 +178,7 @@ function setSource(src: FeedSource, announce = true): void {
   savePrefs();
   renderSourceUi();
   if (announce) toast(src === 'foryou' ? 'For You' : 'Explore');
-  void reload();
+  await reload();
 }
 for (const c of EXPLORE_CATEGORIES) {
   const b = document.createElement('button');
@@ -190,13 +191,13 @@ for (const c of EXPLORE_CATEGORIES) {
     prefs.category = c.id;
     savePrefs();
     renderSourceUi();
-    void reload();
+    pressed(b, () => reload());
   });
   el.chips.appendChild(b);
 }
 el.tabs.addEventListener('click', (e) => {
   const b = (e.target as HTMLElement).closest<HTMLButtonElement>('.tab');
-  if (b?.dataset.source) setSource(b.dataset.source as FeedSource);
+  if (b?.dataset.source) pressed(b, () => setSource(b.dataset.source as FeedSource));
 });
 el.searchBtn.addEventListener('click', () => toast('Search is coming later'));
 renderSourceUi();
@@ -211,39 +212,27 @@ el.actAuto.addEventListener('click', () => toggleAutoscroll());
 el.actFull.addEventListener('click', () => toggleFullscreen());
 el.navHome.addEventListener('click', () => {
   if (state.active > 0) goTo(0);
-  else void reload();
+  else pressed(el.navHome, () => reload());
 });
 el.navFriends.addEventListener('click', () => toast('Friends is coming later'));
 el.navPlus.addEventListener('click', () => toast('Upload is coming later'));
 el.navInbox.addEventListener('click', () => toast('Inbox is coming later'));
-el.navProfile.addEventListener('click', () => void openSessionPanel());
-/**
- * Runs `work` for a button press: the button shows a spinner and "<label>…" and ignores further presses
- * until the work has answered, so one tap never fires twice while the server is slow.
- */
-function pressed(btn: HTMLButtonElement, label: string, work: () => Promise<unknown>): void {
-  if (btn.classList.contains('busy')) return;
-  const text = btn.textContent;
-  btn.classList.add('busy');
-  btn.disabled = true;
-  btn.textContent = label + '…';
-  void work().finally(() => {
-    btn.classList.remove('busy');
-    btn.disabled = false;
-    btn.textContent = text;
-  });
-}
+el.navProfile.addEventListener('click', () => pressed(el.navProfile, () => openSessionPanel()));
 el.sessionClose.addEventListener('click', () => closeSessionPanel());
-el.sessionRefresh.addEventListener('click', () => pressed(el.sessionRefresh, 'Checking', () => refreshSession(true)));
-el.sessionLogin.addEventListener('click', () => pressed(el.sessionLogin, 'Starting', () => startLogin('qr')));
-el.sessionLoginWindow.addEventListener('click', () => pressed(el.sessionLoginWindow, 'Opening', () => startLogin('window')));
-el.sessionLogout.addEventListener('click', () => pressed(el.sessionLogout, 'Signing out', () => signOut()));
-el.sessionCancel.addEventListener('click', () => pressed(el.sessionCancel, 'Cancelling', () => signOut(true)));
+el.sessionRefresh.addEventListener('click', () => pressed(el.sessionRefresh, () => refreshSession(true), { label: 'Checking' }));
+el.sessionLogin.addEventListener('click', () => pressed(el.sessionLogin, () => startLogin('qr'), { label: 'Starting' }));
+el.sessionLoginWindow.addEventListener('click', () => pressed(el.sessionLoginWindow, () => startLogin('window'), { label: 'Opening' }));
+el.sessionLogout.addEventListener('click', () => pressed(el.sessionLogout, () => signOut(), { label: 'Signing out' }));
+el.sessionCancel.addEventListener('click', () => pressed(el.sessionCancel, () => signOut(true), { label: 'Cancelling' }));
 el.sessionRestart.addEventListener('click', () =>
-  pressed(el.sessionRestart, 'Restarting', async () => {
-    await signOut(true);
-    await startLogin('qr');
-  }),
+  pressed(
+    el.sessionRestart,
+    async () => {
+      await signOut(true);
+      await startLogin('qr');
+    },
+    { label: 'Restarting' },
+  ),
 );
 let manualOpen = false;
 el.sessionManualToggle.addEventListener('click', () => {
@@ -271,7 +260,7 @@ el.sessionInputType.addEventListener('click', () => {
   const text = el.sessionInputText.value;
   if (!text) return;
   el.sessionInputText.value = '';
-  pressed(el.sessionInputType, 'Typing', () => sendLiveInput({ type: 'type', text }));
+  pressed(el.sessionInputType, () => sendLiveInput({ type: 'type', text }), { label: 'Typing' });
 });
 el.sessionInputText.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
@@ -281,18 +270,22 @@ el.sessionInputText.addEventListener('keydown', (e) => {
     void (text ? sendLiveInput({ type: 'type', text }).then(() => sendLiveInput({ type: 'key', key: 'Enter' })) : sendLiveInput({ type: 'key', key: 'Enter' }));
   }
 });
-el.sessionInputEnter.addEventListener('click', () => pressed(el.sessionInputEnter, 'Pressing', () => sendLiveInput({ type: 'key', key: 'Enter' })));
+el.sessionInputEnter.addEventListener('click', () => pressed(el.sessionInputEnter, () => sendLiveInput({ type: 'key', key: 'Enter' }), { label: 'Pressing' }));
 function sendVerifyCode(): void {
   const code = el.sessionCodeText.value.replace(/\s+/g, '');
   if (!code) {
     el.sessionCodeText.focus();
     return;
   }
-  pressed(el.sessionCodeSend, 'Verifying', async () => {
-    await sendLiveInput({ type: 'code', code });
-    el.sessionCodeText.value = '';
-    toast('Code handed to TikTok – finishing the sign-in…');
-  });
+  pressed(
+    el.sessionCodeSend,
+    async () => {
+      await sendLiveInput({ type: 'code', code });
+      el.sessionCodeText.value = '';
+      toast('Code handed to TikTok – finishing the sign-in…');
+    },
+    { label: 'Verifying' },
+  );
 }
 el.sessionCodeSend.addEventListener('click', () => sendVerifyCode());
 el.sessionCodeText.addEventListener('keydown', (e) => {
@@ -301,7 +294,7 @@ el.sessionCodeText.addEventListener('keydown', (e) => {
     sendVerifyCode();
   }
 });
-el.sessionInputBack.addEventListener('click', () => pressed(el.sessionInputBack, 'Deleting', () => sendLiveInput({ type: 'key', key: 'Backspace' })));
+el.sessionInputBack.addEventListener('click', () => pressed(el.sessionInputBack, () => sendLiveInput({ type: 'key', key: 'Backspace' }), { label: 'Deleting' }));
 
 /** Pointer position in page pixels (the picture is the server's viewport, scaled to fit). */
 function livePoint(e: PointerEvent): { x: number; y: number } {
@@ -915,7 +908,12 @@ async function download(entry: Entry): Promise<void> {
   const cands = sourceCandidates(item);
   if (!cands.length) return toast('No downloadable URL for this video', true);
   const name = `@${(item.author.uniqueId || 'tiktok').replace(/[^\w.-]+/g, '_')}_${item.id}.mp4`;
+  if (el.actDownload.classList.contains('busy')) return;
   el.actDownload.disabled = true;
+  el.actDownload.classList.add('busy');
+  const small = el.actDownload.querySelector('small');
+  const smallText = small?.textContent || 'Save';
+  if (small) small.textContent = 'Saving…';
   el.actDownloadIco.textContent = '…';
   const errors: string[] = [];
   try {
@@ -956,6 +954,8 @@ async function download(entry: Entry): Promise<void> {
     toast(`Download failed – ${errors.join('; ')}`, true, 7000);
   } finally {
     el.actDownload.disabled = false;
+    el.actDownload.classList.remove('busy');
+    if (small) small.textContent = smallText;
     el.actDownloadIco.textContent = '⬇';
   }
 }

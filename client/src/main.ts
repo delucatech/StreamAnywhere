@@ -1,4 +1,5 @@
 import type { MediaFormat, ResolveResponse } from '../../shared/types';
+import { pressed } from './busy';
 import { api, ApiError, apiUrl, getApiBase, setApiBase } from './api';
 import { testFetch } from './cors-test';
 import { initialResults, runExperiments, type ExperimentResult } from './diagnostics';
@@ -106,9 +107,9 @@ function updateSourceVisibility(): void {
   el.formatWrap.classList.toggle('hidden', !(state.resolved && state.resolved.source === 'tiktok' && (mode === 'auto' || mode === 'direct' || mode === 'proxy')));
 }
 el.source.addEventListener('change', updateSourceVisibility);
-el.load.addEventListener('click', () => void loadVideo());
+el.load.addEventListener('click', () => pressed(el.load, () => loadVideo(), { label: 'Loading' }));
 el.url.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') void loadVideo();
+  if (e.key === 'Enter') pressed(el.load, () => loadVideo(), { label: 'Loading' });
 });
 el.format.addEventListener('change', () => {
   if (state.resolved) void loadVideo(true);
@@ -189,7 +190,6 @@ function showResolveInfo(r: ResolveResponse, f: MediaFormat): void {
 async function loadVideo(reuseResolved = false): Promise<void> {
   const mode = el.source.value as SourceMode;
   const rendererKind = el.renderer.value as RendererKind;
-  el.load.disabled = true;
   state.reported = false;
   setOverlay('Loading…');
   try {
@@ -244,7 +244,6 @@ async function loadVideo(reuseResolved = false): Promise<void> {
     setOverlay(`Error: ${msg}`, true);
     report(false, msg);
   } finally {
-    el.load.disabled = false;
   }
 }
 
@@ -365,8 +364,8 @@ function renderResults(results: ExperimentResult[]): void {
 }
 renderResults(state.results);
 
-el.runTests.addEventListener('click', async () => {
-  el.runTests.disabled = true;
+el.runTests.addEventListener('click', () => pressed(el.runTests, runAllExperiments, { label: 'Running experiments' }));
+async function runAllExperiments(): Promise<void> {
   try {
     state.results = await runExperiments(
       {
@@ -387,19 +386,23 @@ el.runTests.addEventListener('click', async () => {
     log('info', `experiments finished: ${state.results.map((r) => `${r.id}=${r.status}`).join(', ')}`);
   } catch (e) {
     log('error', `experiments crashed: ${(e as Error).message}`);
-  } finally {
-    el.runTests.disabled = false;
   }
-});
-el.copyResults.addEventListener('click', async () => {
-  const payload = { userAgent: navigator.userAgent, at: new Date().toISOString(), results: state.results };
-  try {
-    await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
-    log('info', 'results copied to clipboard');
-  } catch (e) {
-    log('warn', `clipboard write failed: ${(e as Error).message}`);
-  }
-});
+}
+el.copyResults.addEventListener('click', () =>
+  pressed(
+    el.copyResults,
+    async () => {
+      const payload = { userAgent: navigator.userAgent, at: new Date().toISOString(), results: state.results };
+      try {
+        await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+        log('info', 'results copied to clipboard');
+      } catch (e) {
+        log('warn', `clipboard write failed: ${(e as Error).message}`);
+      }
+    },
+    { label: 'Copying' },
+  ),
+);
 
 // Expose for console poking
 (window as unknown as { streamAnywhere: unknown }).streamAnywhere = state;

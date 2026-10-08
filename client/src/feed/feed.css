@@ -578,14 +578,47 @@ button {
   opacity: 0.6;
   cursor: progress;
 }
-/* A pressed button shows a spinner and "…" until its request has answered (no double presses) */
-.btn.busy {
+/* A pressed button shows a spinner (and "<action>…") until its request has answered (no double presses) */
+.btn.busy,
+.chip.busy,
+.tab.busy {
   position: relative;
   padding-left: 28px;
   opacity: 0.85;
   cursor: progress;
 }
-.btn.busy::before {
+.chip.busy {
+  padding-left: 26px;
+}
+.tab.busy {
+  padding-left: 22px;
+}
+.tab.busy::before {
+  left: 2px;
+}
+/* Icon buttons (action column, bottom bar): a pulsing ring around the icon, label kept readable */
+.act.busy,
+.nav.busy {
+  cursor: progress;
+}
+.act.busy .ico,
+.nav.busy svg {
+  animation: busy-pulse 0.9s ease-in-out infinite;
+}
+@keyframes busy-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    filter: drop-shadow(0 0 0 rgba(37, 244, 238, 0));
+  }
+  50% {
+    opacity: 0.55;
+    filter: drop-shadow(0 0 6px rgba(37, 244, 238, 0.9));
+  }
+}
+.btn.busy::before,
+.chip.busy::before,
+.tab.busy::before {
   content: '';
   position: absolute;
   left: 9px;
