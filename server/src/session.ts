@@ -414,7 +414,7 @@ async function qrLoop(page: Page, browser: Browser, log: (m: string) => void): P
         s.qrPageHint = undefined;
         s.qrPageShot = undefined;
         misses = 0;
-      } else if (++misses === 2 || misses % 30 === 0) {
+      } else if (++misses === 12 || misses % 30 === 0) {
         // No QR canvas: tell the UI (and the log) what TikTok served instead (captcha, error page, ...)
         const title = String(await page.title().catch(() => ''));
         const body = text.replace(/\s+/g, ' ').trim().slice(0, 160);

@@ -75,7 +75,11 @@
       </div>
 
       <div id="toast" class="toast hidden"></div>
-      <div id="loading" class="loading hidden">Loading…</div>
+      <div id="loading" class="loading hidden" role="status" aria-live="polite">
+        <div class="spinner" aria-hidden="true"></div>
+        <div id="loadingTitle" class="loading-title">Loading…</div>
+        <div id="loadingDetail" class="loading-detail"></div>
+      </div>
     </div>
     <script type="module" src="/src/feed/feed.ts"></script>
   </body>

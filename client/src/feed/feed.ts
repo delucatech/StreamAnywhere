@@ -53,12 +53,15 @@ const el = {
   sessionQrImg: $<HTMLImageElement>('sessionQrImg'),
   sessionQrHint: $('sessionQrHint'),
   sessionRefresh: $<HTMLButtonElement>('sessionRefresh'),
+  sessionCancel: $<HTMLButtonElement>('sessionCancel'),
   sessionLogout: $<HTMLButtonElement>('sessionLogout'),
   sessionClose: $<HTMLButtonElement>('sessionClose'),
   start: $('start'),
   startBtn: $<HTMLButtonElement>('startBtn'),
   toast: $('toast'),
   loading: $('loading'),
+  loadingTitle: $('loadingTitle'),
+  loadingDetail: $('loadingDetail'),
 };
 
 interface Entry {
@@ -208,6 +211,7 @@ el.sessionRefresh.addEventListener('click', () => void refreshSession(true));
 el.sessionLogin.addEventListener('click', () => void startLogin('qr'));
 el.sessionLoginWindow.addEventListener('click', () => void startLogin('window'));
 el.sessionLogout.addEventListener('click', () => void signOut());
+el.sessionCancel.addEventListener('click', () => void signOut(true));
 el.startBtn.addEventListener('click', () => start());
 el.start.addEventListener('click', (e) => {
   if (e.target === el.start) start();
@@ -287,7 +291,9 @@ function renderSession(): void {
   const idle = s.supported && s.state !== 'logged_in' && s.state !== 'login_pending';
   el.sessionLogin.classList.toggle('hidden', !idle);
   el.sessionLoginWindow.classList.toggle('hidden', !idle);
-  el.sessionLogout.classList.toggle('hidden', !s.supported || s.state === 'none' || s.state === 'unsupported');
+  // "Sign out" only when there is a session to end; while a sign-in is pending the button is "Cancel".
+  el.sessionLogout.classList.toggle('hidden', s.state !== 'logged_in');
+  el.sessionCancel.classList.toggle('hidden', s.state !== 'login_pending');
   el.navProfileLabel.textContent = s.state === 'logged_in' ? `@${(s.username || 'me').slice(0, 12)}` : s.state === 'login_pending' ? 'Signing in…' : 'Profile';
   el.navProfile.classList.toggle('active', s.state === 'logged_in');
 }
@@ -362,8 +368,8 @@ async function startLogin(mode: LoginMode): Promise<void> {
   }
 }
 
-async function signOut(): Promise<void> {
-  el.sessionLogout.disabled = true;
+async function signOut(cancelOnly = false): Promise<void> {
+  el.sessionLogout.disabled = el.sessionCancel.disabled = true;
   el.sessionText.innerHTML = '<b>Signing out…</b>\nClosing the browser session on the server (a few seconds).';
   try {
     state.session = await api.sessionLogout();
@@ -374,13 +380,67 @@ async function signOut(): Promise<void> {
       renderSourceUi();
       void reload();
     }
-    toast('Signed out');
+    toast(cancelOnly ? 'Sign-in cancelled' : 'Signed out');
   } catch (e) {
-    toast(`Sign-out failed: ${errMsg(e)}`, true);
+    toast(`${cancelOnly ? 'Cancel' : 'Sign-out'} failed: ${errMsg(e)}`, true);
     renderSession();
   } finally {
-    el.sessionLogout.disabled = false;
+    el.sessionLogout.disabled = el.sessionCancel.disabled = false;
   }
+}
+
+// ---------- loading indicator: centered with details while the viewer waits, a small chip otherwise ----------
+let loadingTicker = 0;
+function sourceLabel(): string {
+  if (prefs.source === 'foryou') return 'your For You feed';
+  const cat = EXPLORE_CATEGORIES.find((c) => c.id === prefs.category);
+  return `Explore${cat && cat.id !== 120 ? ' · ' + cat.label : ''}`;
+}
+function showLoading(title: string, detail: string, centered: boolean): void {
+  el.loading.classList.remove('hidden');
+  el.loading.classList.toggle('compact', !centered);
+  el.loadingTitle.textContent = title;
+  el.loadingDetail.textContent = detail;
+}
+function hideLoading(): void {
+  clearInterval(loadingTicker);
+  el.loading.classList.add('hidden');
+}
+/** Shows what the page is waiting for, updating the detail line as the wait grows. */
+function startLoadingStatus(): void {
+  clearInterval(loadingTicker);
+  const t0 = Date.now();
+  const waiting = () => state.entries.length === 0 || state.wantNext || state.active >= state.entries.length - 1;
+  const render = () => {
+    const sec = Math.round((Date.now() - t0) / 1000);
+    const first = state.entries.length === 0;
+    let title = first ? `Loading ${sourceLabel()}…` : 'Loading more videos…';
+    let detail = 'Asking the server for the next videos';
+    if (sec >= 5) detail = 'The server is fetching from TikTok…';
+    if (sec >= 12) detail = prefs.source === 'foryou' ? 'Reading your feed from the signed-in TikTok session\n(a fresh browser start can take up to a minute)' : 'TikTok is slow to answer; the server is retrying through its browser…';
+    if (sec >= 40) detail += `\n${sec} s so far – still trying`;
+    if (state.emptyBatches > 0 && first) title = `Still loading ${sourceLabel()}…`;
+    showLoading(title, detail, waiting());
+  };
+  render();
+  loadingTicker = window.setInterval(render, 1000);
+}
+function showRetryStatus(delayMs: number): void {
+  clearInterval(loadingTicker);
+  const until = Date.now() + delayMs;
+  const render = () => {
+    const left = Math.max(0, Math.ceil((until - Date.now()) / 1000));
+    const waiting = state.entries.length === 0 || state.wantNext || state.active >= state.entries.length - 1;
+    if (!waiting) return hideLoading();
+    showLoading(
+      state.entries.length ? 'No new videos yet' : `TikTok returned no videos for ${sourceLabel()}`,
+      `Retrying in ${left} s… (TikTok limits how fast it hands out videos)`,
+      true,
+    );
+    if (left <= 0) clearInterval(loadingTicker);
+  };
+  render();
+  loadingTicker = window.setInterval(render, 1000);
 }
 
 // ---------- feed loading ----------
@@ -408,8 +468,7 @@ async function loadMore(): Promise<number> {
   if (state.loading || state.exhausted) return 0;
   state.loading = true;
   const gen = state.generation;
-  el.loading.classList.remove('hidden');
-  el.loading.textContent = state.entries.length ? 'Loading more…' : 'Loading feed…';
+  startLoadingStatus();
   let added = 0;
   try {
     const r = await api.feed({ source: prefs.source, category: prefs.source === 'explore' ? prefs.category : undefined, count: 12 });
@@ -437,7 +496,7 @@ async function loadMore(): Promise<number> {
     if (prefs.source === 'foryou' && /not signed in|session/i.test(msg)) void openSessionPanel();
   } finally {
     state.loading = false;
-    el.loading.classList.add('hidden');
+    hideLoading();
   }
   if (added && state.wantNext) {
     state.wantNext = false;
@@ -457,6 +516,7 @@ function scheduleMoreIfNeeded(): void {
   const nearEnd = state.active >= state.entries.length - 3;
   if (!nearEnd) return;
   const delay = state.emptyBatches === 0 ? 0 : Math.min(20_000, 3000 * 2 ** (state.emptyBatches - 1));
+  if (delay) showRetryStatus(delay);
   state.retryTimer = window.setTimeout(() => void loadMore(), delay);
 }
 
@@ -682,9 +742,11 @@ function goTo(idx: number): void {
   if (idx >= state.entries.length) {
     // Past the end: fetch more and advance when it arrives (the feed never stops).
     state.wantNext = true;
-    el.loading.classList.remove('hidden');
-    el.loading.textContent = 'Loading more…';
-    void loadMore();
+    if (state.loading) startLoadingStatus();
+    else {
+      clearTimeout(state.retryTimer);
+      void loadMore();
+    }
     return;
   }
   // scrollTo on the container (not scrollIntoView) so the page itself never scrolls on phones.
