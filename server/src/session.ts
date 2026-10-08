@@ -168,7 +168,7 @@ async function launchOnce(headless: boolean): Promise<Browser> {
     ignoreDefaultArgs: ['--enable-automation'],
     // Cold starts on a 0.25-vCPU VM took >20 s; puppeteer's default is 30 s.
     timeout: 90_000,
-    protocolTimeout: 120_000,
+    protocolTimeout: 45_000,
   });
 }
 
@@ -179,7 +179,7 @@ async function preparePage(page: Page, browser: Browser): Promise<void> {
   page.on('request', (req) => {
     // Only media: TikTok's scripts (incl. the signing SDK) come from *.tiktokcdn-*.com too.
     const t = req.resourceType();
-    if (t === 'media' || t === 'font' || /mime_type=video|\.mp4(\?|$)/.test(req.url())) req.abort().catch(() => undefined);
+    if (t === 'media' || t === 'font' || t === 'image' || /mime_type=video|\.mp4(\?|$)/.test(req.url())) req.abort().catch(() => undefined);
     else req.continue().catch(() => undefined);
   });
 }
@@ -289,18 +289,41 @@ async function startQrLogin(log: (m: string) => void): Promise<SessionStatus> {
   s.qrState = 'new';
   s.loginStartedAt = Date.now();
   const browser = await headlessBrowser();
+  // An e2-micro cannot run three TikTok tabs: close the feed/explore pages while the QR is pending.
+  await closeSecondaryPages();
   const page = await browser.newPage();
   await preparePage(page, browser);
   s.qrPage = page;
   // Diagnostic: what TikTok's QR API answers (datacenter IPs get rate-limited / empty answers).
+  // The QR comes from TikTok's own API answer (data.qrcode = base64 PNG) - no need to wait for the
+  // page to draw it into a canvas, which a small VM may never get around to. The qrconnect poll
+  // answers carry the scan state ("new" / "scanned" / "confirmed").
   page.on('response', (res) => {
     if (!/passport\/web\/get_qrcode|qrconnect/.test(res.url())) return;
     void res
       .text()
       .then((body) => {
-        const line = `${res.status()} ${new URL(res.url()).pathname} ${body.replace(/\s+/g, ' ').slice(0, 160)}`;
-        s.qrApi = line;
-        if (!/"error_code":0|"status":"new"|"status":"scanned"|"status":"confirmed"/.test(body)) log('QR API: ' + line);
+        s.qrApi = `${res.status()} ${new URL(res.url()).pathname} ${body.replace(/\s+/g, ' ').slice(0, 160)}`;
+        let json: any;
+        try {
+          json = JSON.parse(body);
+        } catch {
+          log('QR API (not JSON): ' + s.qrApi);
+          return;
+        }
+        const d = json?.data || {};
+        if (typeof d.qrcode === 'string' && d.qrcode.length > 100 && s.qrPage === page) {
+          s.qr = 'data:image/png;base64,' + d.qrcode;
+          s.qrState = 'new';
+          s.qrPageHint = undefined;
+          s.qrPageShot = undefined;
+          log(`QR code received from TikTok's API (${d.qrcode.length} chars)`);
+        } else if (typeof d.status === 'string') {
+          if (d.status === 'scanned' || d.status === 'confirmed') s.qrState = 'scanned';
+          else if (d.status === 'expired') s.qrState = 'expired';
+        } else if (json?.message === 'error' || d.error_code) {
+          log('QR API error: ' + s.qrApi);
+        }
       })
       .catch(() => undefined);
   });
@@ -340,15 +363,18 @@ async function qrLoop(page: Page, browser: Browser, log: (m: string) => void): P
         }
       }
       const text = String(await page.evaluate('document.body.innerText').catch(() => '')).toLowerCase();
-      if (/expired|refresh/.test(text) || Date.now() - lastReload > QR_RELOAD_MS) {
+      if (s.qrState === 'expired' || /expired|refresh/.test(text) || Date.now() - lastReload > QR_RELOAD_MS) {
+        s.qr = undefined;
         await page.goto(QR_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => undefined);
         lastReload = Date.now();
         s.qrState = 'new';
       } else if (/confirm|scanned/.test(text) && !/1\. scan with/.test(text)) {
         s.qrState = 'scanned';
       }
-      const qr = await captureQr(page);
-      if (qr) {
+      const qr = s.qr && s.qrState !== 'expired' ? undefined : await captureQr(page);
+      if (s.qr && !qr) {
+        misses = 0;
+      } else if (qr) {
         s.qr = qr;
         s.qrPageHint = undefined;
         s.qrPageShot = undefined;
@@ -547,9 +573,21 @@ async function openFeedPage(): Promise<Page> {
  * observed 2026-10-08 on a Google Cloud VM, the plain HTTP explore request got an empty body
  * two times out of three while the browser path answered. Needs no sign-in.
  */
+/** Closes the explore and feed pages (kept the browser). */
+async function closeSecondaryPages(): Promise<void> {
+  for (const key of ['explorePage', 'feedPage'] as const) {
+    const pg = s[key];
+    s[key] = undefined;
+    if (pg && !pg.isClosed()) await pg.close().catch(() => undefined);
+  }
+  s.pending = [];
+  s.seenIds = new Set();
+}
+
 export async function fetchExploreViaBrowser(category: number, count: number, log: (m: string) => void): Promise<ExploreResult> {
   feedLog = feedLog || log;
   if (!sessionSupported().ok) throw new Error(sessionSupported().reason);
+  if (s.qrPage && !s.qrPage.isClosed()) throw new Error('A QR sign-in is in progress; the browser is reserved for it for the moment');
   const browser = await headlessBrowser();
   let page = s.explorePage;
   if (!page || page.isClosed()) {
