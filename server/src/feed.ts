@@ -179,11 +179,8 @@ export interface ExploreResult {
   raw: number;
 }
 
-export async function fetchExploreFeed(opts: ExploreOptions = {}): Promise<ExploreResult> {
-  const category = Number.isInteger(opts.category) ? (opts.category as number) : EXPLORE_DEFAULT_CATEGORY;
-  const count = Math.max(1, Math.min(MAX_COUNT, opts.count || 16));
-  const warnings: string[] = [];
-  const jar = await warmJar(opts.log);
+/** The explore API URL (same parameters TikTok's web client sends, minus its signatures). */
+export function exploreApiUrl(category: number, count: number): string {
   const params = new URLSearchParams({
     aid: '1988',
     app_language: 'en',
@@ -207,7 +204,41 @@ export async function fetchExploreFeed(opts: ExploreOptions = {}): Promise<Explo
     tz_name: 'America/New_York',
     webcast_language: 'en',
   });
-  const url = 'https://www.tiktok.com/api/explore/item_list/?' + params.toString();
+  return 'https://www.tiktok.com/api/explore/item_list/?' + params.toString();
+}
+
+/** Parses an explore API body into feed items (shared by the direct and the browser path). */
+export function parseExploreBody(text: string, upstream: UpstreamSession | undefined, warnings: string[]): { items: FeedItem[]; hasMore: boolean; raw: number } {
+  let json: any;
+  try {
+    json = JSON.parse(text);
+  } catch (e) {
+    throw new FeedError(`Explore API JSON could not be parsed: ${(e as Error).message}`, 'bad_json');
+  }
+  const code = Number(json.statusCode ?? json.status_code ?? 0);
+  if (code !== 0) throw new FeedError(`TikTok explore API status ${code}: ${json.statusMsg || json.status_msg || 'unavailable'}`, 'tiktok_status_' + code);
+  const list: any[] = Array.isArray(json.itemList) ? json.itemList : [];
+  const items: FeedItem[] = [];
+  for (const raw of list) {
+    const it = itemToFeedItem(raw, upstream);
+    if (it) items.push(it);
+  }
+  if (list.length && !items.length) warnings.push('explore returned items but none had playable formats');
+  return { items, hasMore: json.hasMore !== false, raw: list.length };
+}
+
+export function normalizeExploreOptions(opts: ExploreOptions): { category: number; count: number } {
+  return {
+    category: Number.isInteger(opts.category) ? (opts.category as number) : EXPLORE_DEFAULT_CATEGORY,
+    count: Math.max(1, Math.min(MAX_COUNT, opts.count || 16)),
+  };
+}
+
+export async function fetchExploreFeed(opts: ExploreOptions = {}): Promise<ExploreResult> {
+  const { category, count } = normalizeExploreOptions(opts);
+  const warnings: string[] = [];
+  const jar = await warmJar(opts.log);
+  const url = exploreApiUrl(category, count);
   let lastErr: Error | undefined;
   const attempts = 4;
   for (let attempt = 1; attempt <= attempts; attempt++) {
@@ -226,24 +257,10 @@ export async function fetchExploreFeed(opts: ExploreOptions = {}): Promise<Explo
       lastErr = new FeedError(`TikTok explore API returned an empty body ${attempts} times (soft rate limit); try again in a minute`, 'empty_body');
       warnings.push(`attempt ${attempt}: empty body from TikTok, retrying`);
     } else {
-      let json: any;
-      try {
-        json = JSON.parse(text);
-      } catch (e) {
-        throw new FeedError(`Explore API JSON could not be parsed: ${(e as Error).message}`, 'bad_json');
-      }
-      const code = Number(json.statusCode ?? json.status_code ?? 0);
-      if (code !== 0) throw new FeedError(`TikTok explore API status ${code}: ${json.statusMsg || json.status_msg || 'unavailable'}`, 'tiktok_status_' + code);
-      const list: any[] = Array.isArray(json.itemList) ? json.itemList : [];
       const upstream: UpstreamSession = { cookieHeader: jarHeader(jarNow), referer: 'https://www.tiktok.com/explore' };
-      const items: FeedItem[] = [];
-      for (const raw of list) {
-        const it = itemToFeedItem(raw, upstream);
-        if (it) items.push(it);
-      }
-      if (list.length && !items.length) warnings.push('explore returned items but none had playable formats');
-      opts.log?.(`explore category ${category}: ${items.length}/${list.length} items`);
-      return { items, hasMore: json.hasMore !== false, warnings, raw: list.length };
+      const parsed = parseExploreBody(text, upstream, warnings);
+      opts.log?.(`explore category ${category}: ${parsed.items.length}/${parsed.raw} items`);
+      return { ...parsed, warnings };
     }
     if (attempt < attempts) await new Promise((r) => setTimeout(r, 800 * attempt));
   }

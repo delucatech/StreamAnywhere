@@ -25,6 +25,9 @@ body {
 .app {
   position: fixed;
   inset: 0;
+  height: 100vh;
+  /* phones: the real visible height (browser chrome excluded), so one video = one screen */
+  height: 100dvh;
   display: flex;
   flex-direction: column;
 }
@@ -120,6 +123,10 @@ select:focus,
   scroll-snap-type: y mandatory;
   scrollbar-width: none;
   outline: none;
+  /* one swipe = one video: native snap + no pull-to-refresh / rubber-band into the page */
+  overscroll-behavior-y: contain;
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
 }
 .feed::-webkit-scrollbar {
   display: none;
@@ -141,9 +148,13 @@ select:focus,
   object-fit: contain;
   background: #000;
   cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
 }
-.item video[poster] {
-  object-fit: contain;
+@media (max-width: 640px) and (orientation: portrait) {
+  /* fill the phone screen like the app (portrait videos are 9:16 anyway) */
+  .item video {
+    object-fit: cover;
+  }
 }
 .item .pause-badge {
   position: absolute;

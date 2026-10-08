@@ -10,8 +10,12 @@ import { isTikTokUrl, probeUrl, resolveTikTokNative, TikTokError } from './tikto
 import { detectYtDlp, resolveWithYtDlp } from './ytdlp';
 import { defaultExpiry, mediaCount, registerMedia } from './mediaStore';
 import { hostAllowed } from './ssrf';
-import { FeedError, fetchExploreFeed } from './feed';
-import { fetchForYou, logout, sessionProbe, sessionStatus, startLogin } from './session';
+import { FeedError, fetchExploreFeed, normalizeExploreOptions } from './feed';
+import { fetchExploreViaBrowser, fetchForYou, logout, sessionProbe, sessionStatus, sessionSupported, startLogin } from './session';
+
+/** After the browser path rescued an explore request, prefer it for a while (datacenter IPs). */
+let exploreViaBrowserUntil = 0;
+const EXPLORE_VIA_BROWSER_ENV = /^(1|true|yes)$/i.test(process.env.EXPLORE_VIA_BROWSER || '');
 
 export async function buildServer() {
   const app = Fastify({
@@ -144,7 +148,27 @@ export async function buildServer() {
     try {
       if (source === 'explore') {
         const category = b.category !== undefined && Number.isInteger(Number(b.category)) ? Number(b.category) : undefined;
-        const r = await fetchExploreFeed({ category, count, log });
+        const norm = normalizeExploreOptions({ category, count });
+        const browserOk = sessionSupported().ok;
+        let r;
+        if (browserOk && (EXPLORE_VIA_BROWSER_ENV || Date.now() < exploreViaBrowserUntil)) {
+          try {
+            r = await fetchExploreViaBrowser(norm.category, norm.count, log);
+          } catch (e) {
+            req.log.warn({ err: (e as Error).message }, 'explore via browser failed; trying the direct request');
+          }
+        }
+        if (!r) {
+          try {
+            r = await fetchExploreFeed({ category, count, log });
+          } catch (e) {
+            if (!browserOk) throw e;
+            req.log.warn({ err: (e as Error).message }, 'direct explore request failed; trying through the headless browser');
+            r = await fetchExploreViaBrowser(norm.category, norm.count, log);
+            r.warnings.push('direct explore request was blocked; served through the headless browser');
+            exploreViaBrowserUntil = Date.now() + 15 * 60 * 1000;
+          }
+        }
         const resp: FeedResponse = { source, items: r.items, hasMore: r.hasMore, warnings: r.warnings, elapsedMs: Date.now() - t0 };
         return resp;
       }

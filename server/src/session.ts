@@ -29,7 +29,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { FeedItem, LoginMode, SessionStatus } from '../../shared/types';
-import { itemToFeedItem } from './feed';
+import { exploreApiUrl, itemToFeedItem, parseExploreBody, type ExploreResult } from './feed';
 
 type Browser = import('puppeteer-core').Browser;
 type Page = import('puppeteer-core').Page;
@@ -77,6 +77,7 @@ interface SessionInternal {
   qrState?: SessionStatus['qrState'];
   headless?: Browser;
   feedPage?: Page;
+  explorePage?: Page;
   /** Items captured from the headless /foryou page that have not been handed out yet */
   pending: FeedItem[];
   seenIds: Set<string>;
@@ -376,6 +377,7 @@ async function headlessBrowser(): Promise<Browser> {
       s.headless = undefined;
       s.feedPage = undefined;
       s.qrPage = undefined;
+      s.explorePage = undefined;
     }
   });
   return browser;
@@ -386,6 +388,7 @@ async function closeHeadless(): Promise<void> {
   s.headless = undefined;
   s.feedPage = undefined;
   s.qrPage = undefined;
+  s.explorePage = undefined;
   if (b) await b.close().catch(() => undefined);
 }
 
@@ -434,6 +437,34 @@ async function feedPage(): Promise<Page> {
   const cookies = await page.cookies('https://www.tiktok.com');
   s.feedCookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
   return page;
+}
+
+/**
+ * Explore feed fetched from inside a headless page on tiktok.com/explore. The page's own scripts
+ * sign the request (msToken / X-Bogus / X-Gnarly), which is what TikTok wants from datacenter IPs:
+ * observed 2026-10-08 on a Google Cloud VM, the plain HTTP explore request got an empty body
+ * two times out of three while the browser path answered. Needs no sign-in.
+ */
+export async function fetchExploreViaBrowser(category: number, count: number, log: (m: string) => void): Promise<ExploreResult> {
+  feedLog = feedLog || log;
+  if (!sessionSupported().ok) throw new Error(sessionSupported().reason);
+  const browser = await headlessBrowser();
+  let page = s.explorePage;
+  if (!page || page.isClosed()) {
+    page = await browser.newPage();
+    await preparePage(page, browser);
+    await page.goto('https://www.tiktok.com/explore', { waitUntil: 'domcontentloaded', timeout: 45_000 });
+    s.explorePage = page;
+    log('headless explore page opened');
+  }
+  const url = exploreApiUrl(category, count);
+  const text = String(await page.evaluate(`fetch(${JSON.stringify(url)}, { credentials: 'include' }).then((r) => r.text())`));
+  if (!text.trim()) throw new Error('TikTok explore API returned an empty body (through the browser as well)');
+  const cookies = await page.cookies('https://www.tiktok.com');
+  const warnings: string[] = [];
+  const parsed = parseExploreBody(text, { cookieHeader: cookies.map((c) => `${c.name}=${c.value}`).join('; '), referer: 'https://www.tiktok.com/explore' }, warnings);
+  log(`explore via browser, category ${category}: ${parsed.items.length}/${parsed.raw} items`);
+  return { ...parsed, warnings };
 }
 
 export async function logout(): Promise<SessionStatus> {

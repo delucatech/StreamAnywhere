@@ -565,7 +565,8 @@ function goTo(idx: number): void {
     void loadMore();
     return;
   }
-  state.entries[idx].root.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  // scrollTo on the container (not scrollIntoView) so the page itself never scrolls on phones.
+  el.feed.scrollTo({ top: idx * el.feed.clientHeight, behavior: 'smooth' });
 }
 
 function togglePause(entry: Entry): void {
@@ -700,6 +701,48 @@ document.addEventListener('keydown', (e) => {
       break;
   }
 });
+
+// ---------- touch: swipe up/down = next/previous video (like the app) ----------
+// Native scroll-snap already moves one item per flick; this guarantees it for short or fast swipes
+// and keeps a half-dragged video from sticking between two snap points.
+let touchStartY = 0;
+let touchStartX = 0;
+let touchStartAt = 0;
+let touchStartIdx = 0;
+let touchMoved = false;
+el.feed.addEventListener(
+  'touchstart',
+  (e) => {
+    if (e.touches.length !== 1) return;
+    touchStartY = e.touches[0].clientY;
+    touchStartX = e.touches[0].clientX;
+    touchStartAt = Date.now();
+    touchMoved = false;
+    touchStartIdx = Math.round(el.feed.scrollTop / Math.max(1, el.feed.clientHeight));
+  },
+  { passive: true },
+);
+el.feed.addEventListener(
+  'touchmove',
+  () => {
+    touchMoved = true;
+  },
+  { passive: true },
+);
+el.feed.addEventListener(
+  'touchend',
+  (e) => {
+    if (!touchMoved || !e.changedTouches.length) return;
+    const dy = touchStartY - e.changedTouches[0].clientY;
+    const dx = touchStartX - e.changedTouches[0].clientX;
+    const dt = Date.now() - touchStartAt;
+    if (Math.abs(dy) < 30 || Math.abs(dy) < Math.abs(dx) || dt > 1200) return;
+    if (!state.started) start();
+    const target = Math.max(0, Math.min(state.entries.length - 1, touchStartIdx + (dy > 0 ? 1 : -1)));
+    goTo(target);
+  },
+  { passive: true },
+);
 
 // Pause when the tab is hidden; resume on return.
 document.addEventListener('visibilitychange', () => {
