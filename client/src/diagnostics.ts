@@ -73,6 +73,9 @@ export function headlessWebCodecs(url: string, init: RequestInit | undefined, ma
     let queued: Sample[] = [];
     let sent = 0;
     let bytes = 0;
+    let streamEnded = false;
+    let flushed = false;
+    let ready = false;
     const out: Partial<HeadlessResult> = {};
     const finish = (ok: boolean, error?: string) => {
       if (done) return;
@@ -87,8 +90,13 @@ export function headlessWebCodecs(url: string, init: RequestInit | undefined, ma
       resolve({ ok, frames, firstFrameMs, error, elapsedMs: performance.now() - t0, bytes, ...out });
     };
     const timer = setTimeout(() => finish(frames > 0, frames > 0 ? undefined : 'timed out before the first frame'), timeoutMs);
+    const flushOnce = () => {
+      if (flushed || !decoder || decoder.state !== 'configured') return;
+      flushed = true;
+      decoder.flush().then(() => finish(frames > 0, frames > 0 ? undefined : 'stream ended without frames'), () => finish(frames > 0));
+    };
     const pump = () => {
-      if (!decoder || decoder.state !== 'configured') return;
+      if (!decoder || decoder.state !== 'configured' || flushed) return;
       while (queued.length && sent < maxFrames + 8 && decoder.decodeQueueSize < 8) {
         const s = queued.shift()!;
         if (sent === 0 && !s.is_sync) continue;
@@ -100,10 +108,12 @@ export function headlessWebCodecs(url: string, init: RequestInit | undefined, ma
           return;
         }
       }
-      if (sent >= maxFrames + 8 && !done) decoder.flush().catch(() => undefined);
+      // Flush only when nothing more will be decoded: a decode() after flush() needs a key frame.
+      if ((sent >= maxFrames + 8 || (streamEnded && !queued.length)) && !done) flushOnce();
     };
     const demuxer = new Mp4Demuxer(url, init, {
       onReady: async (movie, video, audio) => {
+        ready = true;
         out.progressive = movie.isProgressive;
         if (!video?.videoConfig) {
           finish(false, 'no video track');
@@ -145,9 +155,12 @@ export function headlessWebCodecs(url: string, init: RequestInit | undefined, ma
       onAudioSamples: () => undefined,
       onProgress: (loaded) => (bytes = loaded),
       onEnd: () => {
-        pump();
-        if (decoder && decoder.state === 'configured') decoder.flush().then(() => finish(frames > 0, frames > 0 ? undefined : 'stream ended without frames'), () => finish(frames > 0));
-        else if (!decoder) finish(false, 'stream ended before moov was parsed');
+        streamEnded = true;
+        if (!ready) {
+          finish(false, 'stream ended before moov was parsed');
+          return;
+        }
+        pump(); // decodes what is left and flushes once the queue is empty (decoder may still be configuring)
       },
       onError: (e) => finish(false, e.message),
       onLog: () => undefined,
