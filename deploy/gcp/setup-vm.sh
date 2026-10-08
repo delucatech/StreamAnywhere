@@ -60,14 +60,20 @@ echo "node $(node -v), $(chromium --version 2>/dev/null | head -1), caddy $(cadd
 
 echo "== 3. app"
 id -u "$APP_USER" >/dev/null 2>&1 || useradd --system --create-home --home-dir /var/lib/streamanywhere --shell /usr/sbin/nologin "$APP_USER"
+# The checkout is chowned to the service user below; git (running as root here) refuses to touch a
+# directory owned by someone else unless it is marked safe. Observed 2026-10-08: without this the
+# fetch failed quietly and every redeploy rebuilt the OLD code.
+git config --system --add safe.directory "$APP_DIR" 2>/dev/null || true
 if [ -d "$APP_DIR/.git" ]; then
-  git -C "$APP_DIR" fetch -q origin "$BRANCH" && git -C "$APP_DIR" reset -q --hard "origin/$BRANCH"
+  git -C "$APP_DIR" fetch origin "$BRANCH" || { echo "git fetch failed"; exit 1; }
+  git -C "$APP_DIR" reset -q --hard "origin/$BRANCH" || { echo "git reset failed"; exit 1; }
 else
-  git clone -q --branch "$BRANCH" "$REPO_URL" "$APP_DIR"
+  git clone -q --branch "$BRANCH" "$REPO_URL" "$APP_DIR" || { echo "git clone failed"; exit 1; }
 fi
 cd "$APP_DIR"
+echo "deploying $(git rev-parse --short HEAD): $(git log -1 --format=%s | cut -c1-80)"
 npm ci --no-audit --no-fund --loglevel=error
-npm run build >/dev/null
+npm run build 2>&1 | tail -5
 chown -R "$APP_USER:$APP_USER" "$APP_DIR" /var/lib/streamanywhere
 
 echo "== 3b. dynamic dns"
