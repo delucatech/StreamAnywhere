@@ -363,7 +363,7 @@ async function qrLoop(page: Page, browser: Browser, log: (m: string) => void): P
         }
       }
       const text = String(await page.evaluate('document.body.innerText').catch(() => '')).toLowerCase();
-      if (s.qrState === 'expired' || /expired|refresh/.test(text) || Date.now() - lastReload > QR_RELOAD_MS) {
+      if ((s.qrState as string) === 'expired' || /expired|refresh/.test(text) || Date.now() - lastReload > QR_RELOAD_MS) {
         s.qr = undefined;
         await page.goto(QR_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => undefined);
         lastReload = Date.now();
@@ -371,7 +371,7 @@ async function qrLoop(page: Page, browser: Browser, log: (m: string) => void): P
       } else if (/confirm|scanned/.test(text) && !/1\. scan with/.test(text)) {
         s.qrState = 'scanned';
       }
-      const qr = s.qr && s.qrState !== 'expired' ? undefined : await captureQr(page);
+      const qr = s.qr && (s.qrState as string) !== 'expired' ? undefined : await captureQr(page);
       if (s.qr && !qr) {
         misses = 0;
       } else if (qr) {
