@@ -222,6 +222,8 @@ export type SessionInputRequest =
   | { type: 'drag'; x: number; y: number; x2: number; y2: number }
   | { type: 'type'; text: string }
   | { type: 'key'; key: 'Enter' | 'Backspace' | 'Tab' | 'Escape' }
+  /** Enter a verification code: the server puts it into TikTok's code field and submits */
+  | { type: 'code'; code: string }
   | { type: 'shot' };
 
 /** State of the server-side TikTok browser session (Node server only). */
@@ -252,4 +254,10 @@ export interface SessionStatus {
   pageShot?: string;
   /** Pixel size of `pageShot` (= the page viewport), for mapping clicks */
   pageShotSize?: { w: number; h: number };
+  /** While qrState is 'verify': where TikTok's verification dialog stands.
+   *  'choose' = it lists methods (the server picks Email by itself), 'sending' = method chosen, waiting for
+   *  the code field, 'code' = a code field is shown: send it with {type:'code'}. */
+  verifyStep?: 'choose' | 'sending' | 'code';
+  /** Text of TikTok's verification dialog (what it asks for, masked address the code went to) */
+  verifyText?: string;
 }

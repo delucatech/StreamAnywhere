@@ -6,9 +6,9 @@
     <meta name="theme-color" content="#000000" />
     <title>StreamAnywhere – Feed</title>
     
-    <script type="module" crossorigin src="/player/assets/feed-6961a5e0.js"></script>
+    <script type="module" crossorigin src="/player/assets/feed-7c1065e4.js"></script>
     <link rel="modulepreload" crossorigin href="/player/assets/api-681b3977.js">
-    <link rel="stylesheet" href="/player/assets/feed-6241387b.css">
+    <link rel="stylesheet" href="/player/assets/feed-4d0c96d2.css">
   </head>
   <body class="feed-body">
     <div id="app" class="app">
@@ -60,8 +60,12 @@
           <div id="sessionQr" class="session-qr hidden">
             <img id="sessionQrImg" alt="TikTok login QR code" draggable="false" />
             <div id="sessionQrHint" class="session-qr-hint"></div>
+            <div id="sessionCode" class="session-input session-code hidden">
+              <input id="sessionCodeText" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="Code from your email" />
+              <button id="sessionCodeSend" class="btn primary" type="button">Verify</button>
+            </div>
             <div id="sessionInput" class="session-input hidden">
-              <input id="sessionInputText" type="text" autocomplete="one-time-code" placeholder="Text to type into the page (e.g. a code)" />
+              <input id="sessionInputText" type="text" placeholder="Text to type into the page" />
               <button id="sessionInputType" class="btn" type="button">Type</button>
               <button id="sessionInputEnter" class="btn" type="button" title="Press Enter in the page">Enter</button>
               <button id="sessionInputBack" class="btn" type="button" title="Press Backspace in the page">⌫</button>

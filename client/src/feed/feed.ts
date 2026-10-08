@@ -52,6 +52,9 @@ const el = {
   sessionQr: $('sessionQr'),
   sessionQrImg: $<HTMLImageElement>('sessionQrImg'),
   sessionQrHint: $('sessionQrHint'),
+  sessionCode: $('sessionCode'),
+  sessionCodeText: $<HTMLInputElement>('sessionCodeText'),
+  sessionCodeSend: $<HTMLButtonElement>('sessionCodeSend'),
   sessionInput: $('sessionInput'),
   sessionInputText: $<HTMLInputElement>('sessionInputText'),
   sessionInputType: $<HTMLButtonElement>('sessionInputType'),
@@ -249,6 +252,25 @@ el.sessionInputText.addEventListener('keydown', (e) => {
   }
 });
 el.sessionInputEnter.addEventListener('click', () => void sendLiveInput({ type: 'key', key: 'Enter' }));
+async function sendVerifyCode(): Promise<void> {
+  const code = el.sessionCodeText.value.replace(/\s+/g, '');
+  if (!code) return;
+  el.sessionCodeSend.disabled = true;
+  try {
+    await sendLiveInput({ type: 'code', code });
+    el.sessionCodeText.value = '';
+    toast('Code sent to TikTok – finishing the sign-in…');
+  } finally {
+    el.sessionCodeSend.disabled = false;
+  }
+}
+el.sessionCodeSend.addEventListener('click', () => void sendVerifyCode());
+el.sessionCodeText.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    void sendVerifyCode();
+  }
+});
 el.sessionInputBack.addEventListener('click', () => void sendLiveInput({ type: 'key', key: 'Backspace' }));
 
 /** Pointer position in page pixels (the picture is the server's viewport, scaled to fit). */
@@ -343,6 +365,13 @@ function renderSession(): void {
     el.sessionQrImg.classList.toggle('page-shot', live || (!s.qr && Boolean(s.pageShot)));
     el.sessionQrImg.classList.toggle('live', live);
     el.sessionInput.classList.toggle('hidden', !live);
+    const codeStep = live && s.verifyStep === 'code';
+    const codeWasHidden = el.sessionCode.classList.contains('hidden');
+    el.sessionCode.classList.toggle('hidden', !codeStep);
+    if (codeStep && codeWasHidden) {
+      toast(`TikTok emailed you a verification code – enter it here`, false, 6000);
+      el.sessionCodeText.focus();
+    }
     if (!img) el.sessionQrImg.removeAttribute('src');
     qrExpiresAt = s.qr && !live ? s.qrExpiresAt || 0 : 0;
     renderQrHint(s);
@@ -361,7 +390,11 @@ function renderQrHint(s: SessionStatus): void {
   const left = qrExpiresAt ? Math.max(0, Math.round((qrExpiresAt - Date.now()) / 1000)) : 0;
   el.sessionQrHint.textContent =
     s.qrState === 'verify'
-      ? 'TikTok asks for a verification – this is the server\'s page, live. Tap or click on it; type below.'
+      ? s.verifyStep === 'code'
+        ? 'Enter the code from your email above. The picture is TikTok\'s page on the server, live.'
+        : s.verifyStep === 'sending'
+          ? 'Email verification chosen – waiting for TikTok\'s code field…'
+          : 'TikTok asks for a verification – this is the server\'s page, live. Tap or click on it; type below.'
       : s.qrState === 'scanned'
       ? 'Scanned – confirm on your phone, then wait a moment'
       : s.qr

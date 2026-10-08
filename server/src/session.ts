@@ -98,6 +98,12 @@ interface SessionInternal {
   qrVerifyAt?: number;
   /** TikTok's verification decision (x-tt-verify-idv-decision-conf header), for the log */
   qrVerifyConf?: string;
+  qrVerifyStep?: SessionStatus['verifyStep'];
+  qrVerifyText?: string;
+  /** Last time the server clicked something in the verification dialog by itself */
+  qrVerifyAutoAt?: number;
+  /** Last time the server pressed "Send code" (or chose the method) - no re-sends for a minute */
+  qrVerifySentAt?: number;
   headless?: Browser;
   feedPage?: Page;
   explorePage?: Page;
@@ -238,11 +244,19 @@ export function sessionStatus(): SessionStatus {
         base.pageShot = s.qrPageShot;
         base.pageShotSize = { w: QR_VIEWPORT.width, h: QR_VIEWPORT.height };
       }
+      if (s.qrState === 'verify') {
+        base.verifyStep = s.qrVerifyStep || 'choose';
+        base.verifyText = s.qrVerifyText;
+      }
       const limited = s.qrRateLimitedAt && Date.now() - s.qrRateLimitedAt < 30_000;
       base.message = limited
         ? 'TikTok is temporarily refusing sign-in status checks from this server ("maximum number of attempts"). Scans are not noticed while this lasts; wait 10–15 minutes, then try again.'
         : s.qrState === 'verify'
-          ? 'TikTok wants an extra verification before it signs this browser in. Complete it in the live view below (tap or click on the picture, type with the box under it).'
+          ? s.qrVerifyStep === 'code'
+            ? `TikTok sent a verification code${verifyTarget() ? ' to ' + verifyTarget() : ''}. Enter it in the code box below; the server submits it on TikTok's page.`
+            : s.qrVerifyStep === 'sending'
+              ? 'TikTok wants to verify it is you. The server chose "Email" – waiting for the code field…'
+              : 'TikTok wants an extra verification before it signs this browser in. The server picks "Email" by itself; otherwise tap or click on the live picture below.'
           : s.qrState === 'scanned'
           ? 'Scanned – confirm the sign-in in the TikTok app.'
           : s.qr
@@ -255,6 +269,12 @@ export function sessionStatus(): SessionStatus {
   }
   if (s.state === 'logged_in') base.message = `Signed in as @${s.username || '?'}`;
   return base;
+}
+
+/** Masked address/number TikTok's verification dialog mentions (h***d@example.com, +1 ***123) */
+function verifyTarget(): string {
+  const m = /[\w*.+-]+@[\w*.-]+\.\w+|\+?\d[\d* -]{5,}\d/.exec(s.qrVerifyText || '');
+  return m ? m[0] : '';
 }
 
 let probe: Promise<void> | undefined;
@@ -328,6 +348,10 @@ async function startQrLogin(log: (m: string) => void): Promise<SessionStatus> {
   s.qrRedirect = undefined;
   s.qrVerifyAt = undefined;
   s.qrVerifyConf = undefined;
+  s.qrVerifyStep = undefined;
+  s.qrVerifyText = undefined;
+  s.qrVerifyAutoAt = undefined;
+  s.qrVerifySentAt = undefined;
   s.qrState = 'new';
   s.loginStartedAt = Date.now();
   const browser = await headlessBrowser();
@@ -365,6 +389,8 @@ async function startQrLogin(log: (m: string) => void): Promise<SessionStatus> {
           s.scannedAt = undefined;
           if (s.qrVerifyAt) log('verification abandoned - TikTok issued a new QR code');
           s.qrVerifyAt = undefined;
+          s.qrVerifyStep = undefined;
+          s.qrVerifyText = undefined;
           if (typeof d.token === 'string') s.qrToken = d.token;
           s.qrExpireAt = typeof d.expire_time === 'number' && d.expire_time > 1e9 ? d.expire_time * 1000 : Date.now() + 55_000;
           log(`QR code received from TikTok's API (${d.qrcode.length} chars, valid ${Math.round((s.qrExpireAt - Date.now()) / 1000)} s)`);
@@ -488,6 +514,103 @@ async function captureShot(page: Page): Promise<void> {
   }
 }
 
+/** What TikTok's verification dialog currently shows: its text, clickable rows/buttons, the code field. */
+interface VerifyView {
+  text: string;
+  inModal: boolean;
+  options: Array<{ label: string; x: number; y: number }>;
+  buttons: Array<{ label: string; x: number; y: number }>;
+  input?: { x: number; y: number; value: string };
+}
+
+const VERIFY_SCAN_JS = `(() => {
+  const root = document.querySelector('#idv-modal-container') || document.querySelector('[class*="idv"]') || document.body;
+  const vis = (el) => { const r = el.getBoundingClientRect(); if (r.width < 4 || r.height < 4 || r.bottom < 0 || r.top > innerHeight) return null; const cs = getComputedStyle(el); if (cs.visibility === 'hidden' || cs.display === 'none' || cs.opacity === '0') return null; return r; };
+  const center = (r) => ({ x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) });
+  const clean = (t) => (t || '').replace(/\\s+/g, ' ').trim();
+  const text = clean(root.innerText).slice(0, 600);
+  const options = [], buttons = [];
+  for (const el of root.querySelectorAll('button, [role="button"], a, li, div, span, p')) {
+    const r = vis(el); if (!r) continue;
+    const label = clean(el.innerText || el.getAttribute('aria-label'));
+    if (!label || label.length > 80) continue;
+    (el.tagName === 'BUTTON' || el.getAttribute('role') === 'button' ? buttons : options).push({ label, ...center(r) });
+  }
+  let input;
+  for (const el of root.querySelectorAll('input')) {
+    const r = vis(el); if (!r) continue;
+    if (['hidden', 'checkbox', 'radio', 'submit', 'button'].includes(el.type)) continue;
+    input = { ...center(r), value: el.value || '' }; break;
+  }
+  return { text, options, buttons, input, inModal: root !== document.body };
+})()`;
+
+async function scanVerifyDialog(page: Page): Promise<VerifyView | undefined> {
+  try {
+    return (await page.evaluate(VERIFY_SCAN_JS)) as VerifyView;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Moves TikTok's "Verify it's really you" dialog along without the user: picks the Email method (never
+ * Password), presses "Send code" when the dialog offers it, and reports the step/text for the UI.
+ */
+async function driveVerifyDialog(page: Page, log: (m: string) => void): Promise<void> {
+  const v = await scanVerifyDialog(page);
+  if (!v) return;
+  if (v.text && v.text !== s.qrVerifyText) {
+    s.qrVerifyText = v.text;
+    log('verification dialog: ' + v.text.slice(0, 240));
+  }
+  const now = Date.now();
+  const all = [...v.buttons, ...v.options];
+  const find = (re: RegExp, not?: RegExp): { label: string; x: number; y: number } | undefined =>
+    all.filter((o) => re.test(o.label) && !(not && not.test(o.label))).sort((a, b) => a.label.length - b.label.length)[0];
+  if (v.input) {
+    // A code field is on screen. Press "Send code" once if TikTok shows such a button.
+    s.qrVerifyStep = 'code';
+    const send = find(/\b(send|get|resend)\b.*\bcode\b|^send$/i);
+    if (send && now - (s.qrVerifySentAt || 0) > 60_000 && !/resend/i.test(send.label)) {
+      s.qrVerifySentAt = now;
+      log(`verification: pressing "${send.label}"`);
+      await page.mouse.click(send.x, send.y, { delay: 30 }).catch(() => undefined);
+    }
+    return;
+  }
+  if (now - (s.qrVerifyAutoAt || 0) < 4000) return; // give the dialog time to change after a click
+  const email = find(/\bemail\b|\be-mail\b|@/i, /password/i);
+  const phone = !email ? find(/\bphone\b|\bsms\b|\btext message\b|\+\d/i, /password/i) : undefined;
+  const pick = email || phone;
+  if (pick) {
+    s.qrVerifyAutoAt = now;
+    s.qrVerifySentAt = now;
+    s.qrVerifyStep = 'sending';
+    log(`verification: choosing "${pick.label.slice(0, 60)}"`);
+    await page.mouse.click(pick.x, pick.y, { delay: 30 }).catch(() => undefined);
+    return;
+  }
+  if (s.qrVerifyStep !== 'sending' || now - (s.qrVerifyAutoAt || 0) > 20_000) s.qrVerifyStep = s.qrVerifyStep === 'sending' ? 'sending' : 'choose';
+}
+
+/** Puts a verification code into TikTok's code field and submits it. */
+async function enterVerifyCode(page: Page, code: string): Promise<void> {
+  const v = await scanVerifyDialog(page);
+  if (v?.input) {
+    await page.mouse.click(v.input.x, v.input.y, { clickCount: 3, delay: 20 });
+    await page.keyboard.press('Backspace');
+  }
+  await page.keyboard.type(code, { delay: 60 });
+  await new Promise((r) => setTimeout(r, 400));
+  const after = await scanVerifyDialog(page);
+  const submit = after
+    ? [...after.buttons, ...after.options].filter((o) => /^(verify|continue|next|submit|confirm|done|log in|login)\b/i.test(o.label)).sort((a, b) => a.label.length - b.label.length)[0]
+    : undefined;
+  if (submit) await page.mouse.click(submit.x, submit.y, { delay: 30 }).catch(() => undefined);
+  else await page.keyboard.press('Enter').catch(() => undefined);
+}
+
 let inputChain: Promise<void> = Promise.resolve();
 
 /**
@@ -525,11 +648,19 @@ export async function sessionInput(req: SessionInputRequest): Promise<SessionSta
       case 'key':
         if (['Enter', 'Backspace', 'Tab', 'Escape'].includes(req.key)) await page.keyboard.press(req.key);
         break;
+      case 'code': {
+        const code = String(req.code || '').replace(/\s+/g, '').slice(0, 12);
+        if (code) {
+          feedLog?.(`verification: entering the ${code.length}-digit code`);
+          await enterVerifyCode(page, code);
+        }
+        break;
+      }
       case 'shot':
       default:
         break;
     }
-    await new Promise((r) => setTimeout(r, req.type === 'shot' ? 0 : 350));
+    await new Promise((r) => setTimeout(r, req.type === 'shot' ? 0 : req.type === 'code' ? 1200 : 350));
     await captureShot(page);
   };
   const job = inputChain.then(run, run);
@@ -625,7 +756,9 @@ async function qrLoop(page: Page, browser: Browser, log: (m: string) => void): P
         s.scannedAt = s.scannedAt || Date.now();
       }
       if (verifying) {
-        // Live view for the UI (the user completes TikTok's verification through it).
+        // Drive TikTok's verification dialog as far as possible (choose Email, press "Send code"),
+        // and keep a live view for the UI, where the user enters the code.
+        await driveVerifyDialog(page, log);
         if (Date.now() - lastShotAt > 1200) {
           await captureShot(page);
           lastShotAt = Date.now();
