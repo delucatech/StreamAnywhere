@@ -90,6 +90,15 @@ npm run build
 SERVE_CLIENT=true npm start      # PowerShell: $env:SERVE_CLIENT='true'; npm start
 ```
 
+### Public copies
+
+- Source: https://github.com/delucatech/StreamAnywhere
+- Client on GitHub Pages (static, always on): https://delucatech.github.io/StreamAnywhere/
+  Pages cannot run the resolver, so there the TikTok modes need an API: deploy the server (below)
+  and open `https://delucatech.github.io/StreamAnywhere/?api=https://<your-app>.onrender.com`
+  (the value is remembered; the header field shows the API status). Test MP4 and local-file modes
+  work on Pages without any server because they never touch the API.
+
 ### Deploy to a free host (no PC required)
 
 Because playback goes straight from the viewer's browser to TikTok's CDN, the server only
