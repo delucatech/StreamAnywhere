@@ -90,6 +90,8 @@ interface SessionInternal {
   qrToken?: string;
   /** Last time TikTok answered a status check with "maximum attempts" (rate limit) */
   qrRateLimitedAt?: number;
+  /** redirect_url from a confirmed check_qrconnect answer */
+  qrRedirect?: string;
   headless?: Browser;
   feedPage?: Page;
   explorePage?: Page;
@@ -312,6 +314,7 @@ async function startQrLogin(log: (m: string) => void): Promise<SessionStatus> {
   s.qrToken = undefined;
   s.qrGetUrl = undefined;
   s.qrCheckUrl = undefined;
+  s.qrRedirect = undefined;
   s.qrState = 'new';
   s.loginStartedAt = Date.now();
   const browser = await headlessBrowser();
@@ -362,7 +365,8 @@ async function startQrLogin(log: (m: string) => void): Promise<SessionStatus> {
             if (s.qrState !== 'scanned') log(`QR ${d.status} - waiting for TikTok to finish the sign-in`);
             s.qrState = 'scanned';
             s.scannedAt = s.scannedAt || Date.now();
-          } else if (d.status === 'expired') s.qrState = 'expired';
+            if (d.status === 'confirmed' && typeof d.redirect_url === 'string' && d.redirect_url.startsWith('http')) s.qrRedirect = d.redirect_url;
+          } else if (d.status === 'expired' && (s.qrState as string) !== 'scanned') s.qrState = 'expired';
         } else if (json?.message === 'error' || d.error_code) {
           if (d.error_code === 7 || /maximum number of attempts/i.test(String(d.description || ''))) {
             if (!s.qrRateLimitedAt) log('TikTok rate-limits the QR status checks for this session: ' + s.qrApi);
@@ -451,13 +455,22 @@ export async function pollQrToken(page: Page): Promise<{ status?: string; redire
 async function qrLoop(page: Page, browser: Browser, log: (m: string) => void): Promise<void> {
   let lastReload = Date.now();
   let misses = 0;
+  let confirmingNavigated = false;
   try {
     while (s.qrPage === page && Date.now() - (s.loginStartedAt || 0) < LOGIN_TIMEOUT_MS) {
       if (!browser.isConnected() || page.isClosed()) break;
       // --- TikTok's page drives the cycle (one poll stream = no extra rate-limit pressure). We only
       //     react: when its code expired, click the code area (TikTok's refresh) and wait for the new one.
+      const confirming = (s.qrState as string) === 'scanned' && Date.now() - (s.scannedAt || 0) < 120_000;
       const expiredNow = (s.qrState as string) === 'expired' || (s.qrExpireAt ? Date.now() > s.qrExpireAt + 1500 : false);
-      if (s.qr && expiredNow && !s.qrRateLimitedAt) {
+      if (s.qrRedirect && !confirmingNavigated) {
+        // TikTok confirmed the scan and told the page where to go; follow it ourselves in case the page
+        // (CPU-starved on a small VM) has not done so. That URL sets the session cookies.
+        confirmingNavigated = true;
+        log('QR confirmed - following the TikTok redirect to finish the sign-in');
+        await page.goto(s.qrRedirect, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => undefined);
+      }
+      if (s.qr && expiredNow && !s.qrRateLimitedAt && !confirming) {
         const before = s.qr;
         s.qr = undefined;
         s.qrExpireAt = undefined;
