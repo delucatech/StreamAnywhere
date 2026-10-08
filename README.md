@@ -28,6 +28,8 @@ Windows 10 (see **Test results** for exactly what was measured):
 | Proxy fallback with Range/seek, CORS, host allowlist, SSRF guard | **Working** |
 | Mode A `<video>` → Canvas, Mode C official iframe | **Working** (comparison modes) |
 | H.265 TikTok variants through WebCodecs | **Browser-dependent** – fails cleanly where `VideoDecoder.isConfigSupported` says no |
+| **Feed page** (`feed.html`): TikTok-style vertical stream, Explore feed without sign-in | **Working** (Node server and IIS handler) |
+| Feed page: personal **For You** feed after signing in to TikTok | **Working mechanism** (signed-out test); needs the Node server + Chrome/Edge on that machine – see **Feed** |
 
 ## Repository layout
 
@@ -42,8 +44,11 @@ client/   Vite 4 + TypeScript front end (no framework)
   src/cors-test.ts                browser-side fetch()/<video> access tests
   src/diagnostics.ts              the six experiments (measured, with explanations)
   src/main.ts                     UI, source/renderer selection, direct-vs-proxy decision
+  feed.html + src/feed/feed.ts    the feed page: snap-scrolling stream, tap-to-pause, auto-scroll, download
 server/   Fastify 4 + TypeScript (Node 16 compatible)
   src/tiktok.ts                   native TikTok resolver (page JSON) + server-side CORS probe
+  src/feed.ts                     Explore feed (unsigned TikTok API) + itemStruct → FeedItem conversion
+  src/session.ts                  TikTok sign-in through a real Chrome/Edge (puppeteer-core) + For You capture
   src/ytdlp.ts                    yt-dlp fallback resolver
   src/proxy.ts                    GET/HEAD /api/media/:id streaming relay with Range support
   src/ssrf.ts                     https-only, host allowlist, private-IP rejection
@@ -72,6 +77,9 @@ Configuration is optional. Copy `.env.example` to `server/.env` (or repo-root `.
 | `RESOLVER` | `auto` | `auto` (native, then yt-dlp), `native`, or `ytdlp` |
 | `YTDLP_PATH` | *(auto-detect)* | explicit path to `yt-dlp` |
 | `SERVE_CLIENT` | `false` | serve `client/dist` from the server (production) |
+| `BROWSER_PATH` | *(auto-detect)* | Chrome/Edge executable used for TikTok sign-in / For You (feed page) |
+| `TIKTOK_PROFILE_DIR` | `~/.streamanywhere/tiktok-profile` | browser profile that keeps the TikTok session (treat like a password) |
+| `ENABLE_BROWSER_SESSION` | `1` | set `0` to disable the sign-in feature entirely |
 | `LOG_LEVEL` | `info` | `debug` adds per-request logs |
 
 ### Run (development)
@@ -110,9 +118,13 @@ verified against Windows Server 2016 / IIS 10 / .NET 2.0.50727 at https://deluca
   application, app pool or server setting is needed; the handler routes by path info
   (`/player/api.ashx/api/resolve`, `/player/api.ashx/api/media/<id>`).
 - Rebuild the client for another path with `VITE_BASE=/other/ VITE_API_BASE=/other/api.ashx npm run build -w client`.
-- Differences from the Node server: no yt-dlp fallback; media ids live in the app domain and
-  are lost on app-pool recycle (the client simply re-resolves); CORS origins and limits are
-  constants at the top of `api.ashx`.
+- Differences from the Node server: no yt-dlp fallback; **no TikTok sign-in / For You feed**
+  (the handler cannot run a browser; `/player/feed.html` serves the Explore feed and reports
+  this in the sign-in panel); media ids live in the app domain and are lost on app-pool recycle
+  (the client simply re-resolves); CORS origins and limits are constants at the top of `api.ashx`.
+- The feed batch JSON is far above the MS11-100 member cap of `JavaScriptSerializer`, so the
+  handler slices the response text itself (`ExtractArrayObjects` / `ShallowMembers`) and only
+  deserialises each item's `video`, `author`, `stats` and `music` objects.
 - `deploy/iis/probe.aspx` is a diagnostic page that reports the runtime, TLS and TikTok
   reachability from the server. Delete it after use.
 
@@ -150,6 +162,45 @@ SKIP_NETWORK=1 npm test  # offline only
 TIKTOK_TEST_URL=https://www.tiktok.com/@user/video/123 npm test   # another public video
 npm run typecheck
 ```
+
+## Feed (TikTok-style stream)
+
+Open **`/feed.html`** (linked from the lab page). It is a full-window vertical stream like the app:
+
+- One video per screen, scroll-snap. The video that fills the viewport plays; the others pause.
+  Mouse wheel, touch, ↑/↓, J/K, PageUp/PageDown move between videos.
+- **Tap/click the video to pause and resume** (Space does the same). **M** mutes, **D** downloads.
+- **Fullscreen** (⛶ / **F**) and **Full window** (hides the top bar; **W** or Esc brings it back).
+- **Auto-scroll** (checkbox / **A**): when on, a finished video advances to the next one; when off,
+  videos loop.
+- **⬇ Download** fetches the cookie-free CDN URL as a blob (progress on the button) and saves it as
+  `@author_<id>.mp4`; if the direct fetch fails it goes through the server proxy.
+- Sources: **Explore** (TikTok's public explore feed, with the same categories as tiktok.com/explore;
+  no sign-in; works with both the Node server and the IIS handler) and **For You** (your own feed
+  after signing in; Node server only).
+- Playback uses the browser's `<video>` element (several items are kept warm, H.264 variant
+  preferred, proxy fallback on error); the WebCodecs pipeline stays on the lab page.
+
+**Signing in to TikTok (For You)** – `Sign in` → `Open TikTok sign-in` launches the Chrome/Edge
+installed on the machine that runs the Node server, with a private profile, on TikTok's own login
+page. Sign in there (password, QR code with the phone app, Google, …); StreamAnywhere never
+handles the password. When TikTok reports a session the window closes, the status shows
+`@username`, and the feed switches to For You. From then on a *headless* instance of that profile
+keeps `tiktok.com/foryou` open: TikTok's web app does its own request signing (msToken /
+X-Bogus / X-Gnarly), and the server only reads the `recommend/item_list` responses it receives,
+nudging the page (scroll + ArrowDown) when the viewer needs more. `Sign out` closes the browsers
+and deletes the profile directory.
+
+Why this design: measured on 2026-10-08, `/api/recommend/item_list/` answers `{"status_code":0}`
+without items unless the request carries the signatures minted by TikTok's `webmssdk.js` from a
+browser fingerprint, even when replayed from the same machine; the Explore endpoint has no such
+requirement. The QR-login passport endpoints refuse the web app id ("Application has no
+permissions"), so there is no password-less flow we could drive ourselves. Headless Chrome is
+served an error page unless it hides automation (user agent without `HeadlessChrome`,
+`--disable-blink-features=AutomationControlled`, no `--enable-automation`) – `session.ts` does that.
+Everything after sign-in was verified signed-out (TikTok's guest feed: small batches of 1–6 items,
+then a login wall); the signed-in path uses exactly the same capture. Hosted containers (Render,
+Docker) have no Chrome: the feed page then offers Explore only and says so.
 
 ## Using the app
 
@@ -250,6 +301,9 @@ yourself.
 ## What was *not* done / assumptions
 
 - Only public videos. Private, login-gated, region-locked or DRM content is reported, not bypassed.
+  The For You feed shows what TikTok serves to *your* signed-in browser session, nothing more.
+- The signed-in For You path was not exercised with a real account in this session (signing in
+  is yours to do); the capture mechanism was verified with TikTok's guest feed.
 - Rendering uses Canvas 2D (`drawImage(VideoFrame)`); a WebGL/WebGPU path is a next step.
 - No adaptive bitrate switching; the format is chosen manually.
 - The server-resolved CDN URL was fetched by a browser on the same machine/IP as the server. If

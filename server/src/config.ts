@@ -57,8 +57,14 @@ export const BUILTIN_PROXY_HOSTS = [
 const serveClient = /^(1|true|yes)$/i.test(process.env.SERVE_CLIENT || '');
 const hosted = Boolean(process.env.RENDER || process.env.KOYEB_APP_NAME || process.env.FLY_APP_NAME || process.env.RAILWAY_ENVIRONMENT || process.env.NODE_ENV === 'production');
 
+/** `--port N` on the command line beats PORT (handy for a second dev instance next to the default one). */
+const argPort = (() => {
+  const i = process.argv.indexOf('--port');
+  return i >= 0 ? Number(process.argv[i + 1]) : undefined;
+})();
+
 export const config = {
-  port: Number(process.env.PORT || 8787),
+  port: argPort || Number(process.env.PORT || 8787),
   /** Bind loopback for local dev; all interfaces when serving the built client or on a hosting platform. */
   host: process.env.HOST || (serveClient || hosted ? '0.0.0.0' : '127.0.0.1'),
   hosted,

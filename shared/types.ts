@@ -115,3 +115,111 @@ export interface ProbeRequest {
   url: string;
   origin?: string;
 }
+
+// ---------------------------------------------------------------- feed (TikTok-style stream)
+
+/**
+ * 'explore'  – TikTok's public Explore feed (no login, works on every server incl. IIS).
+ * 'foryou'   – the personalised For You feed of a signed-in TikTok account. Needs the Node server
+ *              with a real Chrome/Edge session (see server/src/session.ts); the signed-in browser
+ *              profile does the request signing TikTok requires (msToken / X-Bogus / X-Gnarly).
+ */
+export type FeedSource = 'explore' | 'foryou';
+
+export interface FeedAuthor {
+  id?: string;
+  uniqueId?: string;
+  nickname?: string;
+  avatar?: string;
+}
+
+export interface FeedStats {
+  plays?: number;
+  likes?: number;
+  comments?: number;
+  shares?: number;
+}
+
+export interface FeedItem {
+  id: string;
+  canonicalUrl: string;
+  author: FeedAuthor;
+  desc?: string;
+  createTime?: number;
+  duration?: number;
+  width?: number;
+  height?: number;
+  cover?: string;
+  music?: string;
+  stats: FeedStats;
+  /** Same shape as the resolver output: direct (cookie-free) URL + proxy relay per quality. H.264 first. */
+  formats: MediaFormat[];
+}
+
+export interface FeedRequest {
+  source: FeedSource;
+  /** Explore category id (see EXPLORE_CATEGORIES); default 120 = All */
+  category?: number;
+  /** Items wanted (server clamps) */
+  count?: number;
+  /** Opaque continuation from the previous response */
+  cursor?: string;
+}
+
+export interface FeedResponse {
+  source: FeedSource;
+  items: FeedItem[];
+  hasMore: boolean;
+  cursor?: string;
+  warnings: string[];
+  elapsedMs: number;
+}
+
+export interface ExploreCategory {
+  id: number;
+  label: string;
+}
+
+/** Category ids captured from TikTok's own Explore page requests on 2026-10-08. */
+export const EXPLORE_CATEGORIES: ExploreCategory[] = [
+  { id: 120, label: 'All' },
+  { id: 118, label: 'Singing & Dancing' },
+  { id: 119, label: 'Comedy' },
+  { id: 104, label: 'Sports' },
+  { id: 112, label: 'Anime & Comics' },
+  { id: 100, label: 'Relationship' },
+  { id: 107, label: 'Shows' },
+  { id: 101, label: 'Lipsync' },
+  { id: 110, label: 'Daily Life' },
+  { id: 105, label: 'Beauty Care' },
+  { id: 102, label: 'Games' },
+  { id: 103, label: 'Society' },
+  { id: 114, label: 'Outfit' },
+  { id: 109, label: 'Cars' },
+  { id: 115, label: 'Food' },
+  { id: 111, label: 'Animals' },
+  { id: 113, label: 'Family' },
+  { id: 106, label: 'Drama' },
+  { id: 108, label: 'Fitness & Health' },
+  { id: 117, label: 'Education' },
+  { id: 116, label: 'Technology' },
+];
+
+export type SessionState = 'unsupported' | 'none' | 'login_pending' | 'logged_in' | 'error';
+
+/** State of the server-side TikTok browser session (Node server only). */
+export interface SessionStatus {
+  /** false on servers that cannot run a browser (IIS handler, hosted containers without Chrome) */
+  supported: boolean;
+  state: SessionState;
+  username?: string;
+  nickname?: string;
+  avatar?: string;
+  /** Executable the server uses (for display) */
+  browser?: string;
+  error?: string;
+  /** Human-readable hint for the UI */
+  message?: string;
+  /** true while the server is still checking a saved browser profile (poll again in a moment) */
+  probing?: boolean;
+}

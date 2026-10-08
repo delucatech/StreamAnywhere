@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#000000" />
+    <title>StreamAnywhere – Feed</title>
+    
+    <script type="module" crossorigin src="/player/assets/feed-90bd9d10.js"></script>
+    <link rel="modulepreload" crossorigin href="/player/assets/api-24dfe98f.js">
+    <link rel="stylesheet" href="/player/assets/feed-268ffb31.css">
+  </head>
+  <body class="feed-body">
+    <div id="app" class="app">
+      <header class="bar" id="bar">
+        <a class="bar-brand" href="./index.html" title="Back to the lab player">▶ StreamAnywhere</a>
+        <div class="bar-source">
+          <select id="source" title="Feed source">
+            <option value="explore">Explore</option>
+            <option value="foryou">For You (signed in)</option>
+          </select>
+          <select id="category" title="Explore category"></select>
+        </div>
+        <div class="bar-right">
+          <label class="toggle" title="Advance to the next video automatically when one ends"><input id="autoscroll" type="checkbox" /><span>Auto-scroll</span></label>
+          <button id="signin" class="bar-btn" type="button">Sign in</button>
+          <button id="fullwindow" class="bar-btn" type="button" title="Hide the top bar (full window)">Full window</button>
+          <button id="fullscreen" class="bar-btn" type="button" title="Fullscreen (F)">⛶</button>
+        </div>
+      </header>
+
+      <div id="session" class="session hidden">
+        <div class="session-inner">
+          <div id="sessionText" class="session-text"></div>
+          <div class="session-actions">
+            <button id="sessionLogin" class="btn primary" type="button">Open TikTok sign-in</button>
+            <button id="sessionRefresh" class="btn" type="button">Check again</button>
+            <button id="sessionLogout" class="btn danger" type="button">Sign out</button>
+            <button id="sessionClose" class="btn ghost" type="button">Close</button>
+          </div>
+        </div>
+      </div>
+
+      <main id="feed" class="feed" tabindex="0" aria-label="Video feed"></main>
+
+      <div id="start" class="start">
+        <button id="startBtn" class="start-btn" type="button">Tap to start</button>
+        <p class="start-hint">Scroll or use ↑ ↓ to move between videos · tap a video to pause · F for fullscreen</p>
+      </div>
+
+      <div id="toast" class="toast hidden"></div>
+      <div id="loading" class="loading hidden">Loading…</div>
+    </div>
+    
+  </body>
+</html>

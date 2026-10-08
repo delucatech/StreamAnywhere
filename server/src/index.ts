@@ -3,13 +3,15 @@ import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
-import type { HealthResponse, ProbeRequest, ReportRequest, ResolveRequest, ResolveResponse } from '../../shared/types';
+import type { FeedRequest, FeedResponse, HealthResponse, ProbeRequest, ReportRequest, ResolveRequest, ResolveResponse, SessionStatus } from '../../shared/types';
 import { config, findUp } from './config';
 import { registerProxyRoutes } from './proxy';
 import { isTikTokUrl, probeUrl, resolveTikTokNative, TikTokError } from './tiktok';
 import { detectYtDlp, resolveWithYtDlp } from './ytdlp';
 import { defaultExpiry, mediaCount, registerMedia } from './mediaStore';
 import { hostAllowed } from './ssrf';
+import { FeedError, fetchExploreFeed } from './feed';
+import { fetchForYou, logout, sessionProbe, sessionStatus, startLogin } from './session';
 
 export async function buildServer() {
   const app = Fastify({
@@ -131,6 +133,41 @@ export async function buildServer() {
     );
     return { ok: true };
   });
+
+  // ---- feed (TikTok-style stream): explore needs no login; foryou needs the browser session.
+  app.post<{ Body: FeedRequest }>('/api/feed', resolveLimit, async (req, reply) => {
+    const b = req.body || ({} as FeedRequest);
+    const source = b.source === 'foryou' ? 'foryou' : 'explore';
+    const count = Math.max(1, Math.min(30, Number(b.count) || 12));
+    const t0 = Date.now();
+    const log = (msg: string) => req.log.info({ source }, msg);
+    try {
+      if (source === 'explore') {
+        const category = b.category !== undefined && Number.isInteger(Number(b.category)) ? Number(b.category) : undefined;
+        const r = await fetchExploreFeed({ category, count, log });
+        const resp: FeedResponse = { source, items: r.items, hasMore: r.hasMore, warnings: r.warnings, elapsedMs: Date.now() - t0 };
+        return resp;
+      }
+      const r = await fetchForYou(count, log);
+      const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0 };
+      return resp;
+    } catch (e) {
+      const err = e as Error;
+      req.log.warn({ source, err: err.message }, 'feed request failed');
+      const status = err instanceof FeedError ? err.status : 502;
+      return reply.code(status).send({ error: err.message, source, elapsedMs: Date.now() - t0 });
+    }
+  });
+
+  app.get('/api/session', async (): Promise<SessionStatus> => sessionProbe());
+  app.post('/api/session/login', resolveLimit, async (req, reply) => {
+    try {
+      return await startLogin((m) => req.log.info(m));
+    } catch (e) {
+      return reply.code(500).send({ ...sessionStatus(), error: (e as Error).message });
+    }
+  });
+  app.post('/api/session/logout', async () => logout());
 
   registerProxyRoutes(app);
 

@@ -11,6 +11,8 @@
 import { buildServer } from '../index';
 import { hostAllowed, ipIsPrivate, assertSafeUpstream } from '../ssrf';
 import { parseTikTokUrl } from '../tiktok';
+import { itemToFeedItem } from '../feed';
+import type { FeedResponse } from '../../../shared/types';
 import { openUpstream } from '../http';
 import type { ResolveResponse } from '../../../shared/types';
 
@@ -66,6 +68,37 @@ async function offline(): Promise<void> {
     photoErr = (e as { code?: string }).code || '';
   }
   check('photo posts rejected', photoErr === 'unsupported_photo', photoErr);
+
+  console.log('\n== 3. feed item conversion (offline)');
+  const rawItem = {
+    id: '7000000000000000001',
+    desc: 'hello',
+    createTime: 1791400000,
+    author: { id: '1', uniqueId: 'someone', nickname: 'Some One', avatarThumb: 'https://p16.example/a.jpg' },
+    stats: { playCount: 10, diggCount: 2, commentCount: 1, shareCount: 0 },
+    music: { title: 'original sound' },
+    video: {
+      duration: 12,
+      width: 576,
+      height: 1024,
+      cover: 'https://p16.example/c.jpg',
+      bitrateInfo: [
+        { GearName: 'adapt_540_1', CodecType: 'h265_hvc1', Bitrate: 900000, PlayAddr: { UrlList: ['https://v16-webapp-prime.us.tiktok.com/video/a?expire=1791500000', 'https://www.tiktok.com/aweme/v1/play/?file_id=a'] } },
+        { GearName: 'normal_540_0', CodecType: 'h264', Bitrate: 1200000, PlayAddr: { UrlList: ['https://v16-webapp-prime.us.tiktok.com/video/b?expire=1791500000', 'https://www.tiktok.com/aweme/v1/play/?file_id=b'] } },
+      ],
+    },
+  };
+  const fi = itemToFeedItem(rawItem, { cookieHeader: 'tt_chain_token=x', referer: 'https://www.tiktok.com/explore' });
+  check('feed item built', Boolean(fi), fi && fi.id);
+  if (fi) {
+    check('H.264 format sorted first', fi.formats[0].codec === 'h264' && fi.formats[0].id === 'normal_540_0', fi.formats.map((f) => f.id));
+    check('direct (redirect) + proxy URLs present', fi.formats[0].directKind === 'redirect' && /^\/api\/media\//.test(fi.formats[0].proxyUrl || ''), fi.formats[0]);
+    check('expiry parsed from the cookie-bound URL', fi.formats[0].expiresAt === 1791500000, fi.formats[0].expiresAt);
+    check('author / stats / music mapped', fi.author.uniqueId === 'someone' && fi.stats.plays === 10 && fi.music === 'original sound', { author: fi.author, stats: fi.stats });
+    check('canonical URL', fi.canonicalUrl === 'https://www.tiktok.com/@someone/video/7000000000000000001', fi.canonicalUrl);
+  }
+  check('item without video is skipped', itemToFeedItem({ id: '1' }) === undefined);
+  check('item without any URL is skipped', itemToFeedItem({ id: '1', video: { bitrateInfo: [{ GearName: 'x', PlayAddr: { UrlList: [] } }] } }) === undefined);
 }
 
 async function network(): Promise<void> {
@@ -112,6 +145,32 @@ async function network(): Promise<void> {
     const bad = await call('POST', '/api/resolve', { url: 'https://example.com/video.mp4' });
     const badJson = JSON.parse(bad.body.toString()) as ResolveResponse;
     check('non-allowlisted host gets no proxy url', bad.status === 200 && badJson.formats[0].proxyUrl === undefined, badJson.warnings);
+
+    console.log('\n== explore feed (network)');
+    const feed = await call('POST', '/api/feed', { source: 'explore', count: 6 }, { origin: 'http://localhost:5173' });
+    check('explore feed 200', feed.status === 200, feed.status === 200 ? undefined : feed.body.toString().slice(0, 300));
+    if (feed.status === 200) {
+      const fj = JSON.parse(feed.body.toString()) as FeedResponse;
+      check('explore feed has items', fj.items.length > 0, { items: fj.items.length, warnings: fj.warnings });
+      const first = fj.items[0];
+      if (first) {
+        const f0 = first.formats[0];
+        check('feed item has author, id and an H.264 or playable format', Boolean(first.id && first.author.uniqueId && f0), { id: first.id, author: first.author.uniqueId, format: f0?.id });
+        check('feed format offers a direct URL and a proxy URL', Boolean(f0?.directUrl && f0?.proxyUrl), { direct: f0?.directKind, proxy: f0?.proxyUrl });
+        if (f0?.proxyUrl) {
+          const viaProxy = await call('GET', f0.proxyUrl, undefined, { range: 'bytes=0-15' });
+          check('feed item via proxy -> 206 and MP4 bytes', viaProxy.status === 206 && viaProxy.body.toString('latin1').includes('ftyp'), { status: viaProxy.status, host: viaProxy.headers['x-proxy-upstream-host'] });
+        }
+        if (f0?.directUrl) {
+          const { res, status } = await openUpstream(f0.directUrl, { allowlist: ['*.tiktok.com', '*.tiktokcdn.com', '*.tiktokcdn-us.com', '*.tiktokcdn-eu.com'], maxRedirects: 5, headers: { range: 'bytes=0-15', origin: 'http://localhost:5173' } });
+          const acao = res.headers['access-control-allow-origin'];
+          res.destroy();
+          check('feed direct URL without cookies -> 206 with ACAO *', status === 206 && acao === '*', { status, acao });
+        }
+      }
+    }
+    const session = await call('GET', '/api/session');
+    check('session status endpoint answers', session.status === 200 && typeof JSON.parse(session.body.toString()).state === 'string', JSON.parse(session.body.toString()));
 
     console.log(`\n== 4. Live TikTok resolution (${TIKTOK_URL})`);
     const t = await call('POST', '/api/resolve', { url: TIKTOK_URL });

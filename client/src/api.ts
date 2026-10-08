@@ -1,4 +1,4 @@
-import type { HealthResponse, ReportRequest, ResolveRequest, ResolveResponse, ServerProbe } from '../../shared/types';
+import type { FeedRequest, FeedResponse, HealthResponse, ReportRequest, ResolveRequest, ResolveResponse, ServerProbe, SessionStatus } from '../../shared/types';
 
 /**
  * API base URL. Empty = same origin (dev server proxy or SERVE_CLIENT deployments). When the
@@ -71,4 +71,12 @@ export const api = {
   resolve: (req: ResolveRequest): Promise<ResolveResponse> => post('/api/resolve', req),
   probe: (url: string): Promise<ServerProbe> => post('/api/probe', { url, origin: location.origin }),
   report: (req: ReportRequest): Promise<void> => post('/api/report', req).then(() => undefined, () => undefined),
+  feed: (req: FeedRequest): Promise<FeedResponse> => post('/api/feed', req),
+  session: async (): Promise<SessionStatus> => {
+    const res = await fetch(apiUrl('/api/session'), { mode: 'cors', credentials: 'omit' });
+    if (!res.ok) throw new ApiError(`session ${res.status}`, res.status);
+    return res.json();
+  },
+  sessionLogin: (): Promise<SessionStatus> => post('/api/session/login', {}),
+  sessionLogout: (): Promise<SessionStatus> => post('/api/session/logout', {}),
 };

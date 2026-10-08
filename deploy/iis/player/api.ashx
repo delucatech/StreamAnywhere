@@ -79,6 +79,9 @@ namespace StreamAnywhere
                 if (path == "/api/resolve") { RequirePost(req); RateLimit(ctx, "resolve", ResolvePerMinute); Json(res, 200, Resolve(ReadJsonBody(req), req)); return; }
                 if (path == "/api/probe") { RequirePost(req); RateLimit(ctx, "resolve", ResolvePerMinute); Dictionary<string, object> b = ReadJsonBody(req); Json(res, 200, Probe(Str(b, "url"), Str(b, "origin") ?? req.Headers["Origin"] ?? "https://delucatech.com", new string[] { "*" })); return; }
                 if (path == "/api/report") { RequirePost(req); Report(ReadJsonBody(req), req); Json(res, 200, Obj("ok", true)); return; }
+                if (path == "/api/feed") { RequirePost(req); RateLimit(ctx, "resolve", ResolvePerMinute); Json(res, 200, Feed(ReadJsonBody(req))); return; }
+                if (path == "/api/session") { Json(res, 200, SessionStatus()); return; }
+                if (path == "/api/session/login" || path == "/api/session/logout") { RequirePost(req); Json(res, 501, SessionStatus()); return; }
                 if (path.StartsWith("/api/media/")) { RateLimit(ctx, "media", MediaPerMinute); ProxyMedia(ctx, path.Substring("/api/media/".Length)); return; }
                 Json(res, 404, Obj("error", "Unknown endpoint " + path));
             }
@@ -415,6 +418,263 @@ namespace StreamAnywhere
             {
                 throw new HttpError(502, "native resolver failed: " + e.Message);
             }
+        }
+
+
+        // ------------------------------------------------------------------ feed (Explore; no sign-in)
+        // GET https://www.tiktok.com/api/explore/item_list/?aid=1988&categoryType=<id>&count=<n> answers
+        // without any client signature (verified 2026-10-08) once the tt_chain_token/ttwid cookies of a
+        // page visit are present. Each call returns a fresh batch (cursor is always 0). TikTok now and
+        // then answers with an empty body; the request is retried. The For You feed needs a signed-in
+        // browser session, which only the Node server provides (see server/src/session.ts).
+        static CookieContainer ExploreJar;
+        static DateTime ExploreJarAt = DateTime.MinValue;
+
+        static Dictionary<string, object> SessionStatus()
+        {
+            return Obj("supported", false, "state", "unsupported",
+                "error", "This IIS deployment cannot run a browser session.",
+                "message", "For You needs the Node server (npm run dev / npm start) on a machine with Chrome or Edge. The Explore feed works here.");
+        }
+
+        static CookieContainer WarmExploreJar()
+        {
+            lock (Gate) { if (ExploreJar != null && (DateTime.UtcNow - ExploreJarAt).TotalMinutes < 30) return ExploreJar; }
+            CookieContainer jar = new CookieContainer();
+            HttpWebRequest pr = (HttpWebRequest)WebRequest.Create("https://www.tiktok.com/explore");
+            pr.Timeout = UpstreamTimeoutMs; pr.ReadWriteTimeout = UpstreamTimeoutMs; pr.CookieContainer = jar; pr.AllowAutoRedirect = true; pr.UserAgent = UserAgent;
+            pr.Accept = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+            pr.Headers["Accept-Language"] = "en-US,en;q=0.9";
+            try
+            {
+                using (HttpWebResponse presp = (HttpWebResponse)pr.GetResponse())
+                {
+                    if ((int)presp.StatusCode != 200) throw new HttpError(502, "TikTok explore page returned HTTP " + (int)presp.StatusCode);
+                    presp.GetResponseStream().Close();
+                }
+            }
+            catch (WebException we) { throw new HttpError(502, "TikTok explore page request failed: " + we.Message); }
+            lock (Gate) { ExploreJar = jar; ExploreJarAt = DateTime.UtcNow; }
+            return jar;
+        }
+
+        static Dictionary<string, object> Feed(Dictionary<string, object> body)
+        {
+            DateTime t0 = DateTime.UtcNow;
+            string source = Str(body, "source") ?? "explore";
+            if (source == "foryou") throw new HttpError(501, "For You needs the Node server with a signed-in browser session; this IIS deployment serves the Explore feed.");
+            int category = Get(body, "category") == null ? 120 : (int)Num(Get(body, "category"));
+            int count = Get(body, "count") == null ? 12 : (int)Num(Get(body, "count"));
+            if (count < 1) count = 1; if (count > 30) count = 30;
+            List<string> warnings = new List<string>();
+            CookieContainer jar = WarmExploreJar();
+            string url = "https://www.tiktok.com/api/explore/item_list/?aid=1988&app_language=en&app_name=tiktok_web&browser_language=en-US&browser_name=Mozilla&browser_online=true&browser_platform=Win32&browser_version=5.0+(Windows)&channel=tiktok_web&cookie_enabled=true"
+                + "&categoryType=" + category + "&count=" + count
+                + "&device_platform=web_pc&from_page=explore&language=en&os=windows&region=US&screen_height=1080&screen_width=1920&tz_name=America%2FNew_York&webcast_language=en";
+            string text = null;
+            for (int attempt = 1; attempt <= 3; attempt++)
+            {
+                HttpWebRequest r = (HttpWebRequest)WebRequest.Create(url);
+                r.Timeout = UpstreamTimeoutMs; r.ReadWriteTimeout = UpstreamTimeoutMs; r.CookieContainer = jar; r.AllowAutoRedirect = false; r.UserAgent = UserAgent;
+                r.Accept = "*/*"; r.Referer = "https://www.tiktok.com/explore"; r.Headers["Accept-Language"] = "en-US,en;q=0.9";
+                HttpWebResponse resp;
+                try { resp = (HttpWebResponse)r.GetResponse(); }
+                catch (WebException we) { resp = we.Response as HttpWebResponse; if (resp == null) throw new HttpError(502, "TikTok explore API request failed: " + we.Message); }
+                int status; string t;
+                using (resp) { status = (int)resp.StatusCode; t = ReadAll(resp, 16 * 1024 * 1024); }
+                if (status != 200) throw new HttpError(502, "TikTok explore API returned HTTP " + status + ": " + Truncate(t, 200));
+                if (t.Trim().Length > 0) { text = t; break; }
+                warnings.Add("attempt " + attempt + ": empty body from TikTok, retrying");
+                System.Threading.Thread.Sleep(700 * attempt);
+            }
+            if (text == null) throw new HttpError(502, "TikTok explore API returned an empty body three times (anti-bot); try again in a moment.");
+
+            // The batch is far beyond the JavaScriptSerializer member cap (MS11-100), so each item and then
+            // only its needed members (video / author / stats / music + scalars) are cut out and parsed.
+            int code = 0;
+            Match sc = Regex.Match(text, "\"statusCode\"\\s*:\\s*(-?\\d+)");
+            if (sc.Success) code = int.Parse(sc.Groups[1].Value, CultureInfo.InvariantCulture);
+            if (code != 0) throw new HttpError(502, "TikTok explore API status " + code);
+            List<string> rawItems = ExtractArrayObjects(text, "\"itemList\"");
+            List<object> items = new List<object>();
+            List<KeyValuePair<string, string>> cookies = new List<KeyValuePair<string, string>>();
+            foreach (Cookie c in jar.GetCookies(new Uri("https://www.tiktok.com/"))) cookies.Add(new KeyValuePair<string, string>(c.Name, c.Value));
+            foreach (string raw in rawItems)
+            {
+                try
+                {
+                    Dictionary<string, object> it = FeedItem(raw, cookies);
+                    if (it != null) items.Add(it);
+                }
+                catch (Exception e) { warnings.Add("item skipped: " + e.Message); }
+            }
+            if (rawItems.Count > 0 && items.Count == 0) warnings.Add("explore returned items but none had playable formats");
+            bool hasMore = !Regex.IsMatch(text, "\"hasMore\"\\s*:\\s*false");
+            return Obj("source", "explore", "items", items, "hasMore", hasMore, "warnings", warnings, "elapsedMs", (int)(DateTime.UtcNow - t0).TotalMilliseconds);
+        }
+
+        /// Builds a feed item from one raw itemStruct JSON object (see shared/types.ts FeedItem).
+        static Dictionary<string, object> FeedItem(string raw, List<KeyValuePair<string, string>> cookies)
+        {
+            Dictionary<string, string> top = ShallowMembers(raw);
+            string id = JsonScalar(top, "id") as string;
+            string videoJson; if (!top.TryGetValue("video", out videoJson) || id == null) return null;
+            object video = NewSerializer().DeserializeObject(videoJson);
+            object author = top.ContainsKey("author") ? NewSerializer().DeserializeObject(top["author"]) : null;
+            object stats = top.ContainsKey("stats") ? NewSerializer().DeserializeObject(top["stats"]) : null;
+            object music = top.ContainsKey("music") ? NewSerializer().DeserializeObject(top["music"]) : null;
+
+            IList variants = Arr(Get(video, "bitrateInfo"));
+            if (variants == null || variants.Count == 0)
+            {
+                string pa = Str(video, "playAddr");
+                if (pa != null) variants = new object[] { Obj("GearName", "playAddr", "CodecType", Str(video, "codecType"), "Bitrate", Get(video, "bitrate"), "PlayAddr", Obj("UrlList", new object[] { pa })) };
+            }
+            double vw = Num(Get(video, "width")), vh = Num(Get(video, "height"));
+            List<Dictionary<string, object>> formats = new List<Dictionary<string, object>>();
+            if (variants != null)
+            {
+                foreach (object v in variants)
+                {
+                    IList urls = Arr(Get(Get(v, "PlayAddr"), "UrlList"));
+                    if (urls == null || urls.Count == 0) continue;
+                    string cookieBound = null, redirectUrl = null;
+                    foreach (object o in urls) { string s = o.ToString(); if (s.Contains("/aweme/v1/play/")) { if (redirectUrl == null) redirectUrl = s; } else if (cookieBound == null) cookieBound = s; }
+                    if (cookieBound == null) cookieBound = urls[0].ToString();
+                    string gear = Str(v, "GearName") ?? "unknown";
+                    string codecType = Str(v, "CodecType");
+                    Match rm = Regex.Match(gear, @"(\d{3,4})");
+                    double? h = rm.Success ? (double?)double.Parse(rm.Groups[1].Value, CultureInfo.InvariantCulture) : null;
+                    double bitrate = Num(Get(v, "Bitrate"));
+                    long? exp = ExpiryFromUrl(cookieBound);
+                    Dictionary<string, object> fmt = Obj(
+                        "id", gear,
+                        "label", gear + " (" + (codecType ?? "codec?") + (bitrate > 0 ? ", " + Math.Round(bitrate / 1000) + " kbps" : "") + ")",
+                        "codec", CodecFamily(codecType), "codecDetail", codecType,
+                        "bitrate", bitrate > 0 ? (object)(long)bitrate : null,
+                        "height", h.HasValue ? (object)(int)h.Value : null,
+                        "width", (h.HasValue && vw > 0 && vh > 0) ? (object)(int)Math.Round(h.Value * vw / vh) : null,
+                        "cookieBoundUrl", cookieBound, "requiresCookies", true,
+                        "expiresAt", exp.HasValue ? (object)exp.Value : null);
+                    try { fmt["upstreamHost"] = new Uri(cookieBound).Host; } catch (Exception) { }
+                    if (redirectUrl != null) { fmt["directUrl"] = redirectUrl; fmt["directKind"] = "redirect"; fmt["redirectUrl"] = redirectUrl; }
+                    if (cookieBound.StartsWith("https:"))
+                    {
+                        MediaRecord rec = Register(cookieBound, "https://www.tiktok.com/explore", cookies, exp.HasValue ? Epoch(exp.Value) : DateTime.UtcNow.AddHours(6), "tiktok");
+                        fmt["proxyUrl"] = "/api/media/" + rec.Id; fmt["mediaId"] = rec.Id;
+                    }
+                    if (fmt.ContainsKey("directUrl") || fmt.ContainsKey("proxyUrl")) formats.Add(fmt);
+                }
+            }
+            if (formats.Count == 0) return null;
+            formats.Sort(delegate(Dictionary<string, object> a, Dictionary<string, object> b)
+            {
+                int ah = (string)a["codec"] == "h264" ? 0 : 1, bh = (string)b["codec"] == "h264" ? 0 : 1;
+                if (ah != bh) return ah - bh;
+                return Num(b["bitrate"]).CompareTo(Num(a["bitrate"]));
+            });
+            List<object> fl = new List<object>(); foreach (Dictionary<string, object> f in formats) fl.Add(f);
+            string uniqueId = author is string ? (string)author : Str(author, "uniqueId");
+            return Obj(
+                "id", id,
+                "canonicalUrl", "https://www.tiktok.com/@" + (uniqueId ?? "_") + "/video/" + id,
+                "author", Obj("id", Str(author, "id"), "uniqueId", uniqueId, "nickname", Str(author, "nickname"), "avatar", Str(author, "avatarThumb") ?? Str(author, "avatarMedium")),
+                "desc", JsonScalar(top, "desc"), "createTime", JsonScalar(top, "createTime"),
+                "duration", Get(video, "duration"), "width", Get(video, "width"), "height", Get(video, "height"),
+                "cover", Str(video, "cover") ?? Str(video, "originCover"), "music", Str(music, "title"),
+                "stats", Obj("plays", Get(stats, "playCount"), "likes", Get(stats, "diggCount"), "comments", Get(stats, "commentCount"), "shares", Get(stats, "shareCount")),
+                "formats", fl);
+        }
+
+        /// Parses one scalar member (string/number/bool) out of the shallow member map, or null.
+        static object JsonScalar(Dictionary<string, string> members, string key)
+        {
+            string v;
+            if (!members.TryGetValue(key, out v)) return null;
+            v = v.Trim();
+            if (v.Length == 0 || v[0] == '{' || v[0] == '[' || v == "null") return null;
+            try { return NewSerializer().DeserializeObject(v); } catch (Exception) { return null; }
+        }
+
+        /// Splits a JSON object literal into its top-level members: key -> raw value text (string-aware, nesting-aware).
+        static Dictionary<string, string> ShallowMembers(string obj)
+        {
+            Dictionary<string, string> result = new Dictionary<string, string>();
+            int i = obj.IndexOf('{');
+            if (i < 0) return result;
+            i++;
+            int n = obj.Length;
+            while (i < n)
+            {
+                while (i < n && (char.IsWhiteSpace(obj[i]) || obj[i] == ',')) i++;
+                if (i >= n || obj[i] == '}') break;
+                if (obj[i] != '"') break;
+                int keyEnd = ScanString(obj, i);
+                string key = obj.Substring(i + 1, keyEnd - i - 1);
+                i = keyEnd + 1;
+                while (i < n && obj[i] != ':') i++;
+                i++;
+                while (i < n && char.IsWhiteSpace(obj[i])) i++;
+                int valStart = i;
+                int valEnd = ScanValue(obj, i);
+                result[key] = obj.Substring(valStart, valEnd - valStart);
+                i = valEnd;
+            }
+            return result;
+        }
+
+        /// Index of the closing quote of the string starting at s[start] == '"'.
+        static int ScanString(string s, int start)
+        {
+            for (int i = start + 1; i < s.Length; i++)
+            {
+                if (s[i] == '\\') { i++; continue; }
+                if (s[i] == '"') return i;
+            }
+            return s.Length - 1;
+        }
+
+        /// Index just past the JSON value starting at s[start].
+        static int ScanValue(string s, int start)
+        {
+            if (start >= s.Length) return start;
+            char c = s[start];
+            if (c == '"') return ScanString(s, start) + 1;
+            if (c == '{' || c == '[')
+            {
+                int depth = 0;
+                for (int i = start; i < s.Length; i++)
+                {
+                    char d = s[i];
+                    if (d == '"') { i = ScanString(s, i); continue; }
+                    if (d == '{' || d == '[') depth++;
+                    else if (d == '}' || d == ']') { depth--; if (depth == 0) return i + 1; }
+                }
+                return s.Length;
+            }
+            int j = start;
+            while (j < s.Length && s[j] != ',' && s[j] != '}' && s[j] != ']') j++;
+            return j;
+        }
+
+        /// Returns the raw text of each object inside the array that follows `"key":` (string-aware), or an empty list.
+        static List<string> ExtractArrayObjects(string json, string quotedKey)
+        {
+            List<string> list = new List<string>();
+            int idx = json.IndexOf(quotedKey + ":", StringComparison.Ordinal);
+            if (idx < 0) return list;
+            int start = json.IndexOf('[', idx + quotedKey.Length);
+            if (start < 0) return list;
+            int i = start + 1;
+            while (i < json.Length)
+            {
+                while (i < json.Length && (char.IsWhiteSpace(json[i]) || json[i] == ',')) i++;
+                if (i >= json.Length || json[i] == ']') break;
+                int end = ScanValue(json, i);
+                if (json[i] == '{') list.Add(json.Substring(i, end - i));
+                i = end;
+            }
+            return list;
         }
 
         static MediaRecord Register(string url, string referer, List<KeyValuePair<string, string>> cookies, DateTime expires, string source)
