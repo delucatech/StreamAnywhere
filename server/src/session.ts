@@ -10,21 +10,25 @@
  * it receives.
  *
  * Flow:
- *   POST /api/session/login   -> opens a VISIBLE browser window on https://www.tiktok.com/login
- *                                (the person signs in there; this server never sees the password),
- *                                waits for the session cookie, then closes the window.
- *   GET  /api/session         -> state + @username (checked through TikTok's account/info endpoint)
- *   POST /api/session/logout  -> closes everything and deletes the profile directory
- *   POST /api/feed {source:'foryou'} -> a headless page on /foryou; every recommend/item_list
- *                                response is captured, and "more" is requested by scrolling the page.
+ *   POST /api/session/login {mode:'qr'}     -> a HEADLESS page opens https://www.tiktok.com/login/qrcode;
+ *                                             the QR canvas is copied into the session status so the
+ *                                             feed page can show it; the person scans it with the
+ *                                             TikTok app. Works on servers without a display.
+ *   POST /api/session/login {mode:'window'} -> opens a VISIBLE browser window on tiktok.com/login
+ *                                             (any sign-in method; needs a desktop on the server).
+ *   GET  /api/session                       -> state, @username, current QR image while pending
+ *   POST /api/session/logout                -> closes everything and deletes the profile directory
+ *   POST /api/feed {source:'foryou'}        -> a headless page on /foryou; every recommend/item_list
+ *                                             response is captured; "more" = scrolling the page.
  *
- * The profile lives in ~/.streamanywhere/tiktok-profile (TIKTOK_PROFILE_DIR overrides). It holds
- * the TikTok cookies of the signed-in account: treat the directory like a password.
+ * The server never sees a password. The profile lives in ~/.streamanywhere/tiktok-profile
+ * (TIKTOK_PROFILE_DIR overrides). It holds the TikTok cookies of the signed-in account: treat the
+ * directory like a password.
  */
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { FeedItem, SessionStatus } from '../../shared/types';
+import type { FeedItem, LoginMode, SessionStatus } from '../../shared/types';
 import { itemToFeedItem } from './feed';
 
 type Browser = import('puppeteer-core').Browser;
@@ -36,7 +40,10 @@ type Page = import('puppeteer-core').Page;
  */
 const PROFILE_DIR = process.env.TIKTOK_PROFILE_DIR || path.join(os.homedir(), '.streamanywhere', 'tiktok-profile');
 const LOGIN_TIMEOUT_MS = 10 * 60 * 1000;
+const QR_RELOAD_MS = 110 * 1000;
 const FEED_URL = 'https://www.tiktok.com/foryou';
+const QR_URL = 'https://www.tiktok.com/login/qrcode';
+const QR_SELECTOR = '[data-e2e="qr-code"] canvas';
 
 export function findBrowserExecutable(): string | undefined {
   if (process.env.BROWSER_PATH && fs.existsSync(process.env.BROWSER_PATH)) return process.env.BROWSER_PATH;
@@ -51,7 +58,7 @@ export function findBrowserExecutable(): string | undefined {
   } else if (process.platform === 'darwin') {
     candidates.push('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge', '/Applications/Chromium.app/Contents/MacOS/Chromium');
   } else {
-    candidates.push('/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/microsoft-edge');
+    candidates.push('/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/snap/bin/chromium', '/usr/bin/microsoft-edge');
   }
   return candidates.find((c) => fs.existsSync(c));
 }
@@ -62,8 +69,12 @@ interface SessionInternal {
   nickname?: string;
   avatar?: string;
   error?: string;
+  loginMode?: LoginMode;
   loginBrowser?: Browser;
   loginStartedAt?: number;
+  qrPage?: Page;
+  qr?: string;
+  qrState?: SessionStatus['qrState'];
   headless?: Browser;
   feedPage?: Page;
   /** Items captured from the headless /foryou page that have not been handed out yet */
@@ -75,6 +86,8 @@ interface SessionInternal {
 
 const s: SessionInternal = { state: 'none', pending: [], seenIds: new Set() };
 let puppeteerMod: typeof import('puppeteer-core') | undefined;
+let feedLog: ((m: string) => void) | undefined;
+const guestAllowed = (): boolean => /^(1|true|yes)$/i.test(process.env.FORYOU_ALLOW_GUEST || '');
 
 /**
  * Loaded on first use, not at startup: the Explore feed and the resolver must keep working on a
@@ -90,7 +103,7 @@ async function puppeteer(): Promise<typeof import('puppeteer-core')> {
 export function sessionSupported(): { ok: boolean; reason?: string; executable?: string } {
   if (/^(0|false|no)$/i.test(process.env.ENABLE_BROWSER_SESSION || '')) return { ok: false, reason: 'ENABLE_BROWSER_SESSION=0' };
   const exe = findBrowserExecutable();
-  if (!exe) return { ok: false, reason: 'No Chrome/Edge found on this machine (set BROWSER_PATH to a chrome.exe / msedge.exe)' };
+  if (!exe) return { ok: false, reason: 'No Chrome/Edge/Chromium found on this machine (set BROWSER_PATH to the executable)' };
   return { ok: true, executable: exe };
 }
 
@@ -103,13 +116,31 @@ async function launch(headless: boolean): Promise<Browser> {
   if (!sup.ok) throw new Error(sup.reason);
   const p = await puppeteer();
   fs.mkdirSync(PROFILE_DIR, { recursive: true });
+  // Verified 2026-10-08: with the UA fix (see preparePage), --disable-blink-features=AutomationControlled
+  // and without --enable-automation, the headless page gets real feed batches; plain headless got
+  // "Something went wrong".
+  const args = ['--no-first-run', '--no-default-browser-check', '--disable-blink-features=AutomationControlled', '--mute-audio', `--window-size=${headless ? '1280,900' : '1100,860'}`];
+  // Linux servers usually run this as a service user without a sandboxed user namespace.
+  if (process.platform === 'linux' && (process.getuid?.() === 0 || /^(1|true|yes)$/i.test(process.env.BROWSER_NO_SANDBOX || ''))) args.push('--no-sandbox', '--disable-dev-shm-usage');
   return p.launch({
     executablePath: sup.executable,
     headless: headless ? 'new' : false,
     userDataDir: PROFILE_DIR,
     defaultViewport: headless ? { width: 1280, height: 900 } : null,
-    args: ['--no-first-run', '--no-default-browser-check', '--disable-blink-features=AutomationControlled', '--mute-audio', `--window-size=${headless ? '1280,900' : '1100,860'}`],
+    args,
     ignoreDefaultArgs: ['--enable-automation'],
+  });
+}
+
+/** UA without "HeadlessChrome" and no media downloads (the viewer's browser fetches the videos itself). */
+async function preparePage(page: Page, browser: Browser): Promise<void> {
+  await page.setUserAgent((await browser.userAgent()).replace('HeadlessChrome', 'Chrome'));
+  await page.setRequestInterception(true);
+  page.on('request', (req) => {
+    // Only media: TikTok's scripts (incl. the signing SDK) come from *.tiktokcdn-*.com too.
+    const t = req.resourceType();
+    if (t === 'media' || t === 'font' || /mime_type=video|\.mp4(\?|$)/.test(req.url())) req.abort().catch(() => undefined);
+    else req.continue().catch(() => undefined);
   });
 }
 
@@ -136,10 +167,17 @@ async function fetchAccount(page: Page): Promise<{ username?: string; nickname?:
 export function sessionStatus(): SessionStatus {
   const sup = sessionSupported();
   const browser = sup.executable ? path.basename(sup.executable) : undefined;
-  if (!sup.ok) return { supported: false, state: 'unsupported', error: sup.reason, message: 'Sign-in needs the Node server on a machine with Chrome or Edge.' };
+  if (!sup.ok) return { supported: false, state: 'unsupported', error: sup.reason, message: 'Sign-in needs the Node server on a machine with Chrome, Edge or Chromium.' };
   const base: SessionStatus = { supported: true, state: s.state, username: s.username, nickname: s.nickname, avatar: s.avatar, error: s.error, browser };
-  if (s.state === 'none') base.message = profileExists() ? 'A saved browser profile exists; checking it on first use.' : 'Not signed in. Sign in opens TikTok in a browser window on the server machine.';
-  if (s.state === 'login_pending') base.message = 'Finish signing in inside the TikTok window that opened on the server machine.';
+  if (s.state === 'none') base.message = profileExists() ? 'A saved browser profile exists; checking it on first use.' : 'Not signed in.';
+  if (s.state === 'login_pending') {
+    base.loginMode = s.loginMode;
+    if (s.loginMode === 'qr') {
+      base.qr = s.qr;
+      base.qrState = s.qrState;
+      base.message = s.qrState === 'scanned' ? 'Scanned – confirm the sign-in in the TikTok app.' : s.qr ? 'Scan the QR code with the TikTok app.' : 'Loading the QR code…';
+    } else base.message = 'Finish signing in inside the TikTok window that opened on the server machine.';
+  }
   if (s.state === 'logged_in') base.message = `Signed in as @${s.username || '?'}`;
   return base;
 }
@@ -161,12 +199,7 @@ export async function sessionProbe(wait = false): Promise<SessionStatus> {
         try {
           const page = await feedPage();
           const acc = await fetchAccount(page);
-          if (acc.ok) {
-            s.state = 'logged_in';
-            s.username = acc.username;
-            s.nickname = acc.nickname;
-            s.avatar = acc.avatar;
-          }
+          if (acc.ok) markLoggedIn(acc);
           // not ok: the saved profile holds no (valid) session - stay 'none' without reporting an error.
         } catch (e) {
           s.error = (e as Error).message;
@@ -185,12 +218,104 @@ export async function sessionProbe(wait = false): Promise<SessionStatus> {
   return st;
 }
 
-export async function startLogin(log: (m: string) => void): Promise<SessionStatus> {
-  if (s.state === 'login_pending' && s.loginBrowser) return sessionStatus();
+function markLoggedIn(acc: { username?: string; nickname?: string; avatar?: string }): void {
+  s.state = 'logged_in';
+  s.username = acc.username;
+  s.nickname = acc.nickname;
+  s.avatar = acc.avatar;
+  s.error = undefined;
+  s.qr = undefined;
+  s.qrState = undefined;
+  s.loginMode = undefined;
+}
+
+export async function startLogin(mode: LoginMode, log: (m: string) => void): Promise<SessionStatus> {
+  if (s.state === 'login_pending' && (s.loginBrowser || s.qrPage)) return sessionStatus();
   if (probe) await probe.catch(() => undefined);
   probed = true;
+  feedLog = feedLog || log;
+  return mode === 'window' ? startWindowLogin(log) : startQrLogin(log);
+}
+
+// ---------------------------------------------------------------- QR sign-in (headless, no display)
+async function startQrLogin(log: (m: string) => void): Promise<SessionStatus> {
+  s.state = 'login_pending';
+  s.loginMode = 'qr';
+  s.error = undefined;
+  s.qr = undefined;
+  s.qrState = 'new';
+  s.loginStartedAt = Date.now();
+  const browser = await headlessBrowser();
+  const page = await browser.newPage();
+  await preparePage(page, browser);
+  s.qrPage = page;
+  await page.goto(QR_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+  log('QR sign-in page opened');
+  void qrLoop(page, browser, log);
+  // Give the first QR a moment so the first status answer already carries it.
+  for (let i = 0; i < 20 && !s.qr && s.qrPage === page; i++) await new Promise((r) => setTimeout(r, 250));
+  return sessionStatus();
+}
+
+async function captureQr(page: Page): Promise<string | undefined> {
+  try {
+    await page.waitForSelector(QR_SELECTOR, { timeout: 8000 });
+    const data = (await page.evaluate(`(() => { const c = document.querySelector('${QR_SELECTOR}'); return c ? c.toDataURL('image/png') : null; })()`)) as string | null;
+    return data && data.startsWith('data:image/png') && data.length > 200 ? data : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function qrLoop(page: Page, browser: Browser, log: (m: string) => void): Promise<void> {
+  let lastReload = Date.now();
+  try {
+    while (s.qrPage === page && Date.now() - (s.loginStartedAt || 0) < LOGIN_TIMEOUT_MS) {
+      if (!browser.isConnected() || page.isClosed()) break;
+      if (await hasSessionCookie(page).catch(() => false)) {
+        const acc = await fetchAccount(page);
+        if (acc.ok) {
+          markLoggedIn(acc);
+          log(`signed in as @${acc.username} (QR)`);
+          s.qrPage = undefined;
+          await page.close().catch(() => undefined);
+          await resetFeedPage();
+          return;
+        }
+      }
+      const text = String(await page.evaluate('document.body.innerText').catch(() => '')).toLowerCase();
+      if (/expired|refresh/.test(text) || Date.now() - lastReload > QR_RELOAD_MS) {
+        await page.goto(QR_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => undefined);
+        lastReload = Date.now();
+        s.qrState = 'new';
+      } else if (/confirm|scanned/.test(text) && !/1\. scan with/.test(text)) {
+        s.qrState = 'scanned';
+      }
+      const qr = await captureQr(page);
+      if (qr) s.qr = qr;
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+    if (s.qrPage === page && s.state === 'login_pending') {
+      s.state = 'none';
+      s.error = 'QR sign-in timed out after 10 minutes.';
+      s.qr = undefined;
+      s.qrPage = undefined;
+      await page.close().catch(() => undefined);
+    }
+  } catch (e) {
+    if (s.qrPage === page) {
+      s.state = 'error';
+      s.error = (e as Error).message;
+      s.qrPage = undefined;
+    }
+  }
+}
+
+// ---------------------------------------------------------------- window sign-in (needs a desktop)
+async function startWindowLogin(log: (m: string) => void): Promise<SessionStatus> {
   await closeHeadless();
   s.state = 'login_pending';
+  s.loginMode = 'window';
   s.error = undefined;
   s.loginStartedAt = Date.now();
   const browser = await launch(false);
@@ -218,12 +343,8 @@ export async function startLogin(log: (m: string) => void): Promise<SessionStatu
         if (!(await hasSessionCookie(p).catch(() => false))) continue;
         const acc = await fetchAccount(p);
         if (!acc.ok) continue;
-        s.state = 'logged_in';
-        s.username = acc.username;
-        s.nickname = acc.nickname;
-        s.avatar = acc.avatar;
-        s.error = undefined;
-        log(`signed in as @${acc.username}`);
+        markLoggedIn(acc);
+        log(`signed in as @${acc.username} (window)`);
         s.loginBrowser = undefined;
         await browser.close().catch(() => undefined);
         return;
@@ -242,51 +363,49 @@ export async function startLogin(log: (m: string) => void): Promise<SessionStatu
   return sessionStatus();
 }
 
-async function closeHeadless(): Promise<void> {
-  const b = s.headless;
-  s.headless = undefined;
-  s.feedPage = undefined;
-  if (b) await b.close().catch(() => undefined);
-}
-
-export async function logout(): Promise<SessionStatus> {
-  const lb = s.loginBrowser;
-  s.loginBrowser = undefined;
-  if (lb) await lb.close().catch(() => undefined);
-  await closeHeadless();
-  s.state = 'none';
-  s.username = s.nickname = s.avatar = s.error = undefined;
-  s.pending = [];
-  s.seenIds = new Set();
-  probed = true;
-  try {
-    fs.rmSync(PROFILE_DIR, { recursive: true, force: true });
-  } catch (e) {
-    s.error = `Profile directory could not be deleted: ${(e as Error).message}`;
-  }
-  return sessionStatus();
-}
-
-/** The headless page that stays on /foryou; feed responses are captured as they happen. */
-async function feedPage(): Promise<Page> {
-  if (s.feedPage && s.headless?.isConnected()) return s.feedPage;
+// ---------------------------------------------------------------- headless browser + feed page
+async function headlessBrowser(): Promise<Browser> {
+  if (s.headless?.isConnected()) return s.headless;
   await closeHeadless();
   feedLog?.('launching headless browser');
   const browser = await launch(true);
   feedLog?.('headless browser launched: ' + (await browser.version()));
   s.headless = browser;
-  const page = (await browser.pages())[0] || (await browser.newPage());
-  // Verified 2026-10-08: with this UA fix, --disable-blink-features=AutomationControlled and without
-  // --enable-automation, the headless page gets real feed batches; plain headless got "Something went wrong".
-  await page.setUserAgent((await browser.userAgent()).replace('HeadlessChrome', 'Chrome'));
-  // Keep the headless page cheap: no media/images; the viewer's browser fetches the videos itself.
-  await page.setRequestInterception(true);
-  page.on('request', (req) => {
-    // Only media: TikTok's scripts (incl. the signing SDK) come from *.tiktokcdn-*.com too.
-    const t = req.resourceType();
-    if (t === 'media' || t === 'image' || t === 'font' || /mime_type=video|\.mp4(\?|$)/.test(req.url())) req.abort().catch(() => undefined);
-    else req.continue().catch(() => undefined);
+  browser.on('disconnected', () => {
+    if (s.headless === browser) {
+      s.headless = undefined;
+      s.feedPage = undefined;
+      s.qrPage = undefined;
+    }
   });
+  return browser;
+}
+
+async function closeHeadless(): Promise<void> {
+  const b = s.headless;
+  s.headless = undefined;
+  s.feedPage = undefined;
+  s.qrPage = undefined;
+  if (b) await b.close().catch(() => undefined);
+}
+
+/** After a sign-in: drop guest items and make the feed page reload as the signed-in account. */
+async function resetFeedPage(): Promise<void> {
+  s.pending = [];
+  s.seenIds = new Set();
+  s.lastFeedError = undefined;
+  const p = s.feedPage;
+  s.feedPage = undefined;
+  if (p && !p.isClosed()) await p.close().catch(() => undefined);
+}
+
+/** The headless page that stays on /foryou; feed responses are captured as they happen. */
+async function feedPage(): Promise<Page> {
+  if (s.feedPage && !s.feedPage.isClosed() && s.headless?.isConnected()) return s.feedPage;
+  const browser = await headlessBrowser();
+  const first = (await browser.pages())[0];
+  const page = first && !s.qrPage && first.url() === 'about:blank' ? first : await browser.newPage();
+  await preparePage(page, browser);
   page.on('response', (res) => {
     if (!/\/api\/recommend\/item_list\//.test(res.url())) return;
     void res
@@ -317,8 +436,23 @@ async function feedPage(): Promise<Page> {
   return page;
 }
 
-let feedLog: ((m: string) => void) | undefined;
-const guestAllowed = (): boolean => /^(1|true|yes)$/i.test(process.env.FORYOU_ALLOW_GUEST || '');
+export async function logout(): Promise<SessionStatus> {
+  const lb = s.loginBrowser;
+  s.loginBrowser = undefined;
+  if (lb) await lb.close().catch(() => undefined);
+  await closeHeadless();
+  s.state = 'none';
+  s.username = s.nickname = s.avatar = s.error = s.qr = s.qrState = s.loginMode = undefined;
+  s.pending = [];
+  s.seenIds = new Set();
+  probed = true;
+  try {
+    fs.rmSync(PROFILE_DIR, { recursive: true, force: true });
+  } catch (e) {
+    s.error = `Profile directory could not be deleted: ${(e as Error).message}`;
+  }
+  return sessionStatus();
+}
 
 export interface ForYouResult {
   items: FeedItem[];

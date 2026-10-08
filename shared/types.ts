@@ -207,6 +207,14 @@ export const EXPLORE_CATEGORIES: ExploreCategory[] = [
 
 export type SessionState = 'unsupported' | 'none' | 'login_pending' | 'logged_in' | 'error';
 
+/** 'qr' = TikTok's QR login rendered by a headless page and shown in the feed page (works on servers
+ *  without a display); 'window' = a visible browser window on the server machine. */
+export type LoginMode = 'qr' | 'window';
+
+export interface SessionLoginRequest {
+  mode?: LoginMode;
+}
+
 /** State of the server-side TikTok browser session (Node server only). */
 export interface SessionStatus {
   /** false on servers that cannot run a browser (IIS handler, hosted containers without Chrome) */
@@ -222,4 +230,9 @@ export interface SessionStatus {
   message?: string;
   /** true while the server is still checking a saved browser profile (poll again in a moment) */
   probing?: boolean;
+  /** While login_pending: which flow is running */
+  loginMode?: LoginMode;
+  /** While a QR login is pending: the current QR code as a data: URL (PNG), refreshed as TikTok rotates it */
+  qr?: string;
+  qrState?: 'new' | 'scanned' | 'expired';
 }

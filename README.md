@@ -29,7 +29,7 @@ Windows 10 (see **Test results** for exactly what was measured):
 | Mode A `<video>` → Canvas, Mode C official iframe | **Working** (comparison modes) |
 | H.265 TikTok variants through WebCodecs | **Browser-dependent** – fails cleanly where `VideoDecoder.isConfigSupported` says no |
 | **Feed page** (`feed.html`): TikTok-style vertical stream, Explore feed without sign-in | **Working** (Node server and IIS handler) |
-| Feed page: personal **For You** feed after signing in to TikTok | **Working mechanism** (signed-out test); needs the Node server + Chrome/Edge on that machine – see **Feed** |
+| Feed page: personal **For You** feed after signing in to TikTok (QR code or window) | **Working mechanism** (signed-out test; QR rendered and refreshed); needs the Node server + Chrome/Edge/Chromium on that machine – see **Feed** |
 
 ## Repository layout
 
@@ -128,6 +128,31 @@ verified against Windows Server 2016 / IIS 10 / .NET 2.0.50727 at https://deluca
 - `deploy/iis/probe.aspx` is a diagnostic page that reports the runtime, TLS and TikTok
   reachability from the server. Delete it after use.
 
+### Deploy to a free Google Cloud VM (For You included)
+
+The For You feed needs a browser on the server, which the container hosts below cannot provide.
+Google Cloud's *Always Free* `e2-micro` (us-west1 / us-central1 / us-east1, 30 GB disk) can:
+
+1. Console → Compute Engine → *Create instance*: name `streamanywhere`, region `us-central1`,
+   machine `e2-micro`, boot disk Debian 12 (standard persistent disk, 30 GB), firewall: allow
+   HTTP and HTTPS. Keep the default ephemeral external IP (a reserved static IP is billed).
+2. Open the instance's *SSH* (in-browser) and run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/delucatech/StreamAnywhere/main/deploy/gcp/setup-vm.sh | sudo bash
+```
+
+   [`deploy/gcp/setup-vm.sh`](deploy/gcp/setup-vm.sh) adds 2 GB swap, installs Node 20, Chromium
+   and Caddy, builds the app into `/opt/streamanywhere`, runs it as a systemd service
+   (`journalctl -u streamanywhere -f`), and serves it over HTTPS at
+   `https://<external-ip-with-dashes>.sslip.io` (Let's Encrypt, no DNS needed).
+3. Open `https://<that host>/feed.html` → Sign in → Sign in with QR code → scan with the app.
+
+Re-running the script updates the deployment. The IIS or GitHub Pages copy of the client can use
+this server too: `https://delucatech.com/player/feed.html?api=https://<that host>`. Untested from
+my side: whether TikTok treats Google's IP range like a datacenter (captcha at sign-in or an
+empty For You feed); the Explore feed and the resolver are unaffected by that.
+
 ### Deploy to a free host (no PC required)
 
 Because playback goes straight from the viewer's browser to TikTok's CDN, the server only
@@ -181,15 +206,22 @@ Open **`/feed.html`** (linked from the lab page). It is a full-window vertical s
 - Playback uses the browser's `<video>` element (several items are kept warm, H.264 variant
   preferred, proxy fallback on error); the WebCodecs pipeline stays on the lab page.
 
-**Signing in to TikTok (For You)** – `Sign in` → `Open TikTok sign-in` launches the Chrome/Edge
-installed on the machine that runs the Node server, with a private profile, on TikTok's own login
-page. Sign in there (password, QR code with the phone app, Google, …); StreamAnywhere never
-handles the password. When TikTok reports a session the window closes, the status shows
-`@username`, and the feed switches to For You. From then on a *headless* instance of that profile
-keeps `tiktok.com/foryou` open: TikTok's web app does its own request signing (msToken /
-X-Bogus / X-Gnarly), and the server only reads the `recommend/item_list` responses it receives,
-nudging the page (scroll + ArrowDown) when the viewer needs more. `Sign out` closes the browsers
-and deletes the profile directory.
+**Signing in to TikTok (For You)** – `Sign in` offers two ways; both use the Chrome/Edge/Chromium
+installed on the machine that runs the Node server, with a private profile, and StreamAnywhere never
+handles the password:
+
+- **Sign in with QR code** (default, works on a server without a display): a headless page opens
+  TikTok's own `login/qrcode` page, the QR canvas is copied into the session status and shown in
+  the feed page; scan it with the TikTok app on the phone and confirm. The code is refreshed as
+  TikTok rotates it.
+- **Open sign-in window on server**: a visible browser window on TikTok's login page, for a PC
+  where you can see the screen (any sign-in method).
+
+When TikTok reports a session the status shows `@username` and the feed switches to For You. From
+then on a *headless* instance of that profile keeps `tiktok.com/foryou` open: TikTok's web app
+does its own request signing (msToken / X-Bogus / X-Gnarly), and the server only reads the
+`recommend/item_list` responses it receives, nudging the page (scroll + ArrowDown) when the viewer
+needs more. `Sign out` closes the browsers and deletes the profile directory.
 
 Why this design: measured on 2026-10-08, `/api/recommend/item_list/` answers `{"status_code":0}`
 without items unless the request carries the signatures minted by TikTok's `webmssdk.js` from a

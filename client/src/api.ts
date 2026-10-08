@@ -1,4 +1,4 @@
-import type { FeedRequest, FeedResponse, HealthResponse, ReportRequest, ResolveRequest, ResolveResponse, ServerProbe, SessionStatus } from '../../shared/types';
+import type { FeedRequest, FeedResponse, HealthResponse, LoginMode, ReportRequest, ResolveRequest, ResolveResponse, ServerProbe, SessionStatus } from '../../shared/types';
 
 /**
  * API base URL. Empty = same origin (dev server proxy or SERVE_CLIENT deployments). When the
@@ -77,6 +77,6 @@ export const api = {
     if (!res.ok) throw new ApiError(`session ${res.status}`, res.status);
     return res.json();
   },
-  sessionLogin: (): Promise<SessionStatus> => post('/api/session/login', {}),
+  sessionLogin: (mode: LoginMode): Promise<SessionStatus> => post('/api/session/login', { mode }),
   sessionLogout: (): Promise<SessionStatus> => post('/api/session/logout', {}),
 };

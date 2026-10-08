@@ -14,7 +14,7 @@
  * Playback uses the browser's <video> element (not the WebCodecs lab pipeline) so that several
  * items can be kept warm at once and so that H.265-only variants still play where the browser can.
  */
-import { EXPLORE_CATEGORIES, type FeedItem, type FeedSource, type MediaFormat, type SessionStatus } from '../../../shared/types';
+import { EXPLORE_CATEGORIES, type FeedItem, type FeedSource, type LoginMode, type MediaFormat, type SessionStatus } from '../../../shared/types';
 import { api, ApiError, apiUrl } from '../api';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
@@ -35,6 +35,10 @@ const el = {
   session: $('session'),
   sessionText: $('sessionText'),
   sessionLogin: $<HTMLButtonElement>('sessionLogin'),
+  sessionLoginWindow: $<HTMLButtonElement>('sessionLoginWindow'),
+  sessionQr: $('sessionQr'),
+  sessionQrImg: $<HTMLImageElement>('sessionQrImg'),
+  sessionQrHint: $('sessionQrHint'),
   sessionRefresh: $<HTMLButtonElement>('sessionRefresh'),
   sessionLogout: $<HTMLButtonElement>('sessionLogout'),
   sessionClose: $<HTMLButtonElement>('sessionClose'),
@@ -164,7 +168,8 @@ el.fullscreen.addEventListener('click', () => toggleFullscreen());
 el.signin.addEventListener('click', () => void openSessionPanel());
 el.sessionClose.addEventListener('click', () => closeSessionPanel());
 el.sessionRefresh.addEventListener('click', () => void refreshSession(true));
-el.sessionLogin.addEventListener('click', () => void startLogin());
+el.sessionLogin.addEventListener('click', () => void startLogin('qr'));
+el.sessionLoginWindow.addEventListener('click', () => void startLogin('window'));
 el.sessionLogout.addEventListener('click', () => void signOut());
 el.startBtn.addEventListener('click', () => start());
 el.start.addEventListener('click', (e) => {
@@ -203,16 +208,27 @@ function renderSession(): void {
   } else if (s.state === 'logged_in') {
     lines.push(`<b>Signed in as @${esc(s.username || '?')}</b>${s.nickname && s.nickname !== s.username ? ` (${esc(s.nickname)})` : ''}`);
     lines.push('The For You feed comes from this account. Sign out closes the browser session and deletes the saved profile on the server.');
+  } else if (s.state === 'login_pending' && s.loginMode === 'qr') {
+    lines.push('<b>Scan to sign in.</b>');
+    lines.push('In the TikTok app: Profile → ☰ menu → My QR code → scan icon (or point the in-app camera at this code), then confirm. The code refreshes by itself; this page updates automatically.');
   } else if (s.state === 'login_pending') {
     lines.push('<b>Waiting for sign-in…</b>');
-    lines.push('A TikTok window opened on the machine running the server. Sign in there (any method, including the QR code with your phone). This page updates automatically.');
+    lines.push('A TikTok window opened on the machine running the server. Sign in there (any method). This page updates automatically.');
   } else {
     lines.push('<b>Not signed in.</b>');
-    lines.push(`"Open TikTok sign-in" opens TikTok's own login page in a ${esc(s.browser || 'browser')} window on the server machine. StreamAnywhere never sees your password; after you sign in, the window closes and the session is kept in a private browser profile on the server.`);
+    lines.push(`"Sign in with QR code" shows TikTok's login QR here; scan it with the TikTok app on your phone. The session then lives in a private ${esc(s.browser || 'browser')} profile on the server. StreamAnywhere never sees your password.`);
     if (s.error) lines.push(`<span style="color:var(--err)">${esc(s.error)}</span>`);
   }
   el.sessionText.innerHTML = lines.filter(Boolean).join('\n');
-  el.sessionLogin.classList.toggle('hidden', !s.supported || s.state === 'logged_in' || s.state === 'login_pending');
+  const showQr = s.state === 'login_pending' && s.loginMode === 'qr';
+  el.sessionQr.classList.toggle('hidden', !showQr);
+  if (showQr) {
+    if (s.qr && el.sessionQrImg.src !== s.qr) el.sessionQrImg.src = s.qr;
+    el.sessionQrHint.textContent = s.qrState === 'scanned' ? 'Scanned – confirm on your phone' : s.qr ? 'Waiting for the scan…' : 'Loading the QR code…';
+  }
+  const idle = s.supported && s.state !== 'logged_in' && s.state !== 'login_pending';
+  el.sessionLogin.classList.toggle('hidden', !idle);
+  el.sessionLoginWindow.classList.toggle('hidden', !idle);
   el.sessionLogout.classList.toggle('hidden', !s.supported || s.state === 'none' || s.state === 'unsupported');
   el.signin.textContent = s.state === 'logged_in' ? `@${s.username || 'account'}` : s.state === 'login_pending' ? 'Signing in…' : 'Sign in';
 }
@@ -260,16 +276,16 @@ function pollSession(): void {
   }, 2000);
 }
 
-async function startLogin(): Promise<void> {
-  el.sessionLogin.disabled = true;
+async function startLogin(mode: LoginMode): Promise<void> {
+  el.sessionLogin.disabled = el.sessionLoginWindow.disabled = true;
   try {
-    state.session = await api.sessionLogin();
+    state.session = await api.sessionLogin(mode);
     renderSession();
     pollSession();
   } catch (e) {
     toast(`Sign-in could not start: ${errMsg(e)}`, true, 6000);
   } finally {
-    el.sessionLogin.disabled = false;
+    el.sessionLogin.disabled = el.sessionLoginWindow.disabled = false;
   }
 }
 
