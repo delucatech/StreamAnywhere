@@ -1,0 +1,243 @@
+{
+  "steps": [
+    {
+      "test": "A: GET no cookies/referer (fresh opener)",
+      "status": 403,
+      "headers": {
+        "Server": "AkamaiGHost",
+        "Content-Length": "519",
+        "Content-Type": "video/mp4",
+        "Access-Control-Allow-Origin": "https://www.tiktok.com",
+        "Access-Control-Expose-Headers": "Content-Length,Content-Range,content-type,expires,last-modified,via,X-Cache,x-response-cache,x-response-sinfo,x-response-cinfo",
+        "Accept-Ranges": "bytes",
+        "Access-Control-Allow-Headers": "range",
+        "Access-Control-Allow-Credentials": "true"
+      },
+      "body_prefix_hex": "3c48544d4c3e3c484541443e",
+      "body_len_read": 519
+    },
+    {
+      "test": "B: no cookies, no referer",
+      "status": 403,
+      "headers": {
+        "Server": "AkamaiGHost",
+        "Content-Length": "517",
+        "Content-Type": "video/mp4",
+        "Access-Control-Allow-Origin": "https://www.tiktok.com",
+        "Access-Control-Expose-Headers": "Content-Length,Content-Range,content-type,expires,last-modified,via,X-Cache,x-response-cache,x-response-sinfo,x-response-cinfo",
+        "Accept-Ranges": "bytes",
+        "Access-Control-Allow-Headers": "range",
+        "Access-Control-Allow-Credentials": "true"
+      },
+      "body_prefix_hex": "3c48544d4c3e3c484541443e",
+      "body_len_read": 517
+    },
+    {
+      "test": "C: no cookies + Referer",
+      "status": 403,
+      "headers": {
+        "Server": "AkamaiGHost",
+        "Content-Length": "517",
+        "Content-Type": "video/mp4",
+        "Access-Control-Allow-Origin": "https://www.tiktok.com",
+        "Access-Control-Expose-Headers": "Content-Length,Content-Range,content-type,expires,last-modified,via,X-Cache,x-response-cache,x-response-sinfo,x-response-cinfo",
+        "Accept-Ranges": "bytes",
+        "Access-Control-Allow-Headers": "range",
+        "Access-Control-Allow-Credentials": "true"
+      },
+      "body_prefix_hex": "3c48544d4c3e3c484541443e",
+      "body_len_read": 517
+    },
+    {
+      "test": "D: no cookies + Referer + Origin",
+      "status": 403,
+      "headers": {
+        "Server": "AkamaiGHost",
+        "Content-Length": "517",
+        "Content-Type": "video/mp4",
+        "Access-Control-Allow-Origin": "https://www.tiktok.com",
+        "Access-Control-Expose-Headers": "Content-Length,Content-Range,content-type,expires,last-modified,via,X-Cache,x-response-cache,x-response-sinfo,x-response-cinfo",
+        "Accept-Ranges": "bytes",
+        "Access-Control-Allow-Headers": "range",
+        "Access-Control-Allow-Credentials": "true"
+      },
+      "body_prefix_hex": "3c48544d4c3e3c484541443e",
+      "body_len_read": 517
+    },
+    {
+      "test": "E: no cookies + Range 0-1023",
+      "status": 403,
+      "headers": {
+        "Server": "AkamaiGHost",
+        "Content-Length": "519",
+        "Content-Type": "video/mp4",
+        "Access-Control-Allow-Origin": "https://www.tiktok.com",
+        "Access-Control-Expose-Headers": "Content-Length,Content-Range,content-type,expires,last-modified,via,X-Cache,x-response-cache,x-response-sinfo,x-response-cinfo",
+        "Accept-Ranges": "bytes",
+        "Access-Control-Allow-Headers": "range",
+        "Access-Control-Allow-Credentials": "true"
+      },
+      "body_prefix_hex": "3c48544d4c3e3c484541443e",
+      "body_len_read": 519
+    },
+    {
+      "test": "F: with page cookies + Referer + Origin",
+      "status": 200,
+      "headers": {
+        "Server": "nginx",
+        "X-TT-LOGID": "202610051406333158A98ED31C4D907FDA",
+        "Content-Length": "6019431",
+        "Cache-Control": "max-age=2592000",
+        "Content-Type": "video/mp4",
+        "Access-Control-Allow-Origin": "https://www.tiktok.com",
+        "Access-Control-Expose-Headers": "Content-Length,Content-Range,content-type,expires,last-modified,via,X-Cache,x-response-cache,x-response-sinfo,x-response-cinfo",
+        "Accept-Ranges": "bytes",
+        "Access-Control-Allow-Headers": "range",
+        "Access-Control-Allow-Credentials": "true"
+      },
+      "body_prefix_hex": "000000206674797069736f6d",
+      "body_len_read": 65536
+    },
+    {
+      "test": "G: with page cookies + Referer + Range",
+      "status": 206,
+      "headers": {
+        "Server": "nginx",
+        "X-TT-LOGID": "202610051406333158A98ED31C4D907FDA",
+        "Cache-Control": "max-age=2592000",
+        "Content-Range": "bytes 0-1023/6019431",
+        "Content-Length": "1024",
+        "Content-Type": "video/mp4",
+        "Access-Control-Allow-Origin": "https://www.tiktok.com",
+        "Access-Control-Expose-Headers": "Content-Length,Content-Range,content-type,expires,last-modified,via,X-Cache,x-response-cache,x-response-sinfo,x-response-cinfo",
+        "Accept-Ranges": "bytes",
+        "Access-Control-Allow-Headers": "range",
+        "Access-Control-Allow-Credentials": "true"
+      },
+      "body_prefix_hex": "000000206674797069736f6d",
+      "body_len_read": 1024
+    },
+    {
+      "test": "H: OPTIONS-like probe (GET with ACRM headers)",
+      "status": 403,
+      "headers": {
+        "Access-Control-Allow-Origin": "https://www.tiktok.com",
+        "Access-Control-Expose-Headers": "Content-Length,Content-Range,content-type,expires,last-modified,via,X-Cache,x-response-cache,x-response-sinfo,x-response-cinfo",
+        "Access-Control-Allow-Headers": "range",
+        "Access-Control-Allow-Credentials": "true"
+      }
+    },
+    {
+      "test": "I: real OPTIONS preflight",
+      "status": 403,
+      "headers": {
+        "Access-Control-Allow-Origin": "https://www.tiktok.com",
+        "Access-Control-Expose-Headers": "Content-Length,Content-Range,content-type,expires,last-modified,via,X-Cache,x-response-cache,x-response-sinfo,x-response-cinfo",
+        "Access-Control-Allow-Headers": "range",
+        "Access-Control-Allow-Credentials": "true"
+      }
+    }
+  ],
+  "video_url": "https://www.tiktok.com/@tiktok/video/7693184538704416031",
+  "page_status": 200,
+  "page_final_url": "https://www.tiktok.com/@tiktok/video/7693184538704416031",
+  "page_set_cookie_names": [
+    "tt_chain_token",
+    "tt_csrf_token",
+    "ttwid"
+  ],
+  "has_universal_data": true,
+  "scope_keys": [
+    "webapp.app-context",
+    "webapp.biz-context",
+    "webapp.i18n-translation",
+    "seo.abtest",
+    "webapp.video-detail",
+    "webapp.a-b"
+  ],
+  "video_detail_status": [
+    0,
+    ""
+  ],
+  "item": {
+    "width": 720,
+    "height": 1280,
+    "duration": 68,
+    "ratio": "720p",
+    "format": "mp4",
+    "codecType": "h264",
+    "bitrate": 701105,
+    "playAddr": "https://v16-webapp-prime.us.tiktok.com/video/tos/useast8/tos-useast8-pve-0068-tx2/oIwHTazIe7jJARegtCLVAX2GAYqpWIaae1hIc4/?a=1988&bti=REDACTED&&bt=684&ft=REDACTED&mime_type=video_mp4&rc=REDACTED&expire=1791638144&l=REDACTED&ply_type=2&policy=2&signature=REDACTED&tk=REDACTED&btag=e00090000",
+    "downloadAddr": "https://v16-webapp-prime.us.tiktok.com/video/tos/useast8/tos-useast8-ve-0068c003-tx2/ooRjNEpyAeQEMQsqG6VFE5XwIBuf5FwDFADrEG/?a=1988&bti=REDACTED&&bt=627&ft=REDACTED&mime_type=video_mp4&rc=REDACTED&expire=1791638144&l=REDACTED&ply_type=2&policy=2&signature=REDACTED&tk=REDACTED&btag=e00090000",
+    "definition": "720p",
+    "encodedType": "normal",
+    "videoQuality": "normal",
+    "cover": "https://p19-common-sign.tiktokcdn-us.com/tos-useast8-p-0068-tx2/oUqGIH7EADEdBAAAQXXCfFX46EVf7QkZR6wJMA~tplv-tiktokx-origin.image?dr=9636&x-expires=1791637200&x-signature=REDACTED&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5",
+    "bitrateInfo": [
+      {
+        "Bitrate": 701105,
+        "CodecType": "h264",
+        "GearName": "normal_720_0",
+        "QualityType": 10,
+        "UrlList": [
+          "https://v16-webapp-prime.us.tiktok.com/video/tos/useast8/tos-useast8-pve-0068-tx2/oIwHTazIe7jJARegtCLVAX2GAYqpWIaae1hIc4/?a=1988&bti=REDACTED&&bt=684&ft=REDACTED&mime_type=video_mp4&rc=REDACTED&expire=1791638144&l=REDACTED&ply_type=2&policy=2&signature=REDACTED&tk=REDACTED&btag=e00090000",
+          "https://v19-webapp-prime.us.tiktok.com/video/tos/useast8/tos-useast8-pve-0068-tx2/oIwHTazIe7jJARegtCLVAX2GAYqpWIaae1hIc4/?a=1988&bti=REDACTED&&bt=684&ft=REDACTED&mime_type=video_mp4&rc=REDACTED&expire=1791638144&l=REDACTED&ply_type=2&policy=2&signature=REDACTED&tk=REDACTED&btag=e00090000",
+          "https://www.tiktok.com/aweme/v1/play/?faid=1988&file_id=7472dfa1160b4c96802adb89ba15e5b3&is_play_url=REDACTED&item_id=7693184538704416031&line=0&ply_type=2&pt=dGlrdG9rLndlYmFyY2guZ2F0ZXdheSYvQHRpa3Rvay92aWRlby83NjkzMTg0NTM4NzA0NDE2MDMxJjIwMjYxMDA4MTMxNDM2RkIzMjAwRjFBRDZERDk5OTJGMzkmMTc5MTQ2NTI3NiZkNDZjNDRiMmU1MzY&signaturev3=dmlkZW9faWQ7ZmlsZV9pZDtpdGVtX2lkLjQ4ZWQzMTU5ZWNhZDg3YzkyOGJiNWJmNjBlNmYwZTc3&tk=REDACTED&video_id=v15044gf0000db1qsqfog65u3bm9ec30"
+        ]
+      },
+      {
+        "Bitrate": 681944,
+        "CodecType": "h265_hvc1",
+        "GearName": "adapt_lowest_1080_1",
+        "QualityType": 2,
+        "UrlList": [
+          "https://v16-webapp-prime.us.tiktok.com/video/tos/useast8/tos-useast8-ve-0068c002-tx2/ok46dDwMEAVpGMQEeEsEOX5FPIXRAlFyqDBuGf/?a=1988&bti=REDACTED&&bt=665&ft=REDACTED&mime_type=video_mp4&rc=REDACTED&expire=1791638144&l=REDACTED&ply_type=2&policy=2&signature=REDACTED&tk=REDACTED&btag=e00090000",
+          "https://v19-webapp-prime.us.tiktok.com/video/tos/useast8/tos-useast8-ve-0068c002-tx2/ok46dDwMEAVpGMQEeEsEOX5FPIXRAlFyqDBuGf/?a=1988&bti=REDACTED&&bt=665&ft=REDACTED&mime_type=video_mp4&rc=REDACTED&expire=1791638144&l=REDACTED&ply_type=2&policy=2&signature=REDACTED&tk=REDACTED&btag=e00090000",
+          "https://www.tiktok.com/aweme/v1/play/?faid=1988&file_id=08f809467d6f42b6b0643d2c6732daeb&is_play_url=REDACTED&item_id=7693184538704416031&line=0&ply_type=2&pt=dGlrdG9rLndlYmFyY2guZ2F0ZXdheSYvQHRpa3Rvay92aWRlby83NjkzMTg0NTM4NzA0NDE2MDMxJjIwMjYxMDA4MTMxNDM2RkIzMjAwRjFBRDZERDk5OTJGMzkmMTc5MTQ2NTI3NiZkNDZjNDRiMmU1MzY&signaturev3=dmlkZW9faWQ7ZmlsZV9pZDtpdGVtX2lkLjE1NGIzYzU0NDJlZDliZGUxMDlkOThiOGFmMjYzMWY2&tk=REDACTED&video_id=v15044gf0000db1qsqfog65u3bm9ec30"
+        ]
+      },
+      {
+        "Bitrate": 477291,
+        "CodecType": "h265_hvc1",
+        "GearName": "adapt_lower_720_1",
+        "QualityType": 14,
+        "UrlList": [
+          "https://v16-webapp-prime.us.tiktok.com/video/tos/useast8/tos-useast8-ve-0068c001-tx2/oUBiAZYwqFOHNE6gQqED8ffMI0GMA5kdEVHpuR/?a=1988&bti=REDACTED&&bt=466&ft=REDACTED&mime_type=video_mp4&rc=REDACTED&expire=1791638144&l=REDACTED&ply_type=2&policy=2&signature=REDACTED&tk=REDACTED&btag=e00090000",
+          "https://v19-webapp-prime.us.tiktok.com/video/tos/useast8/tos-useast8-ve-0068c001-tx2/oUBiAZYwqFOHNE6gQqED8ffMI0GMA5kdEVHpuR/?a=1988&bti=REDACTED&&bt=466&ft=REDACTED&mime_type=video_mp4&rc=REDACTED&expire=1791638144&l=REDACTED&ply_type=2&policy=2&signature=REDACTED&tk=REDACTED&btag=e00090000",
+          "https://www.tiktok.com/aweme/v1/play/?faid=1988&file_id=399d7c7c1e45483e93222d5f7e7af044&is_play_url=REDACTED&item_id=7693184538704416031&line=0&ply_type=2&pt=dGlrdG9rLndlYmFyY2guZ2F0ZXdheSYvQHRpa3Rvay92aWRlby83NjkzMTg0NTM4NzA0NDE2MDMxJjIwMjYxMDA4MTMxNDM2RkIzMjAwRjFBRDZERDk5OTJGMzkmMTc5MTQ2NTI3NiZkNDZjNDRiMmU1MzY&signaturev3=dmlkZW9faWQ7ZmlsZV9pZDtpdGVtX2lkLmNmNjgyMWVjMjk3MzMxZTk1NTAyYTMwNTNjZjVjMjAw&tk=REDACTED&video_id=v15044gf0000db1qsqfog65u3bm9ec30"
+        ]
+      },
+      {
+        "Bitrate": 403904,
+        "CodecType": "h265_hvc1",
+        "GearName": "adapt_540_1",
+        "QualityType": 28,
+        "UrlList": [
+          "https://v16-webapp-prime.us.tiktok.com/video/tos/useast8/tos-useast8-ve-0068c004-tx2/oEyDpMAwfAIrO5ruQDRqu6BGsEEVFETXG6DEVe/?a=1988&bti=REDACTED&&bt=394&ft=REDACTED&mime_type=video_mp4&rc=REDACTED&expire=1791638144&l=REDACTED&ply_type=2&policy=2&signature=REDACTED&tk=REDACTED&btag=e00090000",
+          "https://v19-webapp-prime.us.tiktok.com/video/tos/useast8/tos-useast8-ve-0068c004-tx2/oEyDpMAwfAIrO5ruQDRqu6BGsEEVFETXG6DEVe/?a=1988&bti=REDACTED&&bt=394&ft=REDACTED&mime_type=video_mp4&rc=REDACTED&expire=1791638144&l=REDACTED&ply_type=2&policy=2&signature=REDACTED&tk=REDACTED&btag=e00090000",
+          "https://www.tiktok.com/aweme/v1/play/?faid=1988&file_id=32de2b622bcd42d3a500836d386f1a6a&is_play_url=REDACTED&item_id=7693184538704416031&line=0&ply_type=2&pt=dGlrdG9rLndlYmFyY2guZ2F0ZXdheSYvQHRpa3Rvay92aWRlby83NjkzMTg0NTM4NzA0NDE2MDMxJjIwMjYxMDA4MTMxNDM2RkIzMjAwRjFBRDZERDk5OTJGMzkmMTc5MTQ2NTI3NiZkNDZjNDRiMmU1MzY&signaturev3=dmlkZW9faWQ7ZmlsZV9pZDtpdGVtX2lkLmMzYjJkM2ExYjllMGJiYTk2NzY1ZDg5MjhjYTA2YmMy&tk=REDACTED&video_id=v15044gf0000db1qsqfog65u3bm9ec30"
+        ]
+      }
+    ],
+    "desc": "Real conversations happen on TikTok, and protecting the integrity of elections is a top priority. \ud83d\uddf3\ufe0f\ud83d\udd10 Through dedicated in-app Election Centers and global fact-checking partnerships, TikTok connects you to authoritative voting information while actively fighting harmful misinformation. An informed community is a stronger community.",
+    "id": "7693184538704416031",
+    "author": "tiktok"
+  },
+  "play_addr": "https://v16-webapp-prime.us.tiktok.com/video/tos/useast8/tos-useast8-pve-0068-tx2/oIwHTazIe7jJARegtCLVAX2GAYqpWIaae1hIc4/?a=1988&bti=REDACTED&&bt=684&ft=REDACTED&mime_type=video_mp4&rc=REDACTED&expire=1791638144&l=REDACTED&ply_type=2&policy=2&signature=REDACTED&tk=REDACTED&btag=e00090000",
+  "play_addr_host": "v16-webapp-prime.us.tiktok.com",
+  "play_addr_params": {
+    "a": "1988",
+    "bti": "ODszNWYuMDE6",
+    "bt": "684",
+    "ft": "aEeq8qT0mIoPD12gUQ0I3wUV3OAbMeF~O5",
+    "mime_type": "video_mp4",
+    "rc": "Njg4ZDxlZDM5ZmU5NGk1N0BpM2Y8ZXg5cnR0ZTMz...",
+    "expire": "1791638144",
+    "l": "20261008131436FB3200F1AD6DD9992F39",
+    "ply_type": "2",
+    "policy": "2",
+    "signature": "c04cb20988603bd16a3cd8fc9dc11736",
+    "tk": "tt_chain_token",
+    "btag": "e00090000"
+  }
+}

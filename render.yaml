@@ -1,0 +1,19 @@
+# Render Blueprint: free web service built from the Dockerfile.
+services:
+  - type: web
+    name: streamanywhere
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: SERVE_CLIENT
+        value: "true"
+      - key: HOST
+        value: "0.0.0.0"
+      - key: RESOLVER
+        value: auto
+      - key: LOG_LEVEL
+        value: info
+      # Origins allowed to call the API cross-origin (the GitHub Pages copy of the client)
+      - key: CLIENT_ORIGINS
+        value: https://delucatech.github.io

@@ -1,0 +1,19 @@
+{
+  "name": "streamanywhere-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "mp4box": "^2.4.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vite": "^4.5.14"
+  }
+}
