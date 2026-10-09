@@ -118,6 +118,8 @@ interface SessionInternal {
   qrCodeSentAt?: number;
   /** When the remembered code was typed automatically for the current verification */
   qrAutoCodeAt?: number;
+  /** Last time TikTok's page sent a verification request (code check, send code, ...) */
+  qrVerifyNetAt?: number;
   /** When "Resend" was last pressed for the user */
   qrResendAt?: number;
   /** Outcome of the last code the user entered */
@@ -289,6 +291,16 @@ async function preparePage(page: Page, browser: Browser): Promise<void> {
       return;
     }
     if (page === s.qrPage) {
+      if (s.qrState === 'verify' && /passport|verif|idv|captcha/i.test(req.url()) && !/qrconnect|get_qrcode/.test(req.url()) && !/\.(js|css|png|svg|woff2?)(\?|$)/.test(req.url())) {
+        s.qrVerifyNetAt = Date.now();
+        let p = req.url();
+        try {
+          p = new URL(req.url()).pathname;
+        } catch {
+          /* keep */
+        }
+        feedLog?.(`verification request: ${req.method()} ${p}`);
+      }
       const ticket = req.headers()['x-tt-passport-ticket'];
       if (ticket && ticket !== s.qrTicket) {
         s.qrTicket = ticket;
@@ -510,6 +522,34 @@ async function startQrLogin(log: (m: string) => void): Promise<SessionStatus> {
   // page to draw it into a canvas, which a small VM may never get around to. The qrconnect poll
   // answers carry the scan state ("new" / "scanned" / "confirmed").
   page.on('response', (res) => {
+    if (s.qrState === 'verify' && s.qrPage === page && /passport|verif|idv|captcha/i.test(res.url()) && !/qrconnect|get_qrcode/.test(res.url()) && !/\.(js|css|png|svg|woff2?)(\?|$)/.test(res.url())) {
+      void res
+        .text()
+        .then((body) => {
+          let p = res.url();
+          try {
+            p = new URL(res.url()).pathname;
+          } catch {
+            /* keep */
+          }
+          const short = body.replace(/\s+/g, ' ').slice(0, 220);
+          log(`verification answer: ${res.status()} ${p} ${short}`);
+          // The code check itself: TikTok answers with a description when the code is wrong.
+          if (s.qrVerifyResult?.state === 'checking' && /code|verif|validate/i.test(p)) {
+            let j: any;
+            try {
+              j = JSON.parse(body);
+            } catch {
+              return;
+            }
+            const d = j?.data || {};
+            if (j?.message === 'error' || (typeof d.error_code === 'number' && d.error_code !== 0)) {
+              s.qrVerifyResult = { state: 'rejected', text: String(d.description || d.error_msg || 'error ' + d.error_code).slice(0, 160), at: Date.now() };
+            }
+          }
+        })
+        .catch(() => undefined);
+    }
     if (!/passport\/web\/get_qrcode|qrconnect/.test(res.url())) return;
     void res
       .text()
@@ -773,6 +813,8 @@ const FIND_JS = `(reStr, notStr, mode) => {
     if (!label || label.length > 140 || !re.test(label) || (not && not.test(label))) continue;
     if (label.length < bestLen || (label.length === bestLen && best && best.contains(el))) { best = el; bestLen = label.length; }
   }
+  // 'button' mode: the label sits inside the real button - that is what reacts to a press.
+  if (best && mode === 'button') { const b = best.closest('button, [role="button"], a'); if (b && vis(b)) return b; }
   return best;
 }`;
 
@@ -841,7 +883,7 @@ async function scanVerifyDialog(page: Page): Promise<VerifyView | undefined> {
  */
 async function activate(page: Page, el: Handle, attempt: number, log: (m: string) => void, what: string): Promise<void> {
   const how = attempt % 4;
-  log(`verification: ${what} (try ${attempt}, ${['click', 'touch tap', 'focus+Enter', 'DOM click'][how]}) on ${await describe(el)}`);
+  log(`verification: ${what} (try ${attempt}, ${['click', 'DOM click', 'focus+Enter', 'mouse click at centre'][how]}) on ${await describe(el)}`);
   try {
     await el.evaluate(SCROLL_FN);
     const box = await el.boundingBox();
@@ -850,13 +892,17 @@ async function activate(page: Page, el: Handle, attempt: number, log: (m: string
       await new Promise((r) => setTimeout(r, 80));
       await el.click({ delay: 60 });
     } else if (how === 1) {
-      await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
+      await el.evaluate(DOM_CLICK_FN);
     } else if (how === 2) {
       await el.evaluate(FOCUS_FN);
       await page.keyboard.press('Enter');
       await page.keyboard.press('Space');
     } else {
-      await el.evaluate(DOM_CLICK_FN);
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await new Promise((r) => setTimeout(r, 60));
+      await page.mouse.down();
+      await new Promise((r) => setTimeout(r, 90));
+      await page.mouse.up();
     }
   } catch (e) {
     log('verification: activation failed: ' + (e as Error).message.split('\n')[0]);
@@ -1054,28 +1100,42 @@ async function enterVerifyCode(page: Page, code: string, log: (m: string) => voi
     await captureShot(page);
     return;
   }
-  // TikTok enables its button once the code is complete; give it a moment, then press it (or Enter).
+  // TikTok enables its button once the code is complete; give it a moment, then press the BUTTON
+  // (not the label inside it). A press counts when TikTok's page sends a request; until it does,
+  // escalate: click, DOM click, focus + Enter, raw mouse press, then Enter inside the field.
+  const pressedAt = Date.now();
+  s.qrVerifyNetAt = undefined;
   let submit: { el: Handle } | undefined;
   for (let i = 0; i < 8 && !submit; i++) {
     await new Promise((r) => setTimeout(r, 300));
-    const b = await findInPage(page, '^(verify|continue|next|submit|confirm|done|log in|login)\\b', 'resend');
+    const b = await findInPage(page, '^(verify|continue|next|submit|confirm|done|log in|login)\\b', 'resend', 'button');
     if (b && (await b.el.evaluate(ENABLED_FN).catch(() => true))) submit = b;
   }
-  if (submit) {
-    log('verification: pressing ' + (await describe(submit.el)));
-    await submit.el.click({ delay: 30 }).catch(() => undefined);
-  } else {
-    log('verification: no enabled Next/Verify button - pressing Enter');
-    await page.keyboard.press('Enter').catch(() => undefined);
+  const requested = (): boolean => Boolean(s.qrVerifyNetAt && s.qrVerifyNetAt >= pressedAt);
+  for (let attempt = 0; attempt < 4 && !requested(); attempt++) {
+    if (submit) await activate(page, submit.el, attempt, log, 'pressing Next');
+    else {
+      log('verification: no enabled Next/Verify button - pressing Enter');
+      await page.keyboard.press('Enter').catch(() => undefined);
+    }
+    for (let i = 0; i < 10 && !requested(); i++) await new Promise((r) => setTimeout(r, 300));
+    if (requested()) break;
+    const dialogText = (await scanVerifyDialog(page))?.text || '';
+    if (dialogText !== s.qrTextBeforeCode) {
+      log('verification: dialog changed after the press: ' + dialogText.slice(0, 120));
+      break;
+    }
+    if (!submit) break;
+    submit = (await findInPage(page, '^(verify|continue|next|submit|confirm|done|log in|login)\\b', 'resend', 'button')) || submit;
   }
-  // If the field still shows the code 2 s later, the press did nothing: Enter inside the field as well.
-  await new Promise((r) => setTimeout(r, 2000));
-  const still = await findInPage(page, '', '', 'input');
-  if (still && String(await still.el.evaluate(VALUE_FN).catch(() => '')) === code) {
-    log('verification: dialog unchanged after the press - pressing Enter in the field');
-    await still.el.evaluate(FOCUS_FN).catch(() => undefined);
-    await page.keyboard.press('Enter').catch(() => undefined);
-  }
+  if (!requested()) {
+    const still = await findInPage(page, '', '', 'input');
+    if (still && String(await still.el.evaluate(VALUE_FN).catch(() => '')) === code) {
+      log('verification: no request seen after the presses - pressing Enter in the field');
+      await still.el.evaluate(FOCUS_FN).catch(() => undefined);
+      await page.keyboard.press('Enter').catch(() => undefined);
+    }
+  } else log('verification: TikTok\'s page sent the verification request');
 }
 
 /** After a code was submitted: did TikTok accept it (ticket seen) or complain in the dialog? */
