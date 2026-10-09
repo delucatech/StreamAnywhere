@@ -33,6 +33,9 @@ import { exploreApiUrl, itemToFeedItem, parseExploreBody, type ExploreResult } f
 
 type Browser = import('puppeteer-core').Browser;
 type Page = import('puppeteer-core').Page;
+type Frame = import('puppeteer-core').Frame;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Handle = import('puppeteer-core').ElementHandle<any>;
 
 /**
  * Outside the repository on purpose: Chrome writes to the profile constantly and `tsx watch`
@@ -104,6 +107,8 @@ interface SessionInternal {
   qrVerifyAutoAt?: number;
   /** Last time the server pressed "Send code" (or chose the method) - no re-sends for a minute */
   qrVerifySentAt?: number;
+  /** How many times the server tried to activate the Email row of the current dialog */
+  qrVerifyTries?: number;
   /** Verification ticket TikTok's SDK sends (x-tt-passport-ticket) once the code was accepted; re-used
    *  for a fresh QR token when the first one expired while the user fetched the e-mail */
   qrTicket?: string;
@@ -386,6 +391,7 @@ async function startQrLogin(log: (m: string) => void): Promise<SessionStatus> {
   s.qrVerifyText = undefined;
   s.qrVerifyAutoAt = undefined;
   s.qrVerifySentAt = undefined;
+  s.qrVerifyTries = undefined;
   s.qrNotice = undefined;
   s.qrNoticeAt = undefined;
   s.qrTicketTriedToken = undefined;
@@ -609,42 +615,124 @@ async function captureShot(page: Page): Promise<void> {
   }
 }
 
-/** What TikTok's verification dialog currently shows: its text, clickable rows/buttons, the code field. */
+/** What TikTok's verification dialog currently shows (text of the modal, across frames) */
 interface VerifyView {
   text: string;
-  inModal: boolean;
-  options: Array<{ label: string; x: number; y: number }>;
-  buttons: Array<{ label: string; x: number; y: number }>;
-  input?: { x: number; y: number; value: string };
+  input: boolean;
+  frames: number;
 }
 
-const VERIFY_SCAN_JS = `(() => {
-  const root = document.querySelector('#idv-modal-container') || document.querySelector('[class*="idv"]') || document.body;
-  const vis = (el) => { const r = el.getBoundingClientRect(); if (r.width < 4 || r.height < 4 || r.bottom < 0 || r.top > innerHeight) return null; const cs = getComputedStyle(el); if (cs.visibility === 'hidden' || cs.display === 'none' || cs.opacity === '0') return null; return r; };
-  const center = (r) => ({ x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) });
+/**
+ * In-page finder (runs in every frame). mode 'input' = the code field; otherwise the smallest visible
+ * element whose text matches `reStr` (and not `notStr`): the smallest element that still contains the
+ * whole match is the row/button itself, not a container around it.
+ */
+const FIND_JS = `(reStr, notStr, mode) => {
+  const re = new RegExp(reStr, 'i');
+  const not = notStr ? new RegExp(notStr, 'i') : null;
+  const vis = (el) => { const r = el.getBoundingClientRect(); if (r.width < 4 || r.height < 4) return false; const cs = getComputedStyle(el); return cs.visibility !== 'hidden' && cs.display !== 'none' && cs.opacity !== '0' && cs.pointerEvents !== 'none'; };
   const clean = (t) => (t || '').replace(/\\s+/g, ' ').trim();
-  const text = clean(root.innerText).slice(0, 600);
-  const options = [], buttons = [];
-  for (const el of root.querySelectorAll('button, [role="button"], a, li, div, span, p')) {
-    const r = vis(el); if (!r) continue;
+  if (mode === 'input') {
+    for (const el of document.querySelectorAll('input')) {
+      if (!vis(el) || ['hidden', 'checkbox', 'radio', 'submit', 'button'].includes(el.type)) continue;
+      return el;
+    }
+    return null;
+  }
+  let best = null, bestLen = 1e9;
+  for (const el of document.querySelectorAll('button, [role="button"], a, li, div, span, p, label')) {
+    if (!vis(el)) continue;
     const label = clean(el.innerText || el.getAttribute('aria-label'));
-    if (!label || label.length > 80) continue;
-    (el.tagName === 'BUTTON' || el.getAttribute('role') === 'button' ? buttons : options).push({ label, ...center(r) });
+    if (!label || label.length > 140 || !re.test(label) || (not && not.test(label))) continue;
+    if (label.length < bestLen || (label.length === bestLen && best && best.contains(el))) { best = el; bestLen = label.length; }
   }
-  let input;
-  for (const el of root.querySelectorAll('input')) {
-    const r = vis(el); if (!r) continue;
-    if (['hidden', 'checkbox', 'radio', 'submit', 'button'].includes(el.type)) continue;
-    input = { ...center(r), value: el.value || '' }; break;
-  }
-  return { text, options, buttons, input, inModal: root !== document.body };
+  return best;
+}`;
+
+const TEXT_JS = `(() => {
+  const root = document.querySelector('#idv-modal-container') || document.body;
+  return (root.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 600);
 })()`;
+
+/** Finds an element in any frame of the page (main frame first). */
+async function findInPage(page: Page, re: string, not = '', mode = 'text'): Promise<{ el: Handle; frame: Frame } | undefined> {
+  for (const frame of page.frames()) {
+    try {
+      const h = await frame.evaluateHandle(`(${FIND_JS})(${JSON.stringify(re)}, ${JSON.stringify(not)}, ${JSON.stringify(mode)})`);
+      const el = h.asElement() as Handle | null;
+      if (el) return { el, frame };
+      await h.dispose();
+    } catch {
+      /* frame detached or cross-origin without access */
+    }
+  }
+  return undefined;
+}
+
+// In-page helpers as Function objects (the server's TypeScript has no DOM library; puppeteer serialises them).
+type ElFn = (e: unknown) => unknown;
+const DESCRIBE_FN = Function(
+  'e',
+  `const r = e.getBoundingClientRect();
+  const under = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+  const d = (x) => (x ? x.tagName.toLowerCase() + (x.className && typeof x.className === 'string' ? '.' + x.className.split(/\s+/).slice(0, 2).join('.') : '') : 'none');
+  return d(e) + ' "' + (e.innerText || '').replace(/\s+/g, ' ').slice(0, 40) + '" at ' + Math.round(r.left + r.width / 2) + ',' + Math.round(r.top + r.height / 2) + ' top=' + d(under) + (under && under !== e && !e.contains(under) && !under.contains(e) ? ' (COVERED)' : '');`,
+) as ElFn;
+const SCROLL_FN = Function('e', "e.scrollIntoView({ block: 'center' });") as ElFn;
+const FOCUS_FN = Function('e', 'e.tabIndex = e.tabIndex || 0; e.focus();') as ElFn;
+const DOM_CLICK_FN = Function(
+  'e',
+  `let n = e;
+  for (let i = 0; n && i < 6; i++, n = n.parentElement) {
+    for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) n.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, composed: true, view: window }));
+  }`,
+) as ElFn;
+
+async function describe(el: Handle): Promise<string> {
+  return el.evaluate(DESCRIBE_FN).then(String, () => '?');
+}
 
 async function scanVerifyDialog(page: Page): Promise<VerifyView | undefined> {
   try {
-    return (await page.evaluate(VERIFY_SCAN_JS)) as VerifyView;
+    const frames = page.frames();
+    let text = '';
+    for (const f of frames) {
+      const t = String(await f.evaluate(TEXT_JS).catch(() => ''));
+      if (t && !text.includes(t.slice(0, 60))) text += (text ? ' | ' : '') + t;
+    }
+    const input = Boolean(await findInPage(page, '', '', 'input'));
+    return { text: text.slice(0, 600), input, frames: frames.length };
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * Activates a row/button of TikTok's dialog. Attempt 1 is a normal click on its centre; if the dialog
+ * does not change, later attempts escalate (touch tap, focus + Enter, DOM click on the element and its
+ * ancestors) because TikTok's rows have reacted to different event kinds over time.
+ */
+async function activate(page: Page, el: Handle, attempt: number, log: (m: string) => void, what: string): Promise<void> {
+  const how = attempt % 4;
+  log(`verification: ${what} (try ${attempt}, ${['click', 'touch tap', 'focus+Enter', 'DOM click'][how]}) on ${await describe(el)}`);
+  try {
+    await el.evaluate(SCROLL_FN);
+    const box = await el.boundingBox();
+    if (how === 0 || !box) {
+      await el.hover();
+      await new Promise((r) => setTimeout(r, 80));
+      await el.click({ delay: 60 });
+    } else if (how === 1) {
+      await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
+    } else if (how === 2) {
+      await el.evaluate(FOCUS_FN);
+      await page.keyboard.press('Enter');
+      await page.keyboard.press('Space');
+    } else {
+      await el.evaluate(DOM_CLICK_FN);
+    }
+  } catch (e) {
+    log('verification: activation failed: ' + (e as Error).message.split('\n')[0]);
   }
 }
 
@@ -662,33 +750,37 @@ async function driveVerifyDialog(page: Page, log: (m: string) => void): Promise<
   if (!v) return;
   if (v.text && v.text !== s.qrVerifyText) {
     s.qrVerifyText = v.text;
-    log('verification dialog: ' + v.text.slice(0, 240));
+    log(`verification dialog (${v.frames} frame${v.frames === 1 ? '' : 's'}): ` + v.text.slice(0, 240));
   }
   const now = Date.now();
-  const all = [...v.buttons, ...v.options];
-  const find = (re: RegExp, not?: RegExp): { label: string; x: number; y: number } | undefined =>
-    all.filter((o) => re.test(o.label) && !(not && not.test(o.label))).sort((a, b) => a.label.length - b.label.length)[0];
   if (v.input) {
     // A code field is on screen. Press "Send code" once if TikTok shows such a button.
+    if (s.qrVerifyStep !== 'code') log('verification: code field is up');
     s.qrVerifyStep = 'code';
-    const send = find(/\b(send|get|resend)\b.*\bcode\b|^send$/i);
-    if (send && now - (s.qrVerifySentAt || 0) > 60_000 && !/resend/i.test(send.label)) {
+    s.qrVerifyTries = 0;
+    const send = await findInPage(page, '^(send|get) (the )?code$|^send$', 'resend');
+    if (send && now - (s.qrVerifySentAt || 0) > 60_000) {
       s.qrVerifySentAt = now;
-      log(`verification: pressing "${send.label}"`);
-      await page.mouse.click(send.x, send.y, { delay: 30 }).catch(() => undefined);
+      await activate(page, send.el, 0, log, 'pressing "Send code"');
     }
     return;
   }
-  if (now - (s.qrVerifyAutoAt || 0) < 4000) return; // give the dialog time to change after a click
-  const email = find(/\bemail\b|\be-mail\b|@/i, /password/i);
-  const phone = !email ? find(/\bphone\b|\bsms\b|\btext message\b|\+\d/i, /password/i) : undefined;
+  if (now - (s.qrVerifyAutoAt || 0) < 5000) return; // give the dialog time to change after an activation
+  // The Email row (label + masked address) first, the bare word as fallback, phone/SMS after that.
+  const email = (await findInPage(page, '\\bemail\\b.*@', 'password')) || (await findInPage(page, '\\bemail\\b|\\be-mail\\b', 'password'));
+  const phone = !email ? await findInPage(page, '\\bphone\\b|\\bsms\\b|\\btext message\\b', 'password') : undefined;
   const pick = email || phone;
   if (pick) {
+    const tries = (s.qrVerifyTries || 0) + 1;
+    s.qrVerifyTries = tries;
     s.qrVerifyAutoAt = now;
     s.qrVerifySentAt = now;
     s.qrVerifyStep = 'sending';
-    log(`verification: choosing "${pick.label.slice(0, 60)}"`);
-    await page.mouse.click(pick.x, pick.y, { delay: 30 }).catch(() => undefined);
+    await activate(page, pick.el, tries - 1, log, `choosing ${email ? 'Email' : 'Phone'}`);
+    if (tries === 8) {
+      s.qrNotice = 'The server could not activate the "Email" row in TikTok\'s dialog by itself. Please tap it in the live picture.';
+      s.qrNoticeAt = now;
+    }
     return;
   }
   if (s.qrVerifyStep !== 'sending' || now - (s.qrVerifyAutoAt || 0) > 20_000) s.qrVerifyStep = s.qrVerifyStep === 'sending' ? 'sending' : 'choose';
@@ -696,18 +788,15 @@ async function driveVerifyDialog(page: Page, log: (m: string) => void): Promise<
 
 /** Puts a verification code into TikTok's code field and submits it. */
 async function enterVerifyCode(page: Page, code: string): Promise<void> {
-  const v = await scanVerifyDialog(page);
-  if (v?.input) {
-    await page.mouse.click(v.input.x, v.input.y, { clickCount: 3, delay: 20 });
+  const input = await findInPage(page, '', '', 'input');
+  if (input) {
+    await input.el.click({ clickCount: 3, delay: 20 });
     await page.keyboard.press('Backspace');
-  }
-  await page.keyboard.type(code, { delay: 60 });
+    await input.el.type(code, { delay: 60 });
+  } else await page.keyboard.type(code, { delay: 60 });
   await new Promise((r) => setTimeout(r, 400));
-  const after = await scanVerifyDialog(page);
-  const submit = after
-    ? [...after.buttons, ...after.options].filter((o) => /^(verify|continue|next|submit|confirm|done|log in|login)\b/i.test(o.label)).sort((a, b) => a.label.length - b.label.length)[0]
-    : undefined;
-  if (submit) await page.mouse.click(submit.x, submit.y, { delay: 30 }).catch(() => undefined);
+  const submit = await findInPage(page, '^(verify|continue|next|submit|confirm|done|log in|login)\\b');
+  if (submit) await submit.el.click({ delay: 30 }).catch(() => undefined);
   else await page.keyboard.press('Enter').catch(() => undefined);
 }
 
