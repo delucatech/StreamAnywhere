@@ -85,8 +85,18 @@
               </div>
             </div>
           </div>
+          <!-- Before the scan: a code the user already has (TikTok re-sends the same one for hours) -->
+          <form id="sessionPreCode" class="session-code hidden" autocomplete="off" novalidate>
+            <label class="session-label" for="sessionPreCodeText">The QR scan is the sign-in itself; the e-mailed code is TikTok's extra check after it. Save the code you already have and the server types it by itself as soon as TikTok asks.</label>
+            <div class="session-input">
+              <input id="sessionPreCodeText" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="8" enterkeyhint="done" autocomplete="one-time-code" placeholder="6-digit code" aria-label="E-mail code to use after the scan" />
+              <button id="sessionPreCodeSave" class="btn primary" type="submit">Save code</button>
+            </div>
+          </form>
           <div class="session-actions">
             <button id="sessionLogin" class="btn primary" type="button">Sign in with QR code</button>
+            <button id="sessionEnterCode" class="btn" type="button" title="Save an e-mail code you already have; it is entered automatically after the scan">Enter e-mail code</button>
+            <button id="sessionForgetCode" class="btn ghost hidden" type="button" title="Forget the saved e-mail code and verification">Forget saved code</button>
             <button id="sessionLoginWindow" class="btn" type="button" title="Opens TikTok's login page in a visible browser window on the machine that runs the server">Open sign-in window on server</button>
             <button id="sessionRefresh" class="btn" type="button">Check again</button>
             <button id="sessionRestart" class="btn hidden" type="button" title="Cancel this attempt and load a fresh QR code">Start over</button>

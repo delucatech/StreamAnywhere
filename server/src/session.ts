@@ -116,6 +116,8 @@ interface SessionInternal {
   qrVerifyTries?: number;
   /** When the server pressed "Send code" (once per verification; never again by itself) */
   qrCodeSentAt?: number;
+  /** When the remembered code was typed automatically for the current verification */
+  qrAutoCodeAt?: number;
   /** When "Resend" was last pressed for the user */
   qrResendAt?: number;
   /** Outcome of the last code the user entered */
@@ -144,6 +146,56 @@ interface SessionInternal {
 }
 
 const s: SessionInternal = { state: 'none', pending: [], seenIds: new Set() };
+
+/**
+ * The e-mailed verification code and the verification ticket survive a server restart: TikTok keeps
+ * the code valid for hours, so the user should never have to fetch the e-mail twice.
+ */
+const VERIFY_STORE = path.join(path.dirname(PROFILE_DIR), 'tiktok-verify.json');
+interface VerifyStore {
+  code?: { value: string; at: number };
+  ticket?: { value: string; at: number };
+}
+let verifyStore: VerifyStore | undefined;
+function loadVerifyStore(): VerifyStore {
+  if (verifyStore) return verifyStore;
+  let j: any = {};
+  try {
+    j = JSON.parse(fs.readFileSync(VERIFY_STORE, 'utf8'));
+  } catch {
+    /* none yet */
+  }
+  const fresh = (e: any): { value: string; at: number } | undefined => (e && typeof e.value === 'string' && e.value && typeof e.at === 'number' && Date.now() - e.at < VERIFY_HOLD_MS ? { value: e.value, at: e.at } : undefined);
+  verifyStore = { code: fresh(j.code), ticket: fresh(j.ticket) };
+  return verifyStore;
+}
+function saveVerifyStore(patch: Partial<VerifyStore>): void {
+  verifyStore = { ...loadVerifyStore(), ...patch };
+  try {
+    fs.mkdirSync(path.dirname(VERIFY_STORE), { recursive: true });
+    fs.writeFileSync(VERIFY_STORE, JSON.stringify(verifyStore));
+  } catch (e) {
+    feedLog?.('could not save the verification store: ' + (e as Error).message);
+  }
+}
+
+/**
+ * Saves an e-mail code the user already has (or forgets it when empty). It is typed into TikTok's
+ * code field automatically after the next scan - and right away if that field is up now.
+ */
+export async function saveVerifyCode(raw: string): Promise<SessionStatus> {
+  const code = raw.replace(/\D+/g, '').slice(0, 8);
+  if (!code) {
+    saveVerifyStore({ code: undefined, ticket: undefined });
+    s.qrTicket = s.qrTicketAt = undefined;
+    feedLog?.('saved verification code and ticket forgotten');
+    return sessionStatus();
+  }
+  saveVerifyStore({ code: { value: code, at: Date.now() } });
+  feedLog?.(`verification code saved for later (ends in ${code.slice(-2)})`);
+  if (s.state === 'login_pending' && s.loginMode === 'qr' && s.qrState === 'verify' && s.qrVerifyStep === 'code' && s.qrPage && !s.qrPage.isClosed()) return sessionInput({ type: 'code', code });
+  return sessionStatus();
+}
 let puppeteerMod: typeof import('puppeteer-core') | undefined;
 let feedLog: ((m: string) => void) | undefined;
 const guestAllowed = (): boolean => /^(1|true|yes)$/i.test(process.env.FORYOU_ALLOW_GUEST || '');
@@ -241,6 +293,7 @@ async function preparePage(page: Page, browser: Browser): Promise<void> {
       if (ticket && ticket !== s.qrTicket) {
         s.qrTicket = ticket;
         s.qrTicketAt = Date.now();
+        saveVerifyStore({ ticket: { value: ticket, at: s.qrTicketAt } });
         if (s.qrVerifyResult?.state === 'checking') s.qrVerifyResult = { state: 'accepted', at: Date.now() };
         feedLog?.('verification ticket received from TikTok: the code was accepted (ticket kept for 48 h in case the QR token expired)');
       }
@@ -284,6 +337,8 @@ export function sessionStatus(): SessionStatus {
   const browser = sup.executable ? path.basename(sup.executable) : undefined;
   if (!sup.ok) return { supported: false, state: 'unsupported', error: sup.reason, message: 'Sign-in needs the Node server on a machine with Chrome, Edge or Chromium.' };
   const base: SessionStatus = { supported: true, state: s.state, username: s.username, nickname: s.nickname, avatar: s.avatar, error: s.error, browser };
+  const savedCode = loadVerifyStore().code;
+  if (savedCode && s.state !== 'logged_in') base.savedCode = { hint: savedCode.value.slice(-2), at: savedCode.at };
   if (s.state === 'none') base.message = profileExists() ? 'A saved browser profile exists; checking it on first use.' : 'Not signed in.';
   if (s.state === 'login_pending') {
     base.loginMode = s.loginMode;
@@ -413,11 +468,18 @@ async function startQrLogin(log: (m: string) => void): Promise<SessionStatus> {
   s.qrNoticeAt = undefined;
   s.qrTicketTriedToken = undefined;
   s.qrCodeSentAt = undefined;
+  s.qrAutoCodeAt = undefined;
   s.qrResendAt = undefined;
   s.qrVerifyResult = undefined;
   s.qrTextBeforeCode = undefined;
   s.qrState = 'new';
   s.loginStartedAt = Date.now();
+  const stored = loadVerifyStore();
+  if (!s.qrTicket && stored.ticket) {
+    s.qrTicket = stored.ticket.value;
+    s.qrTicketAt = stored.ticket.at;
+    log('verification ticket restored from disk (a scan within 48 h of the last code needs no e-mail)');
+  }
   const browser = await headlessBrowser();
   // An e2-micro cannot run three TikTok tabs: close the feed/explore pages while the QR is pending.
   await closeSecondaryPages();
@@ -616,6 +678,7 @@ async function restartAfterVerify(page: Page, log: (m: string) => void, notice: 
     s.qrVerifyAutoAt = undefined;
     s.qrVerifySentAt = undefined;
     s.qrCodeSentAt = undefined;
+    s.qrAutoCodeAt = undefined;
     s.qrResendAt = undefined;
     s.qrVerifyResult = undefined;
     s.qrTextBeforeCode = undefined;
@@ -803,6 +866,15 @@ async function driveVerifyDialog(page: Page, log: (m: string) => void): Promise<
       } else s.qrCodeSentAt = s.qrVerifySentAt || now; // TikTok sent the code when the method was chosen
     }
     if (s.qrVerifyResult?.state === 'checking') checkCodeOutcome(v.text, log);
+    // A code saved earlier (TikTok re-sends the same one for hours): type it without waiting for the user.
+    const saved = loadVerifyStore().code;
+    if (saved && !s.qrVerifyResult && !s.qrAutoCodeAt && now - (s.qrCodeSentAt || now) > 1500) {
+      s.qrAutoCodeAt = now;
+      s.qrNotice = `Trying the code you entered earlier (ends in ${saved.value.slice(-2)}) by itself…`;
+      s.qrNoticeAt = now;
+      log('verification: typing the remembered code automatically');
+      await enterVerifyCode(page, saved.value, log);
+    }
     return;
   }
   if (s.qrVerifyResult?.state === 'checking') checkCodeOutcome(v.text, log);
@@ -924,6 +996,11 @@ function checkCodeOutcome(text: string, log: (m: string) => void): void {
   if (bad) {
     s.qrVerifyResult = { state: 'rejected', text: bad.slice(0, 160), at: Date.now() };
     log('verification: TikTok rejected the code: ' + bad.slice(0, 160));
+    if (s.qrAutoCodeAt && s.qrAutoCodeAt >= r.at - 1000) {
+      saveVerifyStore({ code: undefined });
+      s.qrNotice = 'The code from earlier is no longer accepted - enter the one from the newest e-mail.';
+      s.qrNoticeAt = Date.now();
+    }
     return;
   }
   if (Date.now() - r.at > 25_000) {
@@ -973,6 +1050,7 @@ export async function sessionInput(req: SessionInputRequest): Promise<SessionSta
         const code = String(req.code || '').replace(/\s+/g, '').slice(0, 12);
         if (code) {
           feedLog?.(`verification: entering the ${code.length}-digit code`);
+          saveVerifyStore({ code: { value: code, at: Date.now() } });
           await enterVerifyCode(page, code, (m) => feedLog?.(m));
         }
         break;
@@ -1352,8 +1430,8 @@ export async function cancelLogin(): Promise<SessionStatus> {
   s.qr = s.qrState = s.qrPageHint = s.qrPageShot = s.qrToken = s.qrGetUrl = s.qrCheckUrl = s.qrRedirect = undefined;
   s.qrExpireAt = s.scannedAt = s.qrVerifyAt = s.qrVerifyAutoAt = s.qrVerifySentAt = s.qrVerifyTries = undefined;
   s.qrVerifyConf = s.qrVerifyStep = s.qrVerifyText = s.qrNotice = s.qrTextBeforeCode = undefined;
-  s.qrNoticeAt = s.qrCodeSentAt = s.qrResendAt = s.qrTicketAt = s.qrTicketRetryAt = undefined;
-  s.qrTicket = s.qrTicketTriedToken = undefined;
+  s.qrNoticeAt = s.qrCodeSentAt = s.qrAutoCodeAt = s.qrResendAt = s.qrTicketRetryAt = undefined;
+  s.qrTicketTriedToken = undefined;
   s.qrVerifyResult = undefined;
   feedLog?.('sign-in cancelled by the user');
   probed = true;

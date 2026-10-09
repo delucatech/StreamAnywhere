@@ -782,6 +782,11 @@ button {
   font-size: 12px;
   color: var(--muted);
 }
+#sessionPreCode {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+}
 .session-input input {
   flex: 1 1 auto;
   min-width: 0;

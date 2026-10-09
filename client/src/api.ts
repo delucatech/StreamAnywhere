@@ -80,5 +80,6 @@ export const api = {
   sessionLogin: (mode: LoginMode): Promise<SessionStatus> => post('/api/session/login', { mode }),
   sessionLogout: (): Promise<SessionStatus> => post('/api/session/logout', {}),
   sessionCancel: (): Promise<SessionStatus> => post('/api/session/cancel', {}),
+  sessionSaveCode: (code: string): Promise<SessionStatus> => post('/api/session/code', { code }),
   sessionInput: (req: SessionInputRequest): Promise<SessionStatus> => post('/api/session/input', req),
 };

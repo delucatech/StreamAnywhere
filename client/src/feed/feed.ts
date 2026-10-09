@@ -53,6 +53,11 @@ const el = {
   sessionText: $('sessionText'),
   sessionLogin: $<HTMLButtonElement>('sessionLogin'),
   sessionLoginWindow: $<HTMLButtonElement>('sessionLoginWindow'),
+  sessionPreCode: $<HTMLFormElement>('sessionPreCode'),
+  sessionPreCodeText: $<HTMLInputElement>('sessionPreCodeText'),
+  sessionPreCodeSave: $<HTMLButtonElement>('sessionPreCodeSave'),
+  sessionEnterCode: $<HTMLButtonElement>('sessionEnterCode'),
+  sessionForgetCode: $<HTMLButtonElement>('sessionForgetCode'),
   sessionQr: $('sessionQr'),
   sessionQrImg: $<HTMLImageElement>('sessionQrImg'),
   sessionQrHint: $('sessionQrHint'),
@@ -235,6 +240,52 @@ el.sessionClose.addEventListener('click', () => closeSessionPanel());
 el.sessionRefresh.addEventListener('click', () => pressed(el.sessionRefresh, () => refreshSession(true), { label: 'Checking' }));
 el.sessionLogin.addEventListener('click', () => pressed(el.sessionLogin, () => startLogin('qr'), { label: 'Starting' }));
 el.sessionLoginWindow.addEventListener('click', () => pressed(el.sessionLoginWindow, () => startLogin('window'), { label: 'Opening' }));
+// A code the user already has, saved before the scan (the server types it when TikTok asks for it).
+let preCodeOpen = false;
+el.sessionEnterCode.addEventListener('click', () => {
+  preCodeOpen = !preCodeOpen;
+  renderSession();
+  if (preCodeOpen) el.sessionPreCodeText.focus();
+});
+el.sessionPreCode.addEventListener('submit', (e) => {
+  e.preventDefault();
+  const code = el.sessionPreCodeText.value.replace(/\D+/g, '');
+  if (code.length < 4) {
+    toast('Type the 6-digit code from TikTok\'s e-mail first', true);
+    el.sessionPreCodeText.focus();
+    return;
+  }
+  pressed(
+    el.sessionPreCodeSave,
+    async () => {
+      try {
+        state.session = await api.sessionSaveCode(code);
+        preCodeOpen = false;
+        el.sessionPreCodeText.value = '';
+        renderSession();
+        toast('Code saved – now scan the QR; the code is entered for you', false, 5000);
+      } catch (err) {
+        toast(`Could not save the code: ${errMsg(err)}`, true);
+      }
+    },
+    { label: 'Saving' },
+  );
+});
+el.sessionForgetCode.addEventListener('click', () =>
+  pressed(
+    el.sessionForgetCode,
+    async () => {
+      try {
+        state.session = await api.sessionSaveCode('');
+        renderSession();
+        toast('Saved code forgotten');
+      } catch (err) {
+        toast(`Could not forget the code: ${errMsg(err)}`, true);
+      }
+    },
+    { label: 'Forgetting' },
+  ),
+);
 el.sessionLogout.addEventListener('click', () => pressed(el.sessionLogout, () => signOut(), { label: 'Signing out' }));
 el.sessionCancel.addEventListener('click', () => pressed(el.sessionCancel, () => cancelLogin(), { label: 'Cancelling' }));
 el.sessionRestart.addEventListener('click', () =>
@@ -441,6 +492,7 @@ function renderSession(): void {
   } else {
     lines.push('<b>Not signed in.</b>');
     lines.push(`"Sign in with QR code" shows TikTok's login QR here; scan it with the TikTok app on your phone. The session then lives in a private ${esc(s.browser || 'browser')} profile on the server. StreamAnywhere never sees your password.`);
+    if (s.savedCode) lines.push(`<span style="color:var(--accent-2)">An e-mail code ending in …${esc(s.savedCode.hint)} is saved: after the scan it is entered for you.</span>`);
     if (s.error) lines.push(`<span style="color:var(--err)">${esc(s.error)}</span>`);
   }
   el.sessionText.innerHTML = lines.filter(Boolean).join('\n');
@@ -477,6 +529,10 @@ function renderSession(): void {
   const locked = showQr && s.qrState === 'verify' && s.verifyStep === 'code';
   el.sessionLogin.classList.toggle('hidden', !idle);
   el.sessionLoginWindow.classList.toggle('hidden', !idle);
+  el.sessionEnterCode.classList.toggle('hidden', !idle);
+  el.sessionEnterCode.textContent = preCodeOpen ? 'Hide code box' : s.savedCode ? 'Change e-mail code' : 'Enter e-mail code';
+  el.sessionForgetCode.classList.toggle('hidden', !idle || !s.savedCode);
+  el.sessionPreCode.classList.toggle('hidden', !(idle && preCodeOpen));
   // "Sign out" only when there is a session to end; while a sign-in is pending the button is "Cancel".
   // In the code step only Cancel remains (Cancel forgets the attempt; "Sign in" then starts from zero).
   el.sessionLogout.classList.toggle('hidden', s.state !== 'logged_in');

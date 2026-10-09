@@ -11,7 +11,7 @@ import { detectYtDlp, resolveWithYtDlp } from './ytdlp';
 import { defaultExpiry, mediaCount, registerMedia } from './mediaStore';
 import { hostAllowed } from './ssrf';
 import { FeedError, fetchExploreFeed, normalizeExploreOptions } from './feed';
-import { cancelLogin, fetchExploreViaBrowser, fetchForYou, logout, sessionInput, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
+import { cancelLogin, fetchExploreViaBrowser, fetchForYou, logout, saveVerifyCode, sessionInput, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
 
 /** After the browser path rescued an explore request, prefer it for a while (datacenter IPs). */
 let exploreViaBrowserUntil = 0;
@@ -195,6 +195,8 @@ export async function buildServer() {
   app.post('/api/session/logout', async () => logout());
   // Cancels a pending sign-in and forgets its token/ticket/dialog (the next sign-in starts from zero).
   app.post('/api/session/cancel', async () => cancelLogin());
+  // Saves an e-mail code the user already has (typed automatically after the scan); empty = forget it.
+  app.post<{ Body: { code?: string } }>('/api/session/code', async (req) => saveVerifyCode(String(req.body?.code || '')));
   // Clicks / typing for TikTok's verification modal on the headless sign-in page (see SessionInputRequest).
   app.post<{ Body: SessionInputRequest }>('/api/session/input', async (req, reply) => {
     try {
