@@ -506,7 +506,7 @@ function renderCodeStep(s: SessionStatus): void {
     else if (r.state === 'rejected') {
       showCodeResult('err', `TikTok did not accept the code${r.text ? ': ' + r.text : ''}. Check the newest e-mail and try again, or press "Resend code".`);
       if (document.activeElement !== el.sessionCodeText && !el.sessionCodeSend.classList.contains('busy')) el.sessionCodeText.select();
-    } else showCodeResult('err', 'TikTok gave no answer to that code. Try again, or press "Resend code" for a fresh one.');
+    } else showCodeResult('err', r.text || 'TikTok gave no answer to that code. Try again, or press "Resend code" for a fresh one.');
   } else if (!codePending) {
     el.sessionCodeResult.classList.add('hidden');
   }

@@ -660,11 +660,21 @@ const FIND_JS = `(reStr, notStr, mode) => {
   const vis = (el) => { const r = el.getBoundingClientRect(); if (r.width < 4 || r.height < 4) return false; const cs = getComputedStyle(el); return cs.visibility !== 'hidden' && cs.display !== 'none' && cs.opacity !== '0' && cs.pointerEvents !== 'none'; };
   const clean = (t) => (t || '').replace(/\\s+/g, ' ').trim();
   if (mode === 'input') {
+    // The code field: score every visible text input (placeholder/label mentioning code or digits,
+    // numeric keyboard, 6-char limit, inside TikTok's dialog) and take the best, never just the first.
+    let best = null, bestScore = -1;
     for (const el of document.querySelectorAll('input')) {
-      if (!vis(el) || ['hidden', 'checkbox', 'radio', 'submit', 'button'].includes(el.type)) continue;
-      return el;
+      if (!vis(el) || ['hidden', 'checkbox', 'radio', 'submit', 'button', 'file', 'search'].includes(el.type)) continue;
+      const hint = clean([el.placeholder, el.getAttribute('aria-label'), el.name, el.id, el.autocomplete].join(' '));
+      let score = 0;
+      if (/code|digit|verif|otp/i.test(hint)) score += 10;
+      if (/numeric|tel/i.test(el.inputMode || '') || el.type === 'tel' || el.type === 'number') score += 5;
+      if (el.maxLength === 6) score += 5;
+      if (el.closest('#idv-modal-container, [role="dialog"], [class*="modal" i], [class*="Modal"]')) score += 5;
+      if (/search|password|email|phone|user/i.test(hint) && !/code/i.test(hint)) score -= 10;
+      if (score > bestScore) { best = el; bestScore = score; }
     }
-    return null;
+    return best;
   }
   let best = null, bestLen = 1e9;
   for (const el of document.querySelectorAll('button, [role="button"], a, li, div, span, p, label')) {
@@ -818,19 +828,63 @@ async function driveVerifyDialog(page: Page, log: (m: string) => void): Promise<
 }
 
 const ENABLED_FN = Function('e', 'return !e.disabled && e.getAttribute("aria-disabled") !== "true";') as ElFn;
+const VALUE_FN = Function('e', 'return String(e.value || "");') as ElFn;
+const CLEAR_FN = Function('e', 'e.focus(); e.select && e.select();') as ElFn;
 
-/** Puts a verification code into TikTok's code field and submits it (Verify button, else Enter). */
+/**
+ * Types the code into TikTok's code field and READS IT BACK: TikTok's React input has to end up holding
+ * exactly the code. Three ways are tried (click + type, focus + select-all + type, tap + type).
+ */
+async function typeVerifyCode(page: Page, code: string, log: (m: string) => void): Promise<boolean> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const input = await findInPage(page, '', '', 'input');
+    if (!input) {
+      log('verification: no code field found on the page');
+      return false;
+    }
+    if (attempt === 0) log('verification: code field is ' + (await describe(input.el)));
+    try {
+      if (attempt === 0) {
+        await input.el.evaluate(SCROLL_FN);
+        await input.el.click({ clickCount: 3, delay: 20 });
+        await page.keyboard.press('Backspace');
+        await input.el.type(code, { delay: 60 });
+      } else if (attempt === 1) {
+        await input.el.evaluate(CLEAR_FN);
+        await page.keyboard.down('Control');
+        await page.keyboard.press('a');
+        await page.keyboard.up('Control');
+        await page.keyboard.press('Backspace');
+        await page.keyboard.type(code, { delay: 70 });
+      } else {
+        const box = await input.el.boundingBox();
+        if (box) {
+          await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
+          await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { delay: 40 });
+        }
+        for (let i = 0; i < 8; i++) await page.keyboard.press('Backspace');
+        await page.keyboard.type(code, { delay: 80 });
+      }
+    } catch (e) {
+      log('verification: typing failed: ' + (e as Error).message.split('\n')[0]);
+    }
+    await new Promise((r) => setTimeout(r, 350));
+    const val = String(await input.el.evaluate(VALUE_FN).catch(() => '?'));
+    if (val === code) return true;
+    log(`verification: the code field holds "${val}" after try ${attempt + 1} (wanted ${code})`);
+  }
+  return false;
+}
+
+/** Puts a verification code into TikTok's code field and submits it (Next/Verify button, else Enter). */
 async function enterVerifyCode(page: Page, code: string, log: (m: string) => void): Promise<void> {
   s.qrTextBeforeCode = (await scanVerifyDialog(page))?.text || s.qrVerifyText || '';
   s.qrVerifyResult = { state: 'checking', at: Date.now() };
-  const input = await findInPage(page, '', '', 'input');
-  if (input) {
-    await input.el.click({ clickCount: 3, delay: 20 });
-    await page.keyboard.press('Backspace');
-    await input.el.type(code, { delay: 60 });
-  } else {
-    log('verification: no code field found on the page - typing blind');
-    await page.keyboard.type(code, { delay: 60 });
+  const typed = await typeVerifyCode(page, code, log);
+  if (!typed) {
+    s.qrVerifyResult = { state: 'unknown', text: "The code could not be typed into TikTok's field on the server (the field did not take it). Try again; if it keeps failing, use Cancel and start over.", at: Date.now() };
+    await captureShot(page);
+    return;
   }
   // TikTok enables its button once the code is complete; give it a moment, then press it (or Enter).
   let submit: { el: Handle } | undefined;
@@ -843,7 +897,15 @@ async function enterVerifyCode(page: Page, code: string, log: (m: string) => voi
     log('verification: pressing ' + (await describe(submit.el)));
     await submit.el.click({ delay: 30 }).catch(() => undefined);
   } else {
-    log('verification: no enabled Verify button - pressing Enter');
+    log('verification: no enabled Next/Verify button - pressing Enter');
+    await page.keyboard.press('Enter').catch(() => undefined);
+  }
+  // If the field still shows the code 2 s later, the press did nothing: Enter inside the field as well.
+  await new Promise((r) => setTimeout(r, 2000));
+  const still = await findInPage(page, '', '', 'input');
+  if (still && String(await still.el.evaluate(VALUE_FN).catch(() => '')) === code) {
+    log('verification: dialog unchanged after the press - pressing Enter in the field');
+    await still.el.evaluate(FOCUS_FN).catch(() => undefined);
     await page.keyboard.press('Enter').catch(() => undefined);
   }
 }
