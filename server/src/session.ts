@@ -435,11 +435,29 @@ function markLoggedIn(acc: { username?: string; nickname?: string; avatar?: stri
   s.loginMode = undefined;
 }
 
-export async function startLogin(mode: LoginMode, log: (m: string) => void): Promise<SessionStatus> {
+/** The last sign-in log lines (GET /api/session/log), so the flow can be diagnosed without a shell. */
+const recentLog: string[] = [];
+function remember(m: string): void {
+  recentLog.push(new Date().toISOString().slice(11, 19) + ' ' + m);
+  if (recentLog.length > 120) recentLog.splice(0, recentLog.length - 120);
+}
+export function sessionLog(): { lines: string[] } {
+  return { lines: recentLog.slice() };
+}
+const wrapLog = (log: (m: string) => void): ((m: string) => void) => (m) => {
+  remember(m);
+  log(m);
+};
+
+export async function startLogin(mode: LoginMode, rawLog: (m: string) => void): Promise<SessionStatus> {
   if (s.state === 'login_pending' && (s.loginBrowser || s.qrPage)) return sessionStatus();
   if (probe) await probe.catch(() => undefined);
   probed = true;
-  feedLog = feedLog || log;
+  const log = (m: string): void => {
+    remember(m);
+    rawLog(m);
+  };
+  feedLog = log;
   return mode === 'window' ? startWindowLogin(log) : startQrLogin(log);
 }
 
@@ -725,8 +743,17 @@ const FIND_JS = `(reStr, notStr, mode) => {
   if (mode === 'input') {
     // The code field: score every visible text input (placeholder/label mentioning code or digits,
     // numeric keyboard, 6-char limit, inside TikTok's dialog) and take the best, never just the first.
+    // Shadow roots are walked too (component libraries hide their <input> in them).
+    const inputs = [];
+    const walk = (root) => {
+      for (const el of root.querySelectorAll('*')) {
+        if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable) inputs.push(el);
+        if (el.shadowRoot) walk(el.shadowRoot);
+      }
+    };
+    walk(document);
     let best = null, bestScore = -1;
-    for (const el of document.querySelectorAll('input')) {
+    for (const el of inputs) {
       if (!vis(el) || ['hidden', 'checkbox', 'radio', 'submit', 'button', 'file', 'search'].includes(el.type)) continue;
       const hint = clean([el.placeholder, el.getAttribute('aria-label'), el.name, el.id, el.autocomplete].join(' '));
       let score = 0;
@@ -900,35 +927,63 @@ async function driveVerifyDialog(page: Page, log: (m: string) => void): Promise<
 }
 
 const ENABLED_FN = Function('e', 'return !e.disabled && e.getAttribute("aria-disabled") !== "true";') as ElFn;
-const VALUE_FN = Function('e', 'return String(e.value || "");') as ElFn;
+const VALUE_FN = Function('e', 'return String(e.value !== undefined ? e.value : e.textContent || "");') as ElFn;
 const CLEAR_FN = Function('e', 'e.focus(); e.select && e.select();') as ElFn;
+/** The focused element (through shadow roots) and what it holds: "INPUT:123456" */
+const ACTIVE_JS = `(() => {
+  let a = document.activeElement;
+  while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement;
+  if (!a || a === document.body) return 'none';
+  return a.tagName + (a.className && typeof a.className === 'string' ? '.' + a.className.split(/\\s+/).slice(0, 2).join('.') : '') + ':' + String(a.value !== undefined ? a.value : a.textContent || '').slice(0, 20);
+})()`;
+/** Count of inputs per frame, incl. shadow roots (diagnostics) */
+const COUNT_JS = `(() => {
+  let n = 0, vis = 0;
+  const walk = (root) => { for (const el of root.querySelectorAll('*')) { if (el.tagName === 'INPUT' || el.isContentEditable) { n++; const r = el.getBoundingClientRect(); if (r.width > 4 && r.height > 4) vis++; } if (el.shadowRoot) walk(el.shadowRoot); } };
+  walk(document);
+  return n + '/' + vis;
+})()`;
+
+async function activeField(page: Page): Promise<string> {
+  for (const f of page.frames()) {
+    const a = String(await f.evaluate(ACTIVE_JS).catch(() => 'none'));
+    if (a !== 'none') return a;
+  }
+  return 'none';
+}
 
 /**
- * Types the code into TikTok's code field and READS IT BACK: TikTok's React input has to end up holding
- * exactly the code. Three ways are tried (click + type, focus + select-all + type, tap + type).
+ * Types the code into TikTok's code field and READS IT BACK (the field, or whatever has focus, has to
+ * hold exactly the code). Ways tried: click + type, focus + select-all + type, tap + type, and a click
+ * at the field's place on screen (just above "Resend code") + type, for fields the DOM search misses.
+ * Returns '' on success, else a diagnosis for the UI/log.
  */
-async function typeVerifyCode(page: Page, code: string, log: (m: string) => void): Promise<boolean> {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const input = await findInPage(page, '', '', 'input');
-    if (!input) {
-      log('verification: no code field found on the page');
-      return false;
+async function typeVerifyCode(page: Page, code: string, log: (m: string) => void): Promise<string> {
+  const diag: string[] = [];
+  const counts: string[] = [];
+  for (const f of page.frames()) counts.push(String(await f.evaluate(COUNT_JS).catch(() => '?')));
+  diag.push(`inputs per frame ${counts.join(',')}`);
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const input = attempt < 3 ? await findInPage(page, '', '', 'input') : undefined;
+    if (attempt < 3 && !input) {
+      diag.push(`try ${attempt + 1}: no code field in the DOM`);
+      continue;
     }
-    if (attempt === 0) log('verification: code field is ' + (await describe(input.el)));
     try {
-      if (attempt === 0) {
+      if (attempt === 0 && input) {
+        diag.push('field ' + (await describe(input.el)));
         await input.el.evaluate(SCROLL_FN);
         await input.el.click({ clickCount: 3, delay: 20 });
         await page.keyboard.press('Backspace');
         await input.el.type(code, { delay: 60 });
-      } else if (attempt === 1) {
+      } else if (attempt === 1 && input) {
         await input.el.evaluate(CLEAR_FN);
         await page.keyboard.down('Control');
         await page.keyboard.press('a');
         await page.keyboard.up('Control');
         await page.keyboard.press('Backspace');
         await page.keyboard.type(code, { delay: 70 });
-      } else {
+      } else if (attempt === 2 && input) {
         const box = await input.el.boundingBox();
         if (box) {
           await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
@@ -936,25 +991,46 @@ async function typeVerifyCode(page: Page, code: string, log: (m: string) => void
         }
         for (let i = 0; i < 8; i++) await page.keyboard.press('Backspace');
         await page.keyboard.type(code, { delay: 80 });
+      } else {
+        // Geometry: TikTok's field sits right above its "Resend code" link, full dialog width.
+        const resend = await findInPage(page, '^resend( code)?$');
+        const box = resend ? await resend.el.boundingBox() : null;
+        if (!box) {
+          diag.push('try 4: no "Resend code" link to aim from');
+          continue;
+        }
+        const x = box.x + Math.max(60, box.width / 2);
+        const y = box.y - 40;
+        diag.push(`try 4: click at ${Math.round(x)},${Math.round(y)} above "Resend code"`);
+        await page.mouse.click(x, y, { delay: 40 });
+        await new Promise((r) => setTimeout(r, 150));
+        for (let i = 0; i < 8; i++) await page.keyboard.press('Backspace');
+        await page.keyboard.type(code, { delay: 80 });
       }
     } catch (e) {
-      log('verification: typing failed: ' + (e as Error).message.split('\n')[0]);
+      diag.push(`try ${attempt + 1} threw: ` + (e as Error).message.split('\n')[0].slice(0, 80));
     }
     await new Promise((r) => setTimeout(r, 350));
-    const val = String(await input.el.evaluate(VALUE_FN).catch(() => '?'));
-    if (val === code) return true;
-    log(`verification: the code field holds "${val}" after try ${attempt + 1} (wanted ${code})`);
+    const val = input ? String(await input.el.evaluate(VALUE_FN).catch(() => '?')) : '';
+    const active = await activeField(page);
+    if (val === code || active.endsWith(':' + code)) {
+      log(`verification: code typed (try ${attempt + 1}; field="${val}", focus=${active})`);
+      return '';
+    }
+    diag.push(`try ${attempt + 1}: field="${val}" focus=${active}`);
   }
-  return false;
+  const text = diag.join(' | ');
+  log('verification: typing failed - ' + text);
+  return text;
 }
 
 /** Puts a verification code into TikTok's code field and submits it (Next/Verify button, else Enter). */
 async function enterVerifyCode(page: Page, code: string, log: (m: string) => void): Promise<void> {
   s.qrTextBeforeCode = (await scanVerifyDialog(page))?.text || s.qrVerifyText || '';
   s.qrVerifyResult = { state: 'checking', at: Date.now() };
-  const typed = await typeVerifyCode(page, code, log);
-  if (!typed) {
-    s.qrVerifyResult = { state: 'unknown', text: "The code could not be typed into TikTok's field on the server (the field did not take it). Try again; if it keeps failing, use Cancel and start over.", at: Date.now() };
+  const problem = await typeVerifyCode(page, code, log);
+  if (problem) {
+    s.qrVerifyResult = { state: 'unknown', text: "The code could not be typed into TikTok's field on the server. Details: " + problem.slice(0, 400), at: Date.now() };
     await captureShot(page);
     return;
   }
@@ -1391,7 +1467,7 @@ async function closeSecondaryPages(): Promise<void> {
 }
 
 export async function fetchExploreViaBrowser(category: number, count: number, log: (m: string) => void): Promise<ExploreResult> {
-  feedLog = feedLog || log;
+  feedLog = feedLog || wrapLog(log);
   if (!sessionSupported().ok) throw new Error(sessionSupported().reason);
   if (s.qrPage && !s.qrPage.isClosed()) throw new Error('A QR sign-in is in progress; the browser is reserved for it for the moment');
   const browser = await headlessBrowser();
@@ -1466,7 +1542,7 @@ export interface ForYouResult {
  * (scroll + ArrowDown) until TikTok loads more, for at most ~12 s.
  */
 export async function fetchForYou(count: number, log: (m: string) => void): Promise<ForYouResult> {
-  feedLog = log;
+  feedLog = wrapLog(log);
   const warnings: string[] = [];
   if (!sessionSupported().ok) throw new Error(sessionSupported().reason);
   // FORYOU_ALLOW_GUEST=1 lets the headless page run signed-out (TikTok's guest feed: a few videos,

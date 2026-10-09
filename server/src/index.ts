@@ -11,7 +11,7 @@ import { detectYtDlp, resolveWithYtDlp } from './ytdlp';
 import { defaultExpiry, mediaCount, registerMedia } from './mediaStore';
 import { hostAllowed } from './ssrf';
 import { FeedError, fetchExploreFeed, normalizeExploreOptions } from './feed';
-import { cancelLogin, fetchExploreViaBrowser, fetchForYou, logout, saveVerifyCode, sessionInput, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
+import { cancelLogin, fetchExploreViaBrowser, fetchForYou, logout, saveVerifyCode, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
 
 /** After the browser path rescued an explore request, prefer it for a while (datacenter IPs). */
 let exploreViaBrowserUntil = 0;
@@ -184,6 +184,8 @@ export async function buildServer() {
   });
 
   app.get('/api/session', async (): Promise<SessionStatus> => sessionProbe());
+  // The last sign-in log lines (what the server did on TikTok's page), for diagnosing without a shell.
+  app.get('/api/session/log', async () => sessionLog());
   app.post<{ Body: SessionLoginRequest }>('/api/session/login', resolveLimit, async (req, reply) => {
     try {
       const mode = req.body?.mode === 'window' ? 'window' : 'qr';
