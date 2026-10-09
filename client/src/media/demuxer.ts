@@ -6,8 +6,10 @@
  *
  *  - Progressive download from byte 0; if mp4box asks for a later file position (e.g. moov
  *    stored after mdat) the fetch is restarted there with a Range request.
- *  - seek(t) asks mp4box for the file offset of the preceding random-access point and restarts
- *    the download there; mp4box then re-emits samples from that RAP.
+ *  - seek(t) asks mp4box for the file offset of the preceding random-access point. mp4box answers
+ *    with the end of the data it still holds in memory after that point, so the download is only
+ *    restarted when that offset lies beyond what has been fetched; when the file is already
+ *    complete in memory the samples are simply re-emitted (a Range request at EOF would be 416).
  *  - pause()/resume() stop pulling from the network when the decoder queues are full.
  */
 import { createFile, MP4BoxBuffer, type ISOFile, type Movie, type Sample } from 'mp4box';
@@ -47,6 +49,8 @@ export class Mp4Demuxer {
   private videoTrack?: TrackInfo;
   private audioTrack?: TrackInfo;
   private ready = false;
+  /** The current download reached EOF (every byte of the file went through mp4box) */
+  private ended = false;
   readonly stats: DemuxerStats = {
     bytesLoaded: 0,
     totalBytes: 0,
@@ -84,10 +88,23 @@ export class Mp4Demuxer {
   seek(seconds: number): number {
     if (!this.ready) return seconds;
     const r = this.file.seek(Math.max(0, seconds), true);
-    this.cb.onLog(`seek ${seconds.toFixed(2)}s -> RAP at ${r.time.toFixed(2)}s, file offset ${r.offset}`);
+    const total = this.stats.totalBytes;
+    const atEof = total > 0 && r.offset >= total;
     this.paused = false;
     this.wake();
-    void this.startFetch(r.offset);
+    if (this.ended && atEof) {
+      // Everything mp4box needs is still in memory: re-emit from the seek point, no network.
+      this.cb.onLog(`seek ${seconds.toFixed(2)}s -> RAP at ${r.time.toFixed(2)}s, served from memory (file complete)`);
+      this.file.start();
+      this.cb.onEnd();
+    } else if (!this.ended && r.offset === this.filePos) {
+      // The data up to the current download position is in memory; the running fetch continues.
+      this.cb.onLog(`seek ${seconds.toFixed(2)}s -> RAP at ${r.time.toFixed(2)}s, served from memory (download continues at ${this.filePos})`);
+      this.file.start();
+    } else {
+      this.cb.onLog(`seek ${seconds.toFixed(2)}s -> RAP at ${r.time.toFixed(2)}s, file offset ${r.offset}`);
+      void this.startFetch(r.offset);
+    }
     return r.time;
   }
 
@@ -157,6 +174,7 @@ export class Mp4Demuxer {
     const ac = new AbortController();
     this.abort = ac;
     const gen = ++this.fetchGen;
+    this.ended = false;
     if (offset > 0) this.stats.restarts++;
     const headers = new Headers(this.fetchInit?.headers || {});
     if (offset > 0) headers.set('Range', `bytes=${offset}-`);
@@ -166,6 +184,14 @@ export class Mp4Demuxer {
       if (gen !== this.fetchGen) return;
       this.stats.httpStatus = res.status;
       this.stats.contentType = res.headers.get('content-type') || '';
+      if (res.status === 416 && offset > 0 && this.stats.totalBytes > 0 && offset >= this.stats.totalBytes) {
+        // Asked for bytes at or past EOF: there is nothing left to download.
+        this.cb.onLog(`range at EOF (${offset}/${this.stats.totalBytes}); download already complete`);
+        this.ended = true;
+        this.file.flush();
+        this.cb.onEnd();
+        return;
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText} fetching media`);
       const len = Number(res.headers.get('content-length') || 0);
       if (offset > 0) {
@@ -203,7 +229,10 @@ export class Mp4Demuxer {
         this.stats.bytesLoaded += merged.byteLength;
         const next = this.file.appendBuffer(buf);
         this.cb.onProgress(this.stats.bytesLoaded, this.stats.totalBytes);
-        if (typeof next === 'number' && next > this.filePos && this.stats.rangeSupported !== false) {
+        // Restart further on only when the wanted position is before EOF; a position at/after the
+        // known end means mp4box already holds everything it needs (a Range there would be 416).
+        const beforeEof = !this.stats.totalBytes || next < this.stats.totalBytes;
+        if (typeof next === 'number' && next > this.filePos && beforeEof && this.stats.rangeSupported !== false) {
           this.cb.onLog(`mp4box requests file position ${next} (skipping ${next - this.filePos} bytes)`);
           void this.startFetch(next);
           return false;
@@ -220,6 +249,8 @@ export class Mp4Demuxer {
         if (gen !== this.fetchGen) return;
         if (done) {
           if (!flushPending()) return;
+          this.ended = true;
+          if (!this.stats.totalBytes || this.filePos > this.stats.totalBytes) this.stats.totalBytes = this.filePos;
           this.file.flush();
           this.cb.onLog(`download complete: ${this.stats.bytesLoaded} bytes`);
           this.cb.onEnd();

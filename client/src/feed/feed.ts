@@ -3,7 +3,7 @@
  *
  *  - Source "Explore" (no sign-in) or "For You" (the signed-in account's feed; needs the Node
  *    server with a Chrome/Edge session, see server/src/session.ts). Tabs in the transparent top bar.
- *  - One full-height <video> per item, scroll-snap; the item that fills the viewport plays, the
+ *  - One full-height <canvas> per item, scroll-snap; the item that fills the viewport plays, the
  *    others pause. Items near the end trigger the next batch, and a batch that brings nothing is
  *    retried with a growing delay, so the feed never "ends" (like the app).
  *  - Swipe (touch) or drag (mouse) up/down = next/previous video. Tap/click = pause/resume.
@@ -14,12 +14,15 @@
  *  - Download: fetches the cookie-free CDN URL (CORS *) as a blob and saves it as @author_id.mp4;
  *    falls back to the server proxy when the direct fetch fails.
  *
- * Playback uses the browser's <video> element (not the WebCodecs lab pipeline) so that several
- * items can be kept warm at once and so that H.265-only variants still play where the browser can.
+ * Playback is canvas-only (see player.ts): the WebCodecs pipeline (fetch → mp4box → VideoDecoder →
+ * canvas 2D + Web Audio) paints each item's <canvas>; no <video> element is on the page. Where
+ * WebCodecs is missing, a hidden <video> decodes and its frames are copied into the same canvas.
+ * The active item and its two neighbours hold a player; the others are released.
  */
 import { EXPLORE_CATEGORIES, type FeedItem, type FeedSource, type LoginMode, type MediaFormat, type SessionInputRequest, type SessionStatus } from '../../../shared/types';
 import { api, ApiError, apiUrl } from '../api';
 import { pressed } from '../busy';
+import { FeedPlayer, feedPlayerMode } from './player';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const el = document.getElementById(id);
@@ -79,14 +82,21 @@ const el = {
 interface Entry {
   item: FeedItem;
   root: HTMLElement;
-  video: HTMLVideoElement;
+  canvas: HTMLCanvasElement;
+  /** Canvas player; exists only while the item is active or a neighbour of the active one */
+  player?: FeedPlayer;
   progress: HTMLElement;
   err: HTMLElement;
-  /** Which URL the video element currently uses */
+  /** Which URL the player currently uses */
   src?: { url: string; kind: 'direct' | 'proxy' };
   triedProxy: boolean;
   failed: boolean;
+  /** True while the viewer drags the progress bar (the ticker must not move it then) */
+  isSeeking: () => boolean;
 }
+
+const playerMode = feedPlayerMode();
+let playerModeAnnounced = false;
 
 const PREFS_KEY = 'streamanywhere.feed';
 interface Prefs {
@@ -328,7 +338,7 @@ syncActionButtons();
 function toggleAutoscroll(): void {
   prefs.autoscroll = !prefs.autoscroll;
   savePrefs();
-  for (const e of state.entries) e.video.loop = !prefs.autoscroll;
+  for (const e of state.entries) if (e.player) e.player.loop = !prefs.autoscroll;
   syncActionButtons();
   toast(prefs.autoscroll ? 'Auto-scroll on: next video plays when this one ends' : 'Auto-scroll off: videos loop');
 }
@@ -572,11 +582,7 @@ function showRetryStatus(delayMs: number): void {
 async function reload(): Promise<void> {
   state.generation++;
   clearTimeout(state.retryTimer);
-  for (const e of state.entries) {
-    e.video.pause();
-    e.video.removeAttribute('src');
-    e.video.load();
-  }
+  for (const e of state.entries) releasePlayer(e);
   state.entries = [];
   state.ids = new Set();
   state.active = -1;
@@ -669,13 +675,22 @@ function makeEntry(item: FeedItem): Entry {
   const root = document.createElement('article');
   root.className = 'item';
   root.dataset.id = item.id;
-  const video = document.createElement('video');
-  video.playsInline = true;
-  video.preload = 'none';
-  video.muted = prefs.muted;
-  if (item.cover) video.poster = item.cover;
-  video.setAttribute('aria-label', item.desc || `video by @${item.author.uniqueId || '?'}`);
-  root.appendChild(video);
+  const label = item.desc || `video by @${item.author.uniqueId || '?'}`;
+  // Poster: shown until the player paints its first frame (the canvas is hidden until then).
+  if (item.cover) {
+    const cover = document.createElement('img');
+    cover.className = 'cover';
+    cover.src = item.cover;
+    cover.alt = '';
+    cover.decoding = 'async';
+    cover.draggable = false;
+    root.appendChild(cover);
+  }
+  const canvas = document.createElement('canvas');
+  canvas.className = 'frame';
+  canvas.setAttribute('role', 'img');
+  canvas.setAttribute('aria-label', label);
+  root.appendChild(canvas);
 
   const badge = document.createElement('div');
   badge.className = 'pause-badge';
@@ -708,17 +723,25 @@ function makeEntry(item: FeedItem): Entry {
   root.appendChild(info);
 
   // Progress bar: click or drag anywhere on it to seek (touch too; it never scrolls the feed).
+  // A canvas seek resets the decoders, so while dragging the bar only follows the pointer and
+  // the player is seeked at most every SEEK_THROTTLE_MS plus once more on release.
   const progress = document.createElement('div');
   progress.className = 'progress';
   const bar = document.createElement('i');
   progress.appendChild(bar);
   root.appendChild(progress);
   let seeking = false;
-  const seekTo = (clientX: number) => {
+  let lastSeekAt = 0;
+  const SEEK_THROTTLE_MS = 400;
+  const seekTo = (clientX: number, force: boolean) => {
     const r = progress.getBoundingClientRect();
     const ratio = Math.max(0, Math.min(1, (clientX - r.left) / Math.max(1, r.width)));
     bar.style.width = `${ratio * 100}%`;
-    if (Number.isFinite(video.duration) && video.duration > 0) video.currentTime = ratio * video.duration;
+    const p = entry.player;
+    if (!p || !(p.duration > 0)) return;
+    if (!force && Date.now() - lastSeekAt < SEEK_THROTTLE_MS) return;
+    lastSeekAt = Date.now();
+    p.seek(ratio * p.duration);
   };
   progress.addEventListener('pointerdown', (e) => {
     e.stopPropagation();
@@ -728,21 +751,21 @@ function makeEntry(item: FeedItem): Entry {
     progress.setPointerCapture(e.pointerId);
     suppressClickUntil = Date.now() + 600;
     userScrollAt = Date.now();
-    seekTo(e.clientX);
+    seekTo(e.clientX, true);
   });
   progress.addEventListener('pointermove', (e) => {
     if (!seeking) return;
     e.stopPropagation();
     userScrollAt = Date.now();
-    seekTo(e.clientX);
+    seekTo(e.clientX, false);
   });
   const endSeek = (e: PointerEvent) => {
     if (!seeking) return;
     seeking = false;
     root.classList.remove('seeking');
-    seekTo(e.clientX);
+    seekTo(e.clientX, true);
     suppressClickUntil = Date.now() + 400;
-    if (activeEntry() === entry && !state.userPaused && video.paused) void playEntry(entry);
+    if (activeEntry() === entry && !state.userPaused && entry.player?.paused) void playEntry(entry);
   };
   progress.addEventListener('pointerup', endSeek);
   progress.addEventListener('pointercancel', endSeek);
@@ -753,47 +776,80 @@ function makeEntry(item: FeedItem): Entry {
   err.className = 'err hidden';
   root.appendChild(err);
 
-  const entry: Entry = { item, root, video, progress: bar, err, triedProxy: false, failed: false };
+  const entry: Entry = { item, root, canvas, progress: bar, err, triedProxy: false, failed: false, isSeeking: () => seeking };
 
-  video.addEventListener('click', () => {
-    if (suppressClickUntil > Date.now()) return; // the click that ends a drag
-    togglePause(entry);
-  });
-  video.addEventListener('timeupdate', () => {
-    if (video.duration && !seeking) bar.style.width = `${(100 * video.currentTime) / video.duration}%`;
-  });
-  video.addEventListener('ended', () => {
-    if (activeEntry() !== entry) return;
-    if (prefs.autoscroll) goTo(state.active + 1);
-  });
-  video.addEventListener('error', () => onVideoError(entry));
-  video.addEventListener('play', () => root.classList.remove('paused'));
-  video.addEventListener('pause', () => {
-    if (activeEntry() === entry && state.userPaused) root.classList.add('paused');
-  });
+  // Tap/click on the picture (poster or canvas) = pause/resume. The info block and progress bar
+  // handle their own pointer events.
+  for (const target of [canvas, root.querySelector<HTMLImageElement>('.cover')]) {
+    target?.addEventListener('click', () => {
+      if (suppressClickUntil > Date.now()) return; // the click that ends a drag
+      togglePause(entry);
+    });
+  }
 
   el.feed.appendChild(root);
   observer.observe(root);
   return entry;
 }
 
+/** Creates the entry's canvas player (idempotent). */
+function ensurePlayer(entry: Entry): FeedPlayer {
+  if (entry.player) return entry.player;
+  const player = new FeedPlayer(entry.canvas, entry.root, {
+    onFirstFrame: () => entry.root.classList.add('has-frame'),
+    onEnded: () => {
+      if (activeEntry() !== entry) return;
+      if (prefs.autoscroll) goTo(state.active + 1);
+    },
+    onError: (e) => onPlayerError(entry, e),
+    onPlayingChange: (playing) => {
+      if (playing) entry.root.classList.remove('paused');
+      else if (activeEntry() === entry && state.userPaused) entry.root.classList.add('paused');
+    },
+    onTime: (t, d) => {
+      if (!entry.isSeeking()) entry.progress.style.width = `${(100 * t) / d}%`;
+    },
+  });
+  player.loop = !prefs.autoscroll;
+  player.setMuted(prefs.muted);
+  entry.player = player;
+  if (!playerModeAnnounced) {
+    playerModeAnnounced = true;
+    console.info(`[feed] canvas player: ${player.rendererName}${playerMode.reason ? ` (${playerMode.reason})` : ''}`);
+    if (playerMode.mode !== 'webcodecs') toast(`WebCodecs unavailable (${playerMode.reason}); frames are copied from a hidden video into the canvas.`, false, 6000);
+  }
+  return player;
+}
+
+/** Drops the entry's player (decoders, audio context, network) and shows the poster again. */
+function releasePlayer(entry: Entry): void {
+  if (!entry.player) return;
+  entry.player.destroy();
+  entry.player = undefined;
+  entry.src = undefined;
+  entry.root.classList.remove('has-frame', 'paused');
+  entry.progress.style.width = '0%';
+}
+
 function attachSource(entry: Entry, which: 'direct' | 'proxy' | 'auto' = 'auto'): boolean {
   const cands = sourceCandidates(entry.item);
   const pick = which === 'auto' ? cands[0] : cands.find((c) => c.kind === which);
   if (!pick) return false;
-  if (entry.src?.url === pick.url) return true;
+  if (entry.player && entry.src?.url === pick.url) return true;
   entry.src = pick;
-  entry.video.src = pick.url;
-  entry.video.load();
+  entry.root.classList.remove('has-frame');
+  const p = ensurePlayer(entry);
+  void p.load(pick.url, pick.kind, `TikTok ${entry.item.id} (${pick.kind})`);
   return true;
 }
 
-function onVideoError(entry: Entry): void {
-  const e = entry.video.error;
-  const detail = e ? `MediaError ${e.code}${e.message ? ': ' + e.message : ''}` : 'unknown error';
+function onPlayerError(entry: Entry, e: Error): void {
+  const detail = e.message || 'unknown error';
   if (entry.src?.kind === 'direct' && !entry.triedProxy && sourceCandidates(entry.item).some((c) => c.kind === 'proxy')) {
     entry.triedProxy = true;
     console.warn(`[feed] direct URL failed for ${entry.item.id} (${detail}); retrying through the proxy`);
+    // A renderer that reported an error is finished; start a fresh one for the proxy URL.
+    releasePlayer(entry);
     attachSource(entry, 'proxy');
     if (activeEntry() === entry && state.started) void playEntry(entry);
     return;
@@ -807,27 +863,13 @@ function onVideoError(entry: Entry): void {
 async function playEntry(entry: Entry): Promise<void> {
   if (!state.started || entry.failed) return;
   if (!attachSource(entry)) return;
-  entry.video.loop = !prefs.autoscroll;
-  entry.video.muted = prefs.muted;
+  const p = entry.player!;
+  p.loop = !prefs.autoscroll;
+  p.setMuted(prefs.muted);
   try {
-    await entry.video.play();
+    await p.play();
   } catch (e) {
-    const err = e as DOMException;
-    if (err.name === 'NotAllowedError' && !entry.video.muted) {
-      // Autoplay with sound was refused: continue muted and tell the user.
-      prefs.muted = true;
-      savePrefs();
-      syncActionButtons();
-      entry.video.muted = true;
-      toast('Playing muted (browser autoplay rule). Press M or the speaker button for sound.');
-      try {
-        await entry.video.play();
-      } catch {
-        /* reported through the error handler */
-      }
-    } else if (err.name !== 'AbortError') {
-      console.warn('[feed] play() failed', err);
-    }
+    console.warn('[feed] play() failed', e);
   }
 }
 
@@ -835,28 +877,22 @@ function setActive(idx: number): void {
   if (idx < 0 || idx >= state.entries.length) return;
   const prev = activeEntry();
   if (prev && prev !== state.entries[idx]) {
-    prev.video.pause();
+    prev.player?.pause();
     prev.root.classList.remove('paused');
-    try {
-      prev.video.currentTime = 0;
-    } catch {
-      /* not loaded */
-    }
+    prev.player?.seek(0);
   }
   state.active = idx;
   state.userPaused = false;
   const cur = state.entries[idx];
   void playEntry(cur);
-  // Warm the neighbours, release the rest.
+  // Warm the neighbours (their players fetch and decode the first frames, then idle on
+  // backpressure), release the rest so decoders and audio contexts do not pile up.
   state.entries.forEach((e, i) => {
     const d = Math.abs(i - idx);
     if (d === 1) {
-      if (!e.failed && attachSource(e)) e.video.preload = 'auto';
-    } else if (d > 2 && e.src) {
-      e.video.pause();
-      e.video.removeAttribute('src');
-      e.video.load();
-      e.src = undefined;
+      if (!e.failed) attachSource(e);
+    } else if (d > 2 && e.player) {
+      releasePlayer(e);
     }
   });
   scheduleMoreIfNeeded();
@@ -883,13 +919,13 @@ function togglePause(entry: Entry): void {
     start();
     return;
   }
-  if (entry.video.paused) {
+  if (!entry.player || entry.player.paused) {
     state.userPaused = false;
     entry.root.classList.remove('paused');
     void playEntry(entry);
   } else {
     state.userPaused = true;
-    entry.video.pause();
+    entry.player.pause();
     entry.root.classList.add('paused');
   }
 }
@@ -897,7 +933,7 @@ function togglePause(entry: Entry): void {
 function toggleMute(): void {
   prefs.muted = !prefs.muted;
   savePrefs();
-  for (const e of state.entries) e.video.muted = prefs.muted;
+  for (const e of state.entries) e.player?.setMuted(prefs.muted);
   syncActionButtons();
   toast(prefs.muted ? 'Muted' : 'Sound on');
 }
@@ -1160,7 +1196,7 @@ new ResizeObserver(onViewportChange).observe(el.feed);
 document.addEventListener('visibilitychange', () => {
   const cur = activeEntry();
   if (!cur) return;
-  if (document.hidden) cur.video.pause();
+  if (document.hidden) cur.player?.pause();
   else if (!state.userPaused) void playEntry(cur);
 });
 
@@ -1198,4 +1234,6 @@ void (async () => {
   }
 })();
 
-(window as unknown as { streamAnywhereFeed: unknown }).streamAnywhereFeed = state;
+// Debug handle (console / automated checks): the state plus the two navigation entry points, so the
+// feed can be driven where scrolling and IntersectionObserver do not run (hidden or occluded tabs).
+(window as unknown as { streamAnywhereFeed: unknown }).streamAnywhereFeed = Object.assign(state, { setActive, goTo });

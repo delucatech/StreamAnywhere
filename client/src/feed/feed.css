@@ -172,7 +172,10 @@ button {
   justify-content: center;
   overflow: hidden;
 }
-.item video {
+/* The picture is a <canvas> painted by the player (player.ts); the poster <img> sits behind it and
+   shows until the first frame has been painted (.has-frame). */
+.item canvas.frame,
+.item img.cover {
   display: block;
   width: 100%;
   height: 100%;
@@ -183,6 +186,27 @@ button {
   object-position: center;
   background: #000;
   -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.item img.cover {
+  position: absolute;
+  inset: 0;
+}
+.item canvas.frame {
+  position: relative;
+  visibility: hidden;
+}
+.item.has-frame canvas.frame {
+  visibility: visible;
+}
+/* Fallback renderer only (no WebCodecs): the decoding <video> is kept off-screen. */
+.item .hidden-video {
+  position: absolute;
+  width: 2px;
+  height: 2px;
+  opacity: 0;
+  pointer-events: none;
 }
 .item .pause-badge {
   position: absolute;
