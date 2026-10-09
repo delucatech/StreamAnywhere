@@ -291,14 +291,15 @@ async function preparePage(page: Page, browser: Browser): Promise<void> {
       return;
     }
     if (page === s.qrPage) {
-      if (s.qrState === 'verify' && /passport|verif|idv|captcha/i.test(req.url()) && !/qrconnect|get_qrcode/.test(req.url()) && !/\.(js|css|png|svg|woff2?)(\?|$)/.test(req.url())) {
-        s.qrVerifyNetAt = Date.now();
+      if (s.qrState === 'verify' && ['xhr', 'fetch'].includes(req.resourceType()) && !/qrconnect|get_qrcode/.test(req.url()) && req.method() !== 'OPTIONS') {
         let p = req.url();
         try {
-          p = new URL(req.url()).pathname;
+          const u = new URL(req.url());
+          p = u.host + u.pathname;
         } catch {
           /* keep */
         }
+        if (/passport|verif|idv|captcha|aaas|ucenter/i.test(req.url())) s.qrVerifyNetAt = Date.now();
         feedLog?.(`verification request: ${req.method()} ${p}`);
       }
       const ticket = req.headers()['x-tt-passport-ticket'];
@@ -975,6 +976,7 @@ async function driveVerifyDialog(page: Page, log: (m: string) => void): Promise<
 const ENABLED_FN = Function('e', 'return !e.disabled && e.getAttribute("aria-disabled") !== "true";') as ElFn;
 const VALUE_FN = Function('e', 'return String(e.value !== undefined ? e.value : e.textContent || "");') as ElFn;
 const CLEAR_FN = Function('e', 'e.focus(); e.select && e.select();') as ElFn;
+const SUBMIT_FORM_FN = Function('e', 'const f = e.form || e.closest("form"); if (f) { if (f.requestSubmit) f.requestSubmit(); else f.submit(); }') as ElFn;
 type ElFn2 = (e: unknown, code: string) => unknown;
 /** The browser's own text insertion: fires a real "input" event that React's onChange accepts. */
 const INSERT_TEXT_FN = Function(
@@ -1112,16 +1114,29 @@ async function enterVerifyCode(page: Page, code: string, log: (m: string) => voi
     if (b && (await b.el.evaluate(ENABLED_FN).catch(() => true))) submit = b;
   }
   const requested = (): boolean => Boolean(s.qrVerifyNetAt && s.qrVerifyNetAt >= pressedAt);
-  for (let attempt = 0; attempt < 4 && !requested(); attempt++) {
-    if (submit) await activate(page, submit.el, attempt, log, 'pressing Next');
+  for (let attempt = 0; attempt < 6 && !requested(); attempt++) {
+    if (submit && attempt === 4) {
+      log('verification: pressing Next (try 4, focus + Space)');
+      await submit.el.evaluate(FOCUS_FN).catch(() => undefined);
+      await page.keyboard.press('Space').catch(() => undefined);
+    } else if (submit && attempt === 5) {
+      log('verification: pressing Next (try 5, form submit / Enter in the field)');
+      await submit.el.evaluate(SUBMIT_FORM_FN).catch(() => undefined);
+      const field = await findInPage(page, '', '', 'input');
+      if (field) {
+        await field.el.evaluate(FOCUS_FN).catch(() => undefined);
+        await page.keyboard.press('Enter').catch(() => undefined);
+      }
+    } else if (submit) await activate(page, submit.el, attempt, log, 'pressing Next');
     else {
       log('verification: no enabled Next/Verify button - pressing Enter');
       await page.keyboard.press('Enter').catch(() => undefined);
     }
-    for (let i = 0; i < 10 && !requested(); i++) await new Promise((r) => setTimeout(r, 300));
+    for (let i = 0; i < 12 && !requested(); i++) await new Promise((r) => setTimeout(r, 300));
     if (requested()) break;
+    const steady = (t: string): string => t.replace(/\b\d+\s?s\b/g, '').replace(/\s+/g, ' ').trim();
     const dialogText = (await scanVerifyDialog(page))?.text || '';
-    if (dialogText !== s.qrTextBeforeCode) {
+    if (steady(dialogText) !== steady(s.qrTextBeforeCode || '')) {
       log('verification: dialog changed after the press: ' + dialogText.slice(0, 120));
       break;
     }
