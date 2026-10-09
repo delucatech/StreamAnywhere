@@ -45,8 +45,13 @@ if ! swapon --show | grep -q /swapfile; then
 fi
 
 echo "== 2. packages"
-apt-get update -qq
-apt-get install -y -qq curl git ca-certificates gnupg chromium fonts-liberation debian-keyring debian-archive-keyring apt-transport-https >/dev/null
+# apt problems (a third-party repo that stopped answering, an expired key, the daily apt timer holding
+# the lock) must not abort a redeploy: observed 2026-10-09, `apt-get update` exit 100 killed the script
+# before step 3 and every Reset kept serving the old build. Warn and go on with what is installed.
+if ! apt-get update -qq; then echo "WARN: apt-get update failed (exit $?); continuing with the installed packages"; fi
+if ! command -v git >/dev/null || ! command -v chromium >/dev/null || ! command -v gpg >/dev/null; then
+  apt-get install -y -qq curl git ca-certificates gnupg chromium fonts-liberation debian-keyring debian-archive-keyring apt-transport-https >/dev/null || echo "WARN: apt-get install failed (exit $?)"
+fi
 if ! command -v node >/dev/null || [ "$(node -v | cut -c2-3)" -lt 18 ]; then
   curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null
   apt-get install -y -qq nodejs >/dev/null
@@ -56,6 +61,7 @@ if ! command -v caddy >/dev/null; then
   curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' > /etc/apt/sources.list.d/caddy-stable.list
   apt-get update -qq && apt-get install -y -qq caddy >/dev/null
 fi
+for c in git node chromium caddy; do command -v "$c" >/dev/null || { echo "$c is missing and apt could not install it"; exit 1; }; done
 echo "node $(node -v), $(chromium --version 2>/dev/null | head -1), caddy $(caddy version | cut -d' ' -f1)"
 
 echo "== 3. app"
