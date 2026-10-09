@@ -929,6 +929,28 @@ async function driveVerifyDialog(page: Page, log: (m: string) => void): Promise<
 const ENABLED_FN = Function('e', 'return !e.disabled && e.getAttribute("aria-disabled") !== "true";') as ElFn;
 const VALUE_FN = Function('e', 'return String(e.value !== undefined ? e.value : e.textContent || "");') as ElFn;
 const CLEAR_FN = Function('e', 'e.focus(); e.select && e.select();') as ElFn;
+type ElFn2 = (e: unknown, code: string) => unknown;
+/** The browser's own text insertion: fires a real "input" event that React's onChange accepts. */
+const INSERT_TEXT_FN = Function(
+  'e',
+  'code',
+  `e.focus();
+  if (e.select) e.select();
+  const ok = document.execCommand && document.execCommand('insertText', false, code);
+  return (ok ? 'exec:' : 'noexec:') + e.value;`,
+) as ElFn2;
+/** Controlled-input trick: set the value through the native setter, then dispatch input + change. */
+const REACT_SET_FN = Function(
+  'e',
+  'code',
+  `e.focus();
+  const proto = e.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  const d = Object.getOwnPropertyDescriptor(proto, 'value');
+  if (d && d.set) d.set.call(e, code); else e.value = code;
+  e.dispatchEvent(new InputEvent('input', { bubbles: true, data: code, inputType: 'insertText' }));
+  e.dispatchEvent(new Event('change', { bubbles: true }));
+  return e.value;`,
+) as ElFn2;
 /** The focused element (through shadow roots) and what it holds: "INPUT:123456" */
 const ACTIVE_JS = `(() => {
   let a = document.activeElement;
@@ -977,20 +999,16 @@ async function typeVerifyCode(page: Page, code: string, log: (m: string) => void
         await page.keyboard.press('Backspace');
         await input.el.type(code, { delay: 60 });
       } else if (attempt === 1 && input) {
+        // Keystrokes reached the field but its value snapped back to "" (a React-controlled input
+        // whose onChange did not take them): insert the text the way the browser itself does.
         await input.el.evaluate(CLEAR_FN);
         await page.keyboard.down('Control');
         await page.keyboard.press('a');
         await page.keyboard.up('Control');
         await page.keyboard.press('Backspace');
-        await page.keyboard.type(code, { delay: 70 });
+        diag.push('try 2: insertText → ' + String(await input.el.evaluate(INSERT_TEXT_FN, code)));
       } else if (attempt === 2 && input) {
-        const box = await input.el.boundingBox();
-        if (box) {
-          await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
-          await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { delay: 40 });
-        }
-        for (let i = 0; i < 8; i++) await page.keyboard.press('Backspace');
-        await page.keyboard.type(code, { delay: 80 });
+        diag.push('try 3: native setter + input event → ' + String(await input.el.evaluate(REACT_SET_FN, code)));
       } else {
         // Geometry: TikTok's field sits right above its "Resend code" link, full dialog width.
         const resend = await findInPage(page, '^resend( code)?$');
@@ -1006,6 +1024,8 @@ async function typeVerifyCode(page: Page, code: string, log: (m: string) => void
         await new Promise((r) => setTimeout(r, 150));
         for (let i = 0; i < 8; i++) await page.keyboard.press('Backspace');
         await page.keyboard.type(code, { delay: 80 });
+        await new Promise((r) => setTimeout(r, 300));
+        if (!(await activeField(page)).endsWith(':' + code)) await page.evaluate(`document.execCommand('insertText', false, ${JSON.stringify(code)})`).catch(() => undefined);
       }
     } catch (e) {
       diag.push(`try ${attempt + 1} threw: ` + (e as Error).message.split('\n')[0].slice(0, 80));
