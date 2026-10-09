@@ -114,7 +114,7 @@ export class FeedPlayer {
       label,
       connection,
       sourceKind: 'tiktok',
-      fetchInit: { mode: 'cors', credentials: 'omit' },
+      fetchInit: { mode: 'cors', credentials: 'same-origin' },
       corsResult: 'not-tested',
     };
     this.renderer.setVolume(this.muted ? 0 : 1);

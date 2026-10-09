@@ -198,7 +198,7 @@ async function loadVideo(reuseResolved = false): Promise<void> {
       const url = el.test.value;
       const t = await testFetch(url);
       log('info', `browser CORS test for test MP4: ${t.ok ? 'passed' : 'FAILED: ' + t.error} (${t.elapsedMs.toFixed(0)} ms)`);
-      src = { url, label: `Test MP4: ${new URL(url).pathname.split('/').pop()}`, connection: 'test', sourceKind: 'mp4', fetchInit: { mode: 'cors', credentials: 'omit' }, corsResult: t.ok ? 'passed' : 'failed', corsDetail: t.error };
+      src = { url, label: `Test MP4: ${new URL(url).pathname.split('/').pop()}`, connection: 'test', sourceKind: 'mp4', fetchInit: { mode: 'cors', credentials: 'same-origin' }, corsResult: t.ok ? 'passed' : 'failed', corsDetail: t.error };
     } else if (mode === 'local') {
       const file = el.file.files?.[0];
       if (!file) throw new Error('Choose a local file first');
@@ -261,10 +261,10 @@ async function chooseConnection(resolved: ResolveResponse, f: MediaFormat, mode:
     if (f.directUrl && f.directUrl !== f.redirectUrl) candidates.push({ url: f.directUrl, kind: f.directKind || 'direct' });
     if (!candidates.length) failures.push('resolver found no cookie-free URL for this format');
     for (const c of candidates) {
-      const t = await testFetch(c.url, { mode: 'cors', credentials: 'omit' });
+      const t = await testFetch(c.url, { mode: 'cors', credentials: 'same-origin' });
       log(t.ok ? 'info' : 'warn', `browser fetch() test [${c.kind}] ${new URL(c.url).hostname}: ${t.ok ? `passed (HTTP ${t.status}, ${t.bytes} bytes, ${t.elapsedMs.toFixed(0)} ms)` : `failed: ${t.error}`}`);
       if (t.ok) {
-        return { ...base, url: c.url, connection: 'direct', fetchInit: { mode: 'cors', credentials: 'omit' }, corsResult: 'passed', corsDetail: `${c.kind}: HTTP ${t.status}` };
+        return { ...base, url: c.url, connection: 'direct', fetchInit: { mode: 'cors', credentials: 'same-origin' }, corsResult: 'passed', corsDetail: `${c.kind}: HTTP ${t.status}` };
       }
       failures.push(`${c.kind} (${new URL(c.url).hostname}): ${t.error}`);
     }
@@ -275,11 +275,11 @@ async function chooseConnection(resolved: ResolveResponse, f: MediaFormat, mode:
   if (!f.proxyUrl) throw new Error(`No proxy available for this format (${failures.join('; ') || 'upstream host not allowlisted'})`);
   const proxyUrl = apiUrl(f.proxyUrl);
   const crossOrigin = Boolean(getApiBase());
-  const t = await testFetch(proxyUrl, { mode: 'cors', credentials: 'omit' });
+  const t = await testFetch(proxyUrl, { mode: 'cors', credentials: 'same-origin' });
   log(t.ok ? 'info' : 'error', `proxy test ${proxyUrl}: ${t.ok ? `passed (HTTP ${t.status})` : `failed: ${t.error}`}`);
   if (!t.ok) throw new Error(`Proxy request failed: ${t.error}`);
   if (failures.length) log('warn', `falling back to proxy because direct access failed: ${failures.join('; ')}`);
-  return { ...base, url: proxyUrl, connection: 'proxy', fetchInit: { mode: 'cors', credentials: 'omit' }, corsResult: crossOrigin ? 'passed' : 'same-origin', corsDetail: failures.length ? `direct failed: ${failures.join('; ')}` : 'proxy selected explicitly' };
+  return { ...base, url: proxyUrl, connection: 'proxy', fetchInit: { mode: 'cors', credentials: 'same-origin' }, corsResult: crossOrigin ? 'passed' : 'same-origin', corsDetail: failures.length ? `direct failed: ${failures.join('; ')}` : 'proxy selected explicitly' };
 }
 
 // ---------- controls ----------

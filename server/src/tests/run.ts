@@ -101,17 +101,34 @@ async function offline(): Promise<void> {
   check('item without any URL is skipped', itemToFeedItem({ id: '1', video: { bitrateInfo: [{ GearName: 'x', PlayAddr: { UrlList: [] } }] } }) === undefined);
 }
 
+const TEST_PASSWORD = 'test-password';
+
 async function network(): Promise<void> {
+  // A known password for this run (the real one is only stored as a hash).
+  const crypto = await import('node:crypto');
+  const salt = crypto.randomBytes(16);
+  process.env.APP_PASSWORD_HASH = `scrypt:${salt.toString('hex')}:${crypto.scryptSync(TEST_PASSWORD, salt, 32).toString('hex')}`;
   const app = await buildServer();
   await app.listen({ port: 0, host: '127.0.0.1' });
   const base = `http://127.0.0.1:${(app.server.address() as { port: number }).port}`;
   const http = await import('node:http');
+  let cookie = '';
+  /** A string body is sent as a form (the login page), anything else as JSON. */
   const call = (method: string, p: string, body?: unknown, headers: Record<string, string> = {}) =>
     new Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: Buffer }>((resolve, reject) => {
-      const data = body ? Buffer.from(JSON.stringify(body)) : undefined;
+      const form = typeof body === 'string';
+      const data = body ? Buffer.from(form ? body : JSON.stringify(body)) : undefined;
       const req = http.request(
         base + p,
-        { method, headers: { ...(data ? { 'content-type': 'application/json', 'content-length': String(data.length) } : {}), origin: 'http://localhost:5173', ...headers } },
+        {
+          method,
+          headers: {
+            ...(data ? { 'content-type': form ? 'application/x-www-form-urlencoded' : 'application/json', 'content-length': String(data.length) } : {}),
+            origin: 'http://localhost:5173',
+            ...(cookie ? { cookie } : {}),
+            ...headers,
+          },
+        },
         (res) => {
           const chunks: Buffer[] = [];
           res.on('data', (c) => chunks.push(c));
@@ -123,6 +140,28 @@ async function network(): Promise<void> {
       req.end();
     });
   try {
+    console.log('\n== site password');
+    const health = await call('GET', '/api/health');
+    check('health is public', health.status === 200, health.status);
+    const noCookieApi = await call('POST', '/api/resolve', { url: TEST_MP4 });
+    check('API without cookie -> 401', noCookieApi.status === 401, noCookieApi.status);
+    const noCookiePage = await call('GET', '/feed.html?x=1');
+    check('page without cookie -> redirect to /login', noCookiePage.status === 303 && noCookiePage.headers.location === '/login?next=%2Ffeed.html%3Fx%3D1', noCookiePage.headers.location);
+    const loginPage = await call('GET', '/login?next=/feed.html');
+    check('login page is served', loginPage.status === 200 && loginPage.body.toString().includes('name="password"'), loginPage.status);
+    const wrong = await call('POST', '/login', 'password=nope&next=%2Ffeed.html');
+    check('wrong password -> 401, no cookie', wrong.status === 401 && !wrong.headers['set-cookie'], wrong.status);
+    const evil = await call('POST', '/login', `password=${TEST_PASSWORD}&next=%2F%2Fevil.example`);
+    check('open redirect refused', evil.status === 303 && evil.headers.location === '/', evil.headers.location);
+    const ok = await call('POST', '/login', `password=${encodeURIComponent(TEST_PASSWORD)}&next=%2Ffeed.html`);
+    const setCookie = String(ok.headers['set-cookie'] || '');
+    check('right password -> cookie + redirect', ok.status === 303 && ok.headers.location === '/feed.html' && /^sa_auth=\d+\.[\w-]{43};.*HttpOnly/.test(setCookie), { status: ok.status, setCookie });
+    const forged = await call('GET', '/api/session', undefined, { cookie: setCookie.split(';')[0].replace(/=\d+\./, '=1.') });
+    check('forged cookie -> 401', forged.status === 401, forged.status);
+    cookie = setCookie.split(';')[0];
+    const withCookie = await call('GET', '/api/session');
+    check('API with cookie -> 200', withCookie.status === 200, withCookie.status);
+
     console.log('\n== 3. Proxy Range relay (public CORS MP4)');
     const r = await call('POST', '/api/resolve', { url: TEST_MP4 });
     check('resolve passthrough 200', r.status === 200, r.status);

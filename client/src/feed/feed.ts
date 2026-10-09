@@ -1124,7 +1124,7 @@ async function download(entry: Entry): Promise<void> {
   try {
     for (const c of cands) {
       try {
-        const res = await fetch(c.url, { mode: 'cors', credentials: 'omit' });
+        const res = await fetch(c.url, { mode: 'cors', credentials: 'same-origin' });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const total = Number(res.headers.get('content-length') || 0);
         const reader = res.body?.getReader();

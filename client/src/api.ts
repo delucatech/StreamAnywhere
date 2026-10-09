@@ -46,8 +46,14 @@ export class ApiError extends Error {
   }
 }
 
+/** 401 = the site password cookie is missing or expired: back to the server's login page. */
+function toLoginOn401(res: Response): void {
+  if (res.status === 401 && !apiBase) location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search);
+}
+
 async function post<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(apiUrl(path), { method: 'POST', mode: 'cors', credentials: 'omit', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const res = await fetch(apiUrl(path), { method: 'POST', mode: 'cors', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  toLoginOn401(res);
   const text = await res.text();
   let json: unknown;
   try {
@@ -64,7 +70,7 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 
 export const api = {
   health: async (): Promise<HealthResponse> => {
-    const res = await fetch(apiUrl('/api/health'), { mode: 'cors', credentials: 'omit' });
+    const res = await fetch(apiUrl('/api/health'), { mode: 'cors', credentials: 'same-origin' });
     if (!res.ok) throw new ApiError(`health ${res.status}`, res.status);
     return res.json();
   },
@@ -73,7 +79,8 @@ export const api = {
   report: (req: ReportRequest): Promise<void> => post('/api/report', req).then(() => undefined, () => undefined),
   feed: (req: FeedRequest): Promise<FeedResponse> => post('/api/feed', req),
   session: async (): Promise<SessionStatus> => {
-    const res = await fetch(apiUrl('/api/session'), { mode: 'cors', credentials: 'omit' });
+    const res = await fetch(apiUrl('/api/session'), { mode: 'cors', credentials: 'same-origin' });
+    toLoginOn401(res);
     if (!res.ok) throw new ApiError(`session ${res.status}`, res.status);
     return res.json();
   },

@@ -23,7 +23,7 @@ export interface FetchTestResult {
   finalUrl?: string;
 }
 
-/** fetch(url, Range: bytes=0-15) in CORS mode without credentials. */
+/** fetch(url, Range: bytes=0-15) in CORS mode; cookies only go to our own origin (the site password cookie). */
 export async function testFetch(url: string, init?: RequestInit, timeoutMs = 15_000): Promise<FetchTestResult> {
   const t0 = performance.now();
   const ac = new AbortController();
@@ -31,7 +31,7 @@ export async function testFetch(url: string, init?: RequestInit, timeoutMs = 15_
   try {
     const res = await fetch(url, {
       mode: 'cors',
-      credentials: 'omit',
+      credentials: 'same-origin',
       cache: 'no-store',
       ...(init || {}),
       headers: { ...(init?.headers as Record<string, string> | undefined), Range: 'bytes=0-15' },

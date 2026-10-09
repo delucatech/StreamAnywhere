@@ -21,6 +21,11 @@ export default defineConfig(({ mode }) => {
         target: env.VITE_API_TARGET || 'http://localhost:8787',
         changeOrigin: true,
       },
+      // The site-password page (the server sets the cookie the /api calls then carry)
+      '/login': {
+        target: env.VITE_API_TARGET || 'http://localhost:8787',
+        changeOrigin: true,
+      },
     },
   },
   build: {

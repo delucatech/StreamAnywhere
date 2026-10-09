@@ -4,6 +4,7 @@ import rateLimit from '@fastify/rate-limit';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import type { FeedRequest, FeedResponse, HealthResponse, ProbeRequest, ReportRequest, ResolveRequest, ResolveResponse, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
+import { registerAuth } from './auth';
 import { config, findUp } from './config';
 import { registerProxyRoutes } from './proxy';
 import { isTikTokUrl, probeUrl, resolveTikTokNative, TikTokError } from './tiktok';
@@ -36,6 +37,9 @@ export async function buildServer() {
   // Public-deployment protection: per-IP limits on the endpoints that cause upstream traffic.
   await app.register(rateLimit, { global: false, timeWindow: '1 minute', max: config.rateLimit.mediaPerMinute });
   const resolveLimit = { config: { rateLimit: { max: config.rateLimit.resolvePerMinute, timeWindow: '1 minute' } } };
+
+  // Site password: everything below (pages, API, media) needs the login cookie.
+  registerAuth(app);
 
   app.get('/api/health', async (): Promise<HealthResponse> => ({
     ok: true,

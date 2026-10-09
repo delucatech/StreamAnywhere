@@ -98,6 +98,16 @@ npm run build
 SERVE_CLIENT=true npm start      # PowerShell: $env:SERVE_CLIENT='true'; npm start
 ```
 
+### Site password
+
+Every page and API call of the Node server needs a password (only `/login` and `/api/health` are
+open). The login page sets an HttpOnly cookie that is valid for a year and renewed while the site
+is used, so each browser types the password once. The repository holds only a salted scrypt hash
+of it (`server/src/auth.ts`); `APP_PASSWORD_HASH` replaces it (the command to make a hash is in
+that file, and a new password signs every browser out). `APP_PASSWORD_HASH=off` turns the
+password off. The cookie goes to the same origin only, so a client on another origin (GitHub
+Pages, `?api=`) cannot use a password-protected server. The IIS handler has no password.
+
 ### Public copies
 
 - Source: https://github.com/delucatech/StreamAnywhere
@@ -156,9 +166,9 @@ started. Create a free [DuckDNS](https://www.duckdns.org) subdomain, then add tw
 metadata keys (*Edit → Metadata*): `duckdns-domain` = `yourname` and `duckdns-token` = your token,
 and Reset. The VM then keeps `yourname.duckdns.org` pointed at itself (cron, every 5 minutes) and
 Caddy serves `https://yourname.duckdns.org`. Your own domain can CNAME to it (`feed.delucatech.com
-→ yourname.duckdns.org`; then set metadata `public-host` = `feed.delucatech.com`). The IIS or
-GitHub Pages copy of the client can use this server too: build it with
-`VITE_API_BASE=https://<that host>` or open `.../feed.html?api=https://<that host>`. Untested from
+→ yourname.duckdns.org`; then set metadata `public-host` = `feed.delucatech.com`). The IIS and
+GitHub Pages copies of the client cannot use this server: it requires the site password cookie,
+which only its own origin receives (see *Site password*). Untested from
 my side: whether TikTok treats Google's IP range like a datacenter (captcha at sign-in or an
 empty For You feed); the Explore feed and the resolver are unaffected by that.
 

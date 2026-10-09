@@ -180,7 +180,7 @@ export async function runExperiments(ctx: DiagContext, onUpdate: (results: Exper
     Object.assign(r, patch);
     onUpdate(results);
   };
-  const corsInit: RequestInit = { mode: 'cors', credentials: 'omit' };
+  const corsInit: RequestInit = { mode: 'cors', credentials: 'same-origin' };
 
   // 1. <video> baseline
   set('video-direct', { status: 'running' });
@@ -274,7 +274,7 @@ export async function runExperiments(ctx: DiagContext, onUpdate: (results: Exper
     if (!f.proxyUrl) {
       set('tiktok-proxy', { status: 'fail', summary: 'no proxy URL', details: 'Resolver did not offer a proxy URL for this format.' });
     } else {
-      const r = await testFetch(apiUrl(f.proxyUrl), { mode: 'cors', credentials: 'omit' });
+      const r = await testFetch(apiUrl(f.proxyUrl), { mode: 'cors', credentials: 'same-origin' });
       set('tiktok-proxy', {
         status: r.ok ? 'pass' : 'fail',
         summary: r.ok ? `HTTP ${r.status} via ${apiUrl(f.proxyUrl)}` : r.error || 'failed',
