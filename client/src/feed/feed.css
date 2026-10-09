@@ -557,7 +557,8 @@ button {
   -webkit-overflow-scrolling: touch;
   padding: 16px;
   padding-top: calc(16px + var(--safe-t));
-  padding-bottom: calc(16px + var(--safe-b));
+  /* --kb = height of an on-screen keyboard (set from visualViewport), so the card can scroll above it */
+  padding-bottom: calc(16px + var(--safe-b) + var(--kb, 0px));
 }
 .session-inner {
   margin: auto 0;
@@ -572,6 +573,15 @@ button {
   gap: 14px;
   user-select: text;
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
+}
+/* Code step: pinned to the top (keyboard below cannot cover the code box), nothing else to press */
+.session-inner.locked {
+  margin: 0 0 auto;
+}
+.session-inner.locked .session-qr img.page-shot {
+  max-width: 300px;
+  opacity: 0.8;
+  pointer-events: none;
 }
 .session-text {
   font-size: 14px;
@@ -727,13 +737,50 @@ button {
   max-width: 420px;
 }
 .session-code input {
-  font-size: 22px;
-  letter-spacing: 0.25em;
+  font-size: 26px;
+  letter-spacing: 0.3em;
   text-align: center;
+  padding: 10px 12px;
 }
 .session-code .btn.primary {
-  font-size: 15px;
-  padding: 8px 16px;
+  font-size: 17px;
+  padding: 10px 22px;
+}
+.session-code-result {
+  font-size: 14px;
+  line-height: 1.4;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.06);
+}
+.session-code-result.ok {
+  color: #7CFFB2;
+  background: rgba(124, 255, 178, 0.1);
+}
+.session-code-result.err {
+  color: var(--err);
+  background: rgba(255, 80, 80, 0.12);
+}
+.session-code-result.wait::before {
+  content: '';
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  margin: 0 8px -1px 0;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  animation: spin 0.8s linear infinite;
+}
+.session-code-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.session-code-meta {
+  font-size: 12px;
+  color: var(--muted);
 }
 .session-input input {
   flex: 1 1 auto;

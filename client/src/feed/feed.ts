@@ -56,9 +56,12 @@ const el = {
   sessionQr: $('sessionQr'),
   sessionQrImg: $<HTMLImageElement>('sessionQrImg'),
   sessionQrHint: $('sessionQrHint'),
-  sessionCode: $('sessionCode'),
+  sessionCode: $<HTMLFormElement>('sessionCode'),
   sessionCodeText: $<HTMLInputElement>('sessionCodeText'),
   sessionCodeSend: $<HTMLButtonElement>('sessionCodeSend'),
+  sessionCodeResult: $('sessionCodeResult'),
+  sessionCodeMeta: $('sessionCodeMeta'),
+  sessionCodeResend: $<HTMLButtonElement>('sessionCodeResend'),
   sessionInput: $('sessionInput'),
   sessionManualToggle: $<HTMLButtonElement>('sessionManualToggle'),
   sessionInputText: $<HTMLInputElement>('sessionInputText'),
@@ -233,12 +236,12 @@ el.sessionRefresh.addEventListener('click', () => pressed(el.sessionRefresh, () 
 el.sessionLogin.addEventListener('click', () => pressed(el.sessionLogin, () => startLogin('qr'), { label: 'Starting' }));
 el.sessionLoginWindow.addEventListener('click', () => pressed(el.sessionLoginWindow, () => startLogin('window'), { label: 'Opening' }));
 el.sessionLogout.addEventListener('click', () => pressed(el.sessionLogout, () => signOut(), { label: 'Signing out' }));
-el.sessionCancel.addEventListener('click', () => pressed(el.sessionCancel, () => signOut(true), { label: 'Cancelling' }));
+el.sessionCancel.addEventListener('click', () => pressed(el.sessionCancel, () => cancelLogin(), { label: 'Cancelling' }));
 el.sessionRestart.addEventListener('click', () =>
   pressed(
     el.sessionRestart,
     async () => {
-      await signOut(true);
+      await cancelLogin(true);
       await startLogin('qr');
     },
     { label: 'Restarting' },
@@ -281,29 +284,78 @@ el.sessionInputText.addEventListener('keydown', (e) => {
   }
 });
 el.sessionInputEnter.addEventListener('click', () => pressed(el.sessionInputEnter, () => sendLiveInput({ type: 'key', key: 'Enter' }), { label: 'Pressing' }));
+/** A code was sent from this page and the server has not answered with a newer result yet */
+let codePending = false;
+/** `verifyResult.at` the server reported before the last code was sent (anything newer is its answer) */
+let resultSeenAt = 0;
 function sendVerifyCode(): void {
-  const code = el.sessionCodeText.value.replace(/\s+/g, '');
-  if (!code) {
+  const code = el.sessionCodeText.value.replace(/\D+/g, '');
+  el.sessionCodeText.value = code;
+  if (code.length < 4) {
+    showCodeResult('err', code ? 'The code is too short – it has 6 digits.' : 'Type the code from the e-mail first.');
     el.sessionCodeText.focus();
     return;
   }
+  resultSeenAt = state.session?.verifyResult?.at || 0;
+  codePending = true;
+  showCodeResult('wait', 'Checking the code with TikTok…');
   pressed(
     el.sessionCodeSend,
     async () => {
+      el.sessionCodeText.blur(); // closes the on-screen keyboard so the answer is visible
       await sendLiveInput({ type: 'code', code });
-      el.sessionCodeText.value = '';
-      toast('Code handed to TikTok – finishing the sign-in…');
     },
     { label: 'Verifying' },
   );
 }
-el.sessionCodeSend.addEventListener('click', () => sendVerifyCode());
+// Submit = the Verify button, Enter/Go on any keyboard (the form handles both); keydown is the backstop
+// for keyboards that send Enter without submitting.
+el.sessionCode.addEventListener('submit', (e) => {
+  e.preventDefault();
+  sendVerifyCode();
+});
 el.sessionCodeText.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
     e.preventDefault();
     sendVerifyCode();
   }
 });
+el.sessionCodeText.addEventListener('input', () => {
+  const digits = el.sessionCodeText.value.replace(/\D+/g, '');
+  if (digits !== el.sessionCodeText.value) el.sessionCodeText.value = digits;
+  if (el.sessionCodeResult.classList.contains('err')) el.sessionCodeResult.classList.add('hidden');
+});
+el.sessionCodeResend.addEventListener('click', () =>
+  pressed(
+    el.sessionCodeResend,
+    async () => {
+      await sendLiveInput({ type: 'resend' });
+      el.sessionCodeText.value = '';
+      showCodeResult('', 'A new code was requested – use the newest e-mail (older codes stop working).');
+      el.sessionCodeText.focus();
+    },
+    { label: 'Sending' },
+  ),
+);
+function showCodeResult(kind: '' | 'ok' | 'err' | 'wait', text: string): void {
+  el.sessionCodeResult.className = 'session-code-result' + (kind ? ' ' + kind : '');
+  el.sessionCodeResult.textContent = text;
+}
+// On-screen keyboards (Tesla, phones) cover the lower part of the page. Keep the code box above them:
+// pad the panel by the keyboard height (visualViewport shrinks) and scroll the box into view on focus.
+function keepCodeBoxVisible(): void {
+  const vv = window.visualViewport;
+  const kb = vv ? Math.max(0, window.innerHeight - vv.height - vv.offsetTop) : 0;
+  el.session.style.setProperty('--kb', `${Math.round(kb)}px`);
+  if (document.activeElement === el.sessionCodeText && !el.sessionCode.classList.contains('hidden')) el.sessionCode.scrollIntoView({ block: 'start', behavior: 'smooth' });
+}
+el.sessionCodeText.addEventListener('focus', () => {
+  el.session.scrollTo({ top: 0 });
+  window.setTimeout(keepCodeBoxVisible, 150);
+  window.setTimeout(keepCodeBoxVisible, 600);
+});
+window.visualViewport?.addEventListener('resize', keepCodeBoxVisible);
+window.visualViewport?.addEventListener('scroll', keepCodeBoxVisible);
 el.sessionInputBack.addEventListener('click', () => pressed(el.sessionInputBack, () => sendLiveInput({ type: 'key', key: 'Backspace' }), { label: 'Deleting' }));
 
 /** Pointer position in page pixels (the picture is the server's viewport, scaled to fit). */
@@ -376,6 +428,9 @@ function renderSession(): void {
   } else if (s.state === 'logged_in') {
     lines.push(`<b>Signed in as @${esc(s.username || '?')}</b>${s.nickname && s.nickname !== s.username ? ` (${esc(s.nickname)})` : ''}`);
     lines.push('The For You feed comes from this account. Sign out closes the browser session and deletes the saved profile on the server.');
+  } else if (s.state === 'login_pending' && s.loginMode === 'qr' && s.qrState === 'verify' && s.verifyStep === 'code') {
+    lines.push('<b>Almost there – enter the code TikTok e-mailed you.</b>');
+    lines.push(esc(s.message || ''));
   } else if (s.state === 'login_pending' && s.loginMode === 'qr') {
     lines.push('<b>Scan to sign in.</b>');
     lines.push('In the TikTok app: Profile → ☰ menu → My QR code → scan icon (or point the in-app camera at this code), then confirm. The code refreshes by itself; this page updates automatically.');
@@ -398,33 +453,67 @@ function renderSession(): void {
     const img = (live ? s.pageShot : s.qr || s.pageShot) || '';
     if (img && el.sessionQrImg.src !== img) el.sessionQrImg.src = img;
     el.sessionQrImg.classList.toggle('page-shot', live || (!s.qr && Boolean(s.pageShot)));
-    el.sessionQrImg.classList.toggle('live', live);
-    const codeStep = live && s.verifyStep === 'code';
-    // Manual controls: shown when the server cannot drive the dialog itself (step 'choose' for a while),
-    // otherwise behind a "Having trouble?" toggle so the code box stays the one obvious thing to do.
-    el.sessionManualToggle.classList.toggle('hidden', !live);
+    const codeStep = s.qrState === 'verify' && s.verifyStep === 'code';
+    // Code step = locked: the picture is not clickable, manual controls are gone; only the code box
+    // (and Cancel) remain, so nothing can be pressed by accident while the e-mail is fetched.
+    el.sessionQrImg.classList.toggle('live', live && !codeStep);
+    el.sessionManualToggle.classList.toggle('hidden', !live || codeStep);
     el.sessionManualToggle.textContent = manualOpen ? 'Hide manual controls' : 'Having trouble? Show manual controls';
-    el.sessionInput.classList.toggle('hidden', !(live && manualOpen));
-    if (!live) manualOpen = false;
+    el.sessionInput.classList.toggle('hidden', !(live && manualOpen && !codeStep));
+    if (!live || codeStep) manualOpen = false;
     const codeWasHidden = el.sessionCode.classList.contains('hidden');
     el.sessionCode.classList.toggle('hidden', !codeStep);
+    if (codeStep) renderCodeStep(s);
     if (codeStep && codeWasHidden) {
-      toast(`TikTok emailed you a verification code – enter it here`, false, 6000);
-      el.sessionCodeText.focus();
+      toast(`TikTok e-mailed you a verification code – enter it here`, false, 6000);
+      el.session.scrollTo({ top: 0 });
+      if (!s.verifyResult || s.verifyResult.state === 'rejected') el.sessionCodeText.focus();
     }
     if (!img) el.sessionQrImg.removeAttribute('src');
     qrExpiresAt = s.qr && !live ? s.qrExpiresAt || 0 : 0;
     renderQrHint(s);
   }
   const idle = s.supported && s.state !== 'logged_in' && s.state !== 'login_pending';
+  const locked = showQr && s.qrState === 'verify' && s.verifyStep === 'code';
   el.sessionLogin.classList.toggle('hidden', !idle);
   el.sessionLoginWindow.classList.toggle('hidden', !idle);
   // "Sign out" only when there is a session to end; while a sign-in is pending the button is "Cancel".
+  // In the code step only Cancel remains (Cancel forgets the attempt; "Sign in" then starts from zero).
   el.sessionLogout.classList.toggle('hidden', s.state !== 'logged_in');
   el.sessionCancel.classList.toggle('hidden', s.state !== 'login_pending');
-  el.sessionRestart.classList.toggle('hidden', !(s.state === 'login_pending' && s.loginMode === 'qr'));
+  el.sessionRestart.classList.toggle('hidden', !(s.state === 'login_pending' && s.loginMode === 'qr') || locked);
+  el.sessionRefresh.classList.toggle('hidden', locked);
+  el.sessionClose.classList.toggle('hidden', locked);
+  el.session.querySelector('.session-inner')?.classList.toggle('locked', locked);
+  // Remember a pending sign-in across reloads: the panel reopens where the process stands.
+  try {
+    if (s.state === 'login_pending') localStorage.setItem(SIGNIN_KEY, '1');
+    else localStorage.removeItem(SIGNIN_KEY);
+  } catch {
+    /* storage unavailable */
+  }
   el.navProfileLabel.textContent = s.state === 'logged_in' ? `@${(s.username || 'me').slice(0, 12)}` : s.state === 'login_pending' ? 'Signing in…' : 'Profile';
   el.navProfile.classList.toggle('active', s.state === 'logged_in');
+}
+const SIGNIN_KEY = 'streamanywhere.feed.signin';
+/** The code step: TikTok's answer to the last code, and how long the server keeps waiting. */
+function renderCodeStep(s: SessionStatus): void {
+  const r = s.verifyResult;
+  if (r && r.at !== resultSeenAt) {
+    codePending = false;
+    if (r.state === 'checking') showCodeResult('wait', 'Checking the code with TikTok…');
+    else if (r.state === 'accepted') showCodeResult('ok', 'Code accepted ✓ – finishing the sign-in…');
+    else if (r.state === 'rejected') {
+      showCodeResult('err', `TikTok did not accept the code${r.text ? ': ' + r.text : ''}. Check the newest e-mail and try again, or press "Resend code".`);
+      if (document.activeElement !== el.sessionCodeText && !el.sessionCodeSend.classList.contains('busy')) el.sessionCodeText.select();
+    } else showCodeResult('err', 'TikTok gave no answer to that code. Try again, or press "Resend code" for a fresh one.');
+  } else if (!codePending) {
+    el.sessionCodeResult.classList.add('hidden');
+  }
+  const sentMin = s.codeSentAt ? Math.round((Date.now() - s.codeSentAt) / 60_000) : 0;
+  const until = s.verifyUntil ? new Date(s.verifyUntil) : undefined;
+  el.sessionCodeMeta.textContent = `${s.codeSentAt ? (sentMin < 1 ? 'Code sent just now' : `Code sent ${sentMin} min ago`) : 'Waiting for the code'}${until ? ` · this page waits until ${until.toLocaleDateString(undefined, { weekday: 'short' })} ${until.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}` : ''}`;
+  el.sessionCodeResend.disabled = el.sessionCodeResend.classList.contains('busy');
 }
 let qrExpiresAt = 0;
 function renderQrHint(s: SessionStatus): void {
@@ -432,7 +521,7 @@ function renderQrHint(s: SessionStatus): void {
   el.sessionQrHint.textContent =
     s.qrState === 'verify'
       ? s.verifyStep === 'code'
-        ? 'Enter the code from your email above. The picture is TikTok\'s page on the server, live.'
+        ? 'The picture is TikTok\'s page on the server (live). Enter the e-mailed code above and press Verify.'
         : s.verifyStep === 'sending'
           ? 'Email verification chosen – waiting for TikTok\'s code field…'
           : 'TikTok asks for a verification – this is the server\'s page, live. Tap or click on it; type below.'
@@ -500,6 +589,30 @@ async function startLogin(mode: LoginMode): Promise<void> {
     renderSession();
   } finally {
     el.sessionLogin.disabled = el.sessionLoginWindow.disabled = false;
+  }
+}
+
+/** Cancels a pending sign-in on the server and forgets it; the next "Sign in" starts from zero. */
+async function cancelLogin(quiet = false): Promise<void> {
+  el.sessionCancel.disabled = true;
+  if (!quiet) el.sessionText.innerHTML = '<b>Cancelling…</b>';
+  try {
+    localStorage.removeItem(SIGNIN_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+  codePending = false;
+  resultSeenAt = 0;
+  el.sessionCodeText.value = '';
+  try {
+    state.session = await api.sessionCancel();
+    renderSession();
+    if (!quiet) toast('Sign-in cancelled – "Sign in with QR code" starts over');
+  } catch (e) {
+    toast(`Cancel failed: ${errMsg(e)}`, true);
+    renderSession();
+  } finally {
+    el.sessionCancel.disabled = false;
   }
 }
 
@@ -1036,7 +1149,7 @@ document.addEventListener('keydown', (e) => {
       break;
     case 'Escape':
       if (el.app.classList.contains('fullwindow')) toggleBars();
-      if (!el.session.classList.contains('hidden')) closeSessionPanel();
+      if (!el.session.classList.contains('hidden') && el.sessionClose.classList.contains('hidden') === false) closeSessionPanel();
       break;
     case 'd':
     case 'D':
@@ -1210,7 +1323,25 @@ void (async () => {
     renderSourceUi();
   }
   const feedReady = loadMore();
+  let resuming = false;
+  try {
+    resuming = localStorage.getItem(SIGNIN_KEY) === '1';
+  } catch {
+    /* storage unavailable */
+  }
+  if (resuming) {
+    // A sign-in was pending when the page was last open: show the panel right away, in the right step.
+    el.session.classList.remove('hidden');
+    el.sessionText.innerHTML = '<b>Resuming your TikTok sign-in…</b>\nChecking where it stands on the server.';
+  }
   const s = await refreshSession();
+  if (s?.state === 'login_pending') {
+    el.session.classList.remove('hidden');
+    pollSession();
+    if (s.qrState === 'verify' && s.verifyStep === 'code') toast('Your sign-in is waiting for the e-mailed code', false, 5000);
+  } else if (resuming && s && !s.probing && s.state !== 'logged_in') {
+    toast('The sign-in is no longer pending on the server – start it again from Profile', false, 6000);
+  }
   if (s?.probing) {
     toast('Checking the saved TikTok sign-in on the server…');
     const t0 = Date.now();

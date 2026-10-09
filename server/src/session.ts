@@ -43,6 +43,11 @@ type Handle = import('puppeteer-core').ElementHandle<any>;
  */
 const PROFILE_DIR = process.env.TIKTOK_PROFILE_DIR || path.join(os.homedir(), '.streamanywhere', 'tiktok-profile');
 const LOGIN_TIMEOUT_MS = 10 * 60 * 1000;
+/** Once TikTok e-mailed a verification code, the attempt (page, dialog, token, ticket) is held this long:
+ *  the code stays valid for hours, and the user may come back to enter it much later. */
+const VERIFY_HOLD_MS = 48 * 60 * 60 * 1000;
+/** A verification ticket (code accepted) is re-used for a fresh QR token for this long. */
+const TICKET_KEEP_MS = VERIFY_HOLD_MS;
 const QR_RELOAD_MS = 110 * 1000;
 const FEED_URL = 'https://www.tiktok.com/foryou';
 const QR_URL = 'https://www.tiktok.com/login/qrcode';
@@ -109,6 +114,14 @@ interface SessionInternal {
   qrVerifySentAt?: number;
   /** How many times the server tried to activate the Email row of the current dialog */
   qrVerifyTries?: number;
+  /** When the server pressed "Send code" (once per verification; never again by itself) */
+  qrCodeSentAt?: number;
+  /** When "Resend" was last pressed for the user */
+  qrResendAt?: number;
+  /** Outcome of the last code the user entered */
+  qrVerifyResult?: SessionStatus['verifyResult'];
+  /** Dialog text just before the code was submitted (new sentences after it = TikTok's answer) */
+  qrTextBeforeCode?: string;
   /** Verification ticket TikTok's SDK sends (x-tt-passport-ticket) once the code was accepted; re-used
    *  for a fresh QR token when the first one expired while the user fetched the e-mail */
   qrTicket?: string;
@@ -228,7 +241,8 @@ async function preparePage(page: Page, browser: Browser): Promise<void> {
       if (ticket && ticket !== s.qrTicket) {
         s.qrTicket = ticket;
         s.qrTicketAt = Date.now();
-        feedLog?.('verification ticket received from TikTok (kept for 15 min in case the QR token expired)');
+        if (s.qrVerifyResult?.state === 'checking') s.qrVerifyResult = { state: 'accepted', at: Date.now() };
+        feedLog?.('verification ticket received from TikTok: the code was accepted (ticket kept for 48 h in case the QR token expired)');
       }
       // While the user fetches the e-mail code, TikTok's page would rotate the QR on its ~1 min timer
       // and drop the verified token with it. Hold the rotation: the token is renewed by us if needed.
@@ -284,15 +298,18 @@ export function sessionStatus(): SessionStatus {
       if (s.qrState === 'verify') {
         base.verifyStep = s.qrVerifyStep || 'choose';
         base.verifyText = s.qrVerifyText;
-        if (Date.now() - (s.qrVerifyAt || 0) > 90_000 && s.qrVerifyStep === 'code') base.notice = 'No e-mail yet? Check the spam folder, tap "Resend" in the picture, or start over with a fresh code.';
+        base.codeSentAt = s.qrCodeSentAt;
+        base.verifyUntil = (s.qrCodeSentAt || s.qrVerifyAt || Date.now()) + VERIFY_HOLD_MS;
+        base.verifyResult = s.qrVerifyResult;
+        if (Date.now() - (s.qrCodeSentAt || s.qrVerifyAt || 0) > 90_000 && s.qrVerifyStep === 'code' && !s.qrVerifyResult) base.notice = 'No e-mail yet? Check the spam folder. The code stays valid for hours and this page waits for it; "Resend code" asks TikTok for a new one.';
       }
       if (s.qrNotice && Date.now() - (s.qrNoticeAt || 0) < 4 * 60_000) base.notice = s.qrNotice;
-      const limited = s.qrRateLimitedAt && Date.now() - s.qrRateLimitedAt < 30_000;
+      const limited = s.qrRateLimitedAt && Date.now() - s.qrRateLimitedAt < 30_000 && s.qrState !== 'verify';
       base.message = limited
         ? 'TikTok is temporarily refusing sign-in status checks from this server ("maximum number of attempts"). Scans are not noticed while this lasts; wait 10–15 minutes, then try again.'
         : s.qrState === 'verify'
           ? s.qrVerifyStep === 'code'
-            ? `TikTok sent a verification code${verifyTarget() ? ' to ' + verifyTarget() : ''}. Enter it in the code box below; the server submits it on TikTok's page.`
+            ? `TikTok sent a verification code${verifyTarget() ? ' to ' + verifyTarget() : ''}. Enter it below and press Verify; the server submits it on TikTok's page.`
             : s.qrVerifyStep === 'sending'
               ? 'TikTok wants to verify it is you. The server chose "Email" – waiting for the code field…'
               : 'TikTok wants an extra verification before it signs this browser in. The server picks "Email" by itself; otherwise tap or click on the live picture below.'
@@ -395,6 +412,10 @@ async function startQrLogin(log: (m: string) => void): Promise<SessionStatus> {
   s.qrNotice = undefined;
   s.qrNoticeAt = undefined;
   s.qrTicketTriedToken = undefined;
+  s.qrCodeSentAt = undefined;
+  s.qrResendAt = undefined;
+  s.qrVerifyResult = undefined;
+  s.qrTextBeforeCode = undefined;
   s.qrState = 'new';
   s.loginStartedAt = Date.now();
   const browser = await headlessBrowser();
@@ -565,7 +586,7 @@ export async function pollQrToken(page: Page): Promise<{ status?: string; redire
  * usable ticket (then the normal verification starts). The page's response hook handles the answer.
  */
 function retryWithTicket(page: Page, log: (m: string) => void): boolean {
-  if (!s.qrTicket || !s.qrToken || Date.now() - (s.qrTicketAt || 0) > 15 * 60_000 || s.qrTicketTriedToken === s.qrToken) return false;
+  if (!s.qrTicket || !s.qrToken || Date.now() - (s.qrTicketAt || 0) > TICKET_KEEP_MS || s.qrTicketTriedToken === s.qrToken) return false;
   const base = s.qrCheckUrl || (s.qrGetUrl ? s.qrGetUrl.replace('/get_qrcode/', '/check_qrconnect/') : undefined);
   if (!base) return false;
   s.qrTicketTriedToken = s.qrToken;
@@ -594,11 +615,17 @@ async function restartAfterVerify(page: Page, log: (m: string) => void, notice: 
     s.qrVerifyText = undefined;
     s.qrVerifyAutoAt = undefined;
     s.qrVerifySentAt = undefined;
+    s.qrCodeSentAt = undefined;
+    s.qrResendAt = undefined;
+    s.qrVerifyResult = undefined;
+    s.qrTextBeforeCode = undefined;
     s.qrState = 'expired';
     s.qr = undefined;
     s.qrExpireAt = undefined;
     s.scannedAt = undefined;
     s.qrRedirect = undefined;
+    // The attempt starts afresh: the 10-minute scan window counts from now again.
+    s.loginStartedAt = Date.now();
     await page.goto(QR_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => undefined);
   } finally {
     restarting = false;
@@ -742,10 +769,8 @@ async function activate(page: Page, el: Handle, attempt: number, log: (m: string
  */
 async function driveVerifyDialog(page: Page, log: (m: string) => void): Promise<void> {
   if (Date.now() - (s.qrTicketRetryAt || 0) < 8000) return; // a saved ticket is being tried first
-  if (Date.now() - (s.qrVerifyAt || 0) > 5 * 60_000) {
-    await restartAfterVerify(page, log, 'No code was entered within 5 minutes, so the attempt was started over with a fresh QR code.');
-    return;
-  }
+  // No "no code entered" timeout here: the e-mailed code stays valid for hours, and the page, the dialog
+  // and the token are held (VERIFY_HOLD_MS) until the user enters it, cancels, or starts over.
   const v = await scanVerifyDialog(page);
   if (!v) return;
   if (v.text && v.text !== s.qrVerifyText) {
@@ -754,17 +779,23 @@ async function driveVerifyDialog(page: Page, log: (m: string) => void): Promise<
   }
   const now = Date.now();
   if (v.input) {
-    // A code field is on screen. Press "Send code" once if TikTok shows such a button.
+    // A code field is on screen. Press "Send code" ONCE if TikTok shows such a button - never again by
+    // itself: every press makes TikTok issue a new code and the one in the user's inbox goes stale.
     if (s.qrVerifyStep !== 'code') log('verification: code field is up');
     s.qrVerifyStep = 'code';
     s.qrVerifyTries = 0;
-    const send = await findInPage(page, '^(send|get) (the )?code$|^send$', 'resend');
-    if (send && now - (s.qrVerifySentAt || 0) > 60_000) {
-      s.qrVerifySentAt = now;
-      await activate(page, send.el, 0, log, 'pressing "Send code"');
+    if (!s.qrCodeSentAt) {
+      const send = await findInPage(page, '^(send|get) (the )?code$|^send$', 'resend');
+      if (send) {
+        s.qrCodeSentAt = now;
+        s.qrVerifySentAt = now;
+        await activate(page, send.el, 0, log, 'pressing "Send code"');
+      } else s.qrCodeSentAt = s.qrVerifySentAt || now; // TikTok sent the code when the method was chosen
     }
+    if (s.qrVerifyResult?.state === 'checking') checkCodeOutcome(v.text, log);
     return;
   }
+  if (s.qrVerifyResult?.state === 'checking') checkCodeOutcome(v.text, log);
   if (now - (s.qrVerifyAutoAt || 0) < 5000) return; // give the dialog time to change after an activation
   // The Email row (label + masked address) first, the bare word as fallback, phone/SMS after that.
   const email = (await findInPage(page, '\\bemail\\b.*@', 'password')) || (await findInPage(page, '\\bemail\\b|\\be-mail\\b', 'password'));
@@ -786,18 +817,57 @@ async function driveVerifyDialog(page: Page, log: (m: string) => void): Promise<
   if (s.qrVerifyStep !== 'sending' || now - (s.qrVerifyAutoAt || 0) > 20_000) s.qrVerifyStep = s.qrVerifyStep === 'sending' ? 'sending' : 'choose';
 }
 
-/** Puts a verification code into TikTok's code field and submits it. */
-async function enterVerifyCode(page: Page, code: string): Promise<void> {
+const ENABLED_FN = Function('e', 'return !e.disabled && e.getAttribute("aria-disabled") !== "true";') as ElFn;
+
+/** Puts a verification code into TikTok's code field and submits it (Verify button, else Enter). */
+async function enterVerifyCode(page: Page, code: string, log: (m: string) => void): Promise<void> {
+  s.qrTextBeforeCode = (await scanVerifyDialog(page))?.text || s.qrVerifyText || '';
+  s.qrVerifyResult = { state: 'checking', at: Date.now() };
   const input = await findInPage(page, '', '', 'input');
   if (input) {
     await input.el.click({ clickCount: 3, delay: 20 });
     await page.keyboard.press('Backspace');
     await input.el.type(code, { delay: 60 });
-  } else await page.keyboard.type(code, { delay: 60 });
-  await new Promise((r) => setTimeout(r, 400));
-  const submit = await findInPage(page, '^(verify|continue|next|submit|confirm|done|log in|login)\\b');
-  if (submit) await submit.el.click({ delay: 30 }).catch(() => undefined);
-  else await page.keyboard.press('Enter').catch(() => undefined);
+  } else {
+    log('verification: no code field found on the page - typing blind');
+    await page.keyboard.type(code, { delay: 60 });
+  }
+  // TikTok enables its button once the code is complete; give it a moment, then press it (or Enter).
+  let submit: { el: Handle } | undefined;
+  for (let i = 0; i < 8 && !submit; i++) {
+    await new Promise((r) => setTimeout(r, 300));
+    const b = await findInPage(page, '^(verify|continue|next|submit|confirm|done|log in|login)\\b', 'resend');
+    if (b && (await b.el.evaluate(ENABLED_FN).catch(() => true))) submit = b;
+  }
+  if (submit) {
+    log('verification: pressing ' + (await describe(submit.el)));
+    await submit.el.click({ delay: 30 }).catch(() => undefined);
+  } else {
+    log('verification: no enabled Verify button - pressing Enter');
+    await page.keyboard.press('Enter').catch(() => undefined);
+  }
+}
+
+/** After a code was submitted: did TikTok accept it (ticket seen) or complain in the dialog? */
+function checkCodeOutcome(text: string, log: (m: string) => void): void {
+  const r = s.qrVerifyResult;
+  if (!r || r.state !== 'checking') return;
+  if (s.qrTicket && (s.qrTicketAt || 0) >= r.at) {
+    s.qrVerifyResult = { state: 'accepted', at: Date.now() };
+    return;
+  }
+  const before = s.qrTextBeforeCode || '';
+  const fresh = text.split(/(?<=[.!?])\s+|\s*\|\s*/).filter((sn) => sn.length > 3 && !before.includes(sn));
+  const bad = fresh.find((sn) => /incorrect|invalid|wrong|not (correct|valid|match)|doesn.t match|expired|try again|too many|limit/i.test(sn));
+  if (bad) {
+    s.qrVerifyResult = { state: 'rejected', text: bad.slice(0, 160), at: Date.now() };
+    log('verification: TikTok rejected the code: ' + bad.slice(0, 160));
+    return;
+  }
+  if (Date.now() - r.at > 25_000) {
+    s.qrVerifyResult = { state: 'unknown', at: Date.now() };
+    log('verification: no answer seen 25 s after the code was submitted');
+  }
 }
 
 let inputChain: Promise<void> = Promise.resolve();
@@ -841,8 +911,20 @@ export async function sessionInput(req: SessionInputRequest): Promise<SessionSta
         const code = String(req.code || '').replace(/\s+/g, '').slice(0, 12);
         if (code) {
           feedLog?.(`verification: entering the ${code.length}-digit code`);
-          await enterVerifyCode(page, code);
+          await enterVerifyCode(page, code, (m) => feedLog?.(m));
         }
+        break;
+      }
+      case 'resend': {
+        // The user asks for the e-mail again: press TikTok's "Resend"/"Send code" (once a minute).
+        if (Date.now() - (s.qrResendAt || 0) < 60_000) break;
+        const btn = (await findInPage(page, '^resend( code)?$|^send( the)? code( again)?$|^send$')) || (await findInPage(page, 'resend|send again'));
+        if (btn) {
+          s.qrResendAt = Date.now();
+          s.qrCodeSentAt = Date.now();
+          s.qrVerifyResult = undefined;
+          await activate(page, btn.el, 0, (m) => feedLog?.(m), 'pressing "Resend"');
+        } else feedLog?.('verification: no Resend button on the page');
         break;
       }
       case 'shot':
@@ -864,7 +946,11 @@ async function qrLoop(page: Page, browser: Browser, log: (m: string) => void): P
   let misses = 0;
   let confirmingNavigated = false;
   try {
-    while (s.qrPage === page && Date.now() - (s.loginStartedAt || 0) < LOGIN_TIMEOUT_MS) {
+    while (s.qrPage === page) {
+      // 10 minutes to scan; once TikTok asks for a verification the attempt is held for VERIFY_HOLD_MS.
+      const inVerify = (s.qrState as string) === 'verify';
+      const deadline = inVerify ? (s.qrCodeSentAt || s.qrVerifyAt || Date.now()) + VERIFY_HOLD_MS : (s.loginStartedAt || 0) + LOGIN_TIMEOUT_MS;
+      if (Date.now() > deadline) break;
       if (!browser.isConnected() || page.isClosed()) break;
       // --- TikTok's page drives the cycle (one poll stream = no extra rate-limit pressure). We only
       //     react: when its code expired, click the code area (TikTok's refresh) and wait for the new one.
@@ -980,7 +1066,7 @@ async function qrLoop(page: Page, browser: Browser, log: (m: string) => void): P
     }
     if (s.qrPage === page && s.state === 'login_pending') {
       s.state = 'none';
-      s.error = 'QR sign-in timed out after 10 minutes.';
+      s.error = (s.qrState as string) === 'verify' ? 'The verification was not completed within 48 hours; sign in again.' : 'QR sign-in timed out after 10 minutes.';
       s.qr = undefined;
       s.qrPage = undefined;
       await page.close().catch(() => undefined);
@@ -1185,6 +1271,31 @@ export async function fetchExploreViaBrowser(category: number, count: number, lo
   const parsed = parseExploreBody(text, { cookieHeader: cookies.map((c) => `${c.name}=${c.value}`).join('; '), referer: 'https://www.tiktok.com/explore' }, warnings);
   log(`explore via browser, category ${category}: ${parsed.items.length}/${parsed.raw} items`);
   return { ...parsed, warnings };
+}
+
+/**
+ * Cancels a pending sign-in and forgets everything about it (token, ticket, dialog, notices), so the
+ * next "Sign in" starts the whole process from zero. Keeps the headless browser (slow to relaunch).
+ */
+export async function cancelLogin(): Promise<SessionStatus> {
+  const lb = s.loginBrowser;
+  s.loginBrowser = undefined;
+  if (lb) await lb.close().catch(() => undefined);
+  const page = s.qrPage;
+  s.qrPage = undefined;
+  if (page && !page.isClosed()) await page.close().catch(() => undefined);
+  if (s.state === 'login_pending') s.state = 'none';
+  s.error = undefined;
+  s.loginMode = undefined;
+  s.qr = s.qrState = s.qrPageHint = s.qrPageShot = s.qrToken = s.qrGetUrl = s.qrCheckUrl = s.qrRedirect = undefined;
+  s.qrExpireAt = s.scannedAt = s.qrVerifyAt = s.qrVerifyAutoAt = s.qrVerifySentAt = s.qrVerifyTries = undefined;
+  s.qrVerifyConf = s.qrVerifyStep = s.qrVerifyText = s.qrNotice = s.qrTextBeforeCode = undefined;
+  s.qrNoticeAt = s.qrCodeSentAt = s.qrResendAt = s.qrTicketAt = s.qrTicketRetryAt = undefined;
+  s.qrTicket = s.qrTicketTriedToken = undefined;
+  s.qrVerifyResult = undefined;
+  feedLog?.('sign-in cancelled by the user');
+  probed = true;
+  return sessionStatus();
 }
 
 export async function logout(): Promise<SessionStatus> {

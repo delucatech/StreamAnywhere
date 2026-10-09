@@ -224,6 +224,8 @@ export type SessionInputRequest =
   | { type: 'key'; key: 'Enter' | 'Backspace' | 'Tab' | 'Escape' }
   /** Enter a verification code: the server puts it into TikTok's code field and submits */
   | { type: 'code'; code: string }
+  /** Ask TikTok to e-mail the verification code again (the server presses "Resend"; once a minute) */
+  | { type: 'resend' }
   | { type: 'shot' };
 
 /** State of the server-side TikTok browser session (Node server only). */
@@ -260,6 +262,13 @@ export interface SessionStatus {
   verifyStep?: 'choose' | 'sending' | 'code';
   /** Text of TikTok's verification dialog (what it asks for, masked address the code went to) */
   verifyText?: string;
+  /** ms epoch when the server pressed "Send code" (the e-mailed code stays valid for hours; the attempt is
+   *  held for 48 h, so the user can come back later - even after a page refresh - and enter it) */
+  codeSentAt?: number;
+  /** ms epoch until which the server keeps this verification (and TikTok's dialog) alive */
+  verifyUntil?: number;
+  /** Outcome of the last code the user entered ('checking' until TikTok answers) */
+  verifyResult?: { state: 'checking' | 'accepted' | 'rejected' | 'unknown'; text?: string; at: number };
   /** Something the user should know about the current attempt (e.g. "started over: TikTok's QR session
    *  expired while waiting for the e-mail code; the verification is re-used") */
   notice?: string;

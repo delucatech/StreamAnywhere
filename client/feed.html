@@ -56,15 +56,22 @@
           <div id="sessionText" class="session-text"></div>
           <div id="sessionQr" class="session-qr hidden">
             <div id="sessionNotice" class="session-notice hidden"></div>
-            <img id="sessionQrImg" alt="TikTok login QR code" draggable="false" />
-            <div id="sessionQrHint" class="session-qr-hint"></div>
-            <div id="sessionCode" class="session-code hidden">
+            <!-- Code step: this form is the only thing to do (besides Cancel). It sits at the top so an
+                 on-screen keyboard (Tesla) never covers the field or the Verify button. -->
+            <form id="sessionCode" class="session-code hidden" autocomplete="off" novalidate>
               <label class="session-label" for="sessionCodeText">Enter the code TikTok e-mailed you</label>
               <div class="session-input">
-                <input id="sessionCodeText" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" />
-                <button id="sessionCodeSend" class="btn primary" type="button">Verify code</button>
+                <input id="sessionCodeText" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="8" enterkeyhint="go" autocomplete="one-time-code" placeholder="6-digit code" aria-label="Verification code" />
+                <button id="sessionCodeSend" class="btn primary" type="submit">Verify</button>
               </div>
-            </div>
+              <div id="sessionCodeResult" class="session-code-result hidden" aria-live="polite"></div>
+              <div class="session-code-foot">
+                <span id="sessionCodeMeta" class="session-code-meta"></span>
+                <button id="sessionCodeResend" class="btn ghost small" type="button" title="Ask TikTok to e-mail a new code (the old one stops working)">Resend code</button>
+              </div>
+            </form>
+            <img id="sessionQrImg" alt="TikTok login QR code" draggable="false" />
+            <div id="sessionQrHint" class="session-qr-hint"></div>
             <button id="sessionManualToggle" class="btn ghost small hidden" type="button">Having trouble? Show manual controls</button>
             <div id="sessionInput" class="session-manual hidden">
               <div class="session-label">Manual controls – act on TikTok's page shown above</div>
