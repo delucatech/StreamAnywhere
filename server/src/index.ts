@@ -4,7 +4,7 @@ import rateLimit from '@fastify/rate-limit';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { EXPLORE_CATEGORIES } from '../../shared/types';
-import type { FeedRequest, FeedResponse, HealthResponse, ProbeRequest, ReportRequest, ResolveRequest, ResolveResponse, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
+import type { ConversationRequest, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ProbeRequest, ProfileRequest, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SendMessageRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
 import { registerAuth } from './auth';
 import { config, findUp } from './config';
 import { registerProxyRoutes } from './proxy';
@@ -15,6 +15,7 @@ import { hostAllowed } from './ssrf';
 import { EXPLORE_DEFAULT_CATEGORY, FeedError, fetchExploreFeed, normalizeExploreOptions, type ExploreResult } from './feed';
 import { cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouStock, logout, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
 import { Reservoir, type ReservoirStats } from './reservoir';
+import { conversation, fetchProfile, followUser, inbox, inboxDebug, searchTikTok, sendMessage, SocialError } from './social';
 
 /** After the browser path rescued an explore request, prefer it for a while (datacenter IPs). */
 let exploreViaBrowserUntil = 0;
@@ -232,6 +233,89 @@ export async function buildServer() {
       req.log.warn({ source, err: err.message }, 'feed request failed');
       const status = err instanceof FeedError ? err.status : 502;
       return reply.code(status).send({ error: err.message, source, elapsedMs: Date.now() - t0 });
+    }
+  });
+
+  // ---- search / profiles / follow / messages (headless work page; see social.ts)
+  const socialLog = (what: string) => (msg: string) => app.log.info({ what }, msg);
+  const socialFail = (reply: import('fastify').FastifyReply, e: unknown, t0: number) => {
+    const err = e as Error;
+    app.log.warn({ err: err.message }, 'social request failed');
+    return reply.code(e instanceof SocialError ? e.status : 502).send({ error: err.message, elapsedMs: Date.now() - t0 });
+  };
+  const handle = (user: unknown): string => {
+    const u = String(user || '')
+      .trim()
+      .replace(/^@/, '');
+    if (!/^[\w.\-]{1,64}$/.test(u)) throw new SocialError('That is not a TikTok handle', 400);
+    return u;
+  };
+  app.post<{ Body: SearchRequest }>('/api/search', resolveLimit, async (req, reply) => {
+    const t0 = Date.now();
+    try {
+      const q = String(req.body?.q || '').trim().slice(0, 100);
+      if (!q) throw new SocialError('Type something to search for', 400);
+      const offset = Math.max(0, Math.min(500, Number(req.body?.offset) || 0));
+      return await searchTikTok(q, offset, socialLog('search'));
+    } catch (e) {
+      return socialFail(reply, e, t0);
+    }
+  });
+  app.post<{ Body: ProfileRequest }>('/api/profile', resolveLimit, async (req, reply) => {
+    const t0 = Date.now();
+    try {
+      const user = handle(req.body?.user);
+      const offset = Math.max(0, Math.min(2000, Number(req.body?.offset) || 0));
+      const count = Math.max(1, Math.min(60, Number(req.body?.count) || 24));
+      return await fetchProfile(user, offset, count, socialLog('profile'));
+    } catch (e) {
+      return socialFail(reply, e, t0);
+    }
+  });
+  app.post<{ Body: FollowRequest }>('/api/follow', resolveLimit, async (req, reply) => {
+    const t0 = Date.now();
+    try {
+      return await followUser(handle(req.body?.user), req.body?.follow !== false, socialLog('follow'));
+    } catch (e) {
+      return socialFail(reply, e, t0);
+    }
+  });
+  app.get('/api/inbox', async (req, reply) => {
+    const t0 = Date.now();
+    try {
+      return await inbox(socialLog('inbox'));
+    } catch (e) {
+      return socialFail(reply, e, t0);
+    }
+  });
+  app.get('/api/inbox/debug', async (req, reply) => {
+    const t0 = Date.now();
+    try {
+      return await inboxDebug(socialLog('inbox'));
+    } catch (e) {
+      return socialFail(reply, e, t0);
+    }
+  });
+  app.post<{ Body: ConversationRequest }>('/api/inbox/open', resolveLimit, async (req, reply) => {
+    const t0 = Date.now();
+    try {
+      const id = String(req.body?.id || '').trim();
+      if (!id) throw new SocialError('Which conversation?', 400);
+      if (id.startsWith('@')) handle(id);
+      return await conversation(id, socialLog('inbox'));
+    } catch (e) {
+      return socialFail(reply, e, t0);
+    }
+  });
+  app.post<{ Body: SendMessageRequest }>('/api/inbox/send', resolveLimit, async (req, reply) => {
+    const t0 = Date.now();
+    try {
+      const id = String(req.body?.id || '').trim();
+      if (!id) throw new SocialError('Which conversation?', 400);
+      if (id.startsWith('@')) handle(id);
+      return await sendMessage(id, String(req.body?.text || ''), socialLog('inbox'));
+    } catch (e) {
+      return socialFail(reply, e, t0);
     }
   });
 

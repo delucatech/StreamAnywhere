@@ -74,7 +74,7 @@ export interface UpstreamSession {
  * `upstream` is what the proxy must send for the cookie-bound playAddr URLs; pass undefined when
  * the upstream session is unknown (then only direct URLs are offered).
  */
-export function itemToFeedItem(item: any, upstream?: UpstreamSession): FeedItem | undefined {
+export function itemToFeedItem(item: any, upstream?: UpstreamSession, opts: { allowUnplayable?: boolean } = {}): FeedItem | undefined {
   const video = item?.video;
   if (!item?.id || !video) return undefined;
   const author = typeof item.author === 'object' && item.author ? item.author : {};
@@ -123,7 +123,9 @@ export function itemToFeedItem(item: any, upstream?: UpstreamSession): FeedItem 
     }
     if (fmt.directUrl || fmt.proxyUrl) formats.push(fmt);
   }
-  if (!formats.length) return undefined;
+  // Guest search answers carry most videos without any play URL (only cover + stats); such an item
+  // is kept when asked, with no formats: the viewer resolves it (POST /api/resolve) when it comes up.
+  if (!formats.length && !opts.allowUnplayable) return undefined;
   formats.sort((a, b) => (a.codec === 'h264' ? -1 : 1) - (b.codec === 'h264' ? -1 : 1) || (b.bitrate || 0) - (a.bitrate || 0));
   const stats = item.stats || {};
   return {

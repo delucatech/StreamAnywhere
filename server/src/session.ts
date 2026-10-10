@@ -1816,27 +1816,54 @@ async function closeSecondaryPages(): Promise<void> {
   s.seenIds = new Set();
 }
 
-export async function fetchExploreViaBrowser(category: number, count: number, log: (m: string) => void): Promise<ExploreResult> {
+/**
+ * The "work page": one headless tab on tiktok.com shared by everything that is not the For You
+ * capture - Explore through the browser, search, profiles, follow, messages (social.ts). One user
+ * at a time (the lock), because those navigate the tab. The tab is closed during a QR sign-in.
+ */
+let workLock: Promise<void> = Promise.resolve();
+export async function withWorkPage<T>(log: (m: string) => void, fn: (page: Page) => Promise<T>): Promise<T> {
   feedLog = feedLog || wrapLog(log);
   if (!sessionSupported().ok) throw new Error(sessionSupported().reason);
-  if (s.qrPage && !s.qrPage.isClosed()) throw new Error('A QR sign-in is in progress; the browser is reserved for it for the moment');
-  const browser = await headlessBrowser();
-  let page = s.explorePage;
-  if (!page || page.isClosed()) {
-    page = await browser.newPage();
-    await preparePage(page, browser);
-    await page.goto('https://www.tiktok.com/explore', { waitUntil: 'domcontentloaded', timeout: 45_000 });
-    s.explorePage = page;
-    log('headless explore page opened');
+  const prev = workLock;
+  let release!: () => void;
+  workLock = new Promise<void>((r) => (release = r));
+  await prev;
+  try {
+    if (s.qrPage && !s.qrPage.isClosed()) throw new Error('A QR sign-in is in progress; the browser is reserved for it for the moment');
+    const browser = await headlessBrowser();
+    let page = s.explorePage;
+    if (!page || page.isClosed()) {
+      page = await browser.newPage();
+      await preparePage(page, browser);
+      await page.goto('https://www.tiktok.com/explore', { waitUntil: 'domcontentloaded', timeout: 45_000 });
+      s.explorePage = page;
+      log('headless work page opened on /explore');
+    }
+    return await fn(page);
+  } finally {
+    release();
   }
-  const url = exploreApiUrl(category, count);
-  const text = String(await page.evaluate(`fetch(${JSON.stringify(url)}, { credentials: 'include' }).then((r) => r.text())`));
-  if (!text.trim()) throw new Error('TikTok explore API returned an empty body (through the browser as well)');
+}
+
+/** Cookie header of the headless browser's tiktok.com cookies (what the proxy must send for cookie-bound URLs). */
+export async function pageCookieHeader(page: Page): Promise<string> {
   const cookies = await page.cookies('https://www.tiktok.com');
-  const warnings: string[] = [];
-  const parsed = parseExploreBody(text, { cookieHeader: cookies.map((c) => `${c.name}=${c.value}`).join('; '), referer: 'https://www.tiktok.com/explore' }, warnings);
-  log(`explore via browser, category ${category}: ${parsed.items.length}/${parsed.raw} items`);
-  return { ...parsed, warnings };
+  return cookies.map((c) => `${c.name}=${c.value}`).join('; ');
+}
+
+export const isLoggedIn = (): boolean => s.state === 'logged_in';
+
+export async function fetchExploreViaBrowser(category: number, count: number, log: (m: string) => void): Promise<ExploreResult> {
+  return withWorkPage(log, async (page) => {
+    const url = exploreApiUrl(category, count);
+    const text = String(await page.evaluate(`fetch(${JSON.stringify(url)}, { credentials: 'include' }).then((r) => r.text())`));
+    if (!text.trim()) throw new Error('TikTok explore API returned an empty body (through the browser as well)');
+    const warnings: string[] = [];
+    const parsed = parseExploreBody(text, { cookieHeader: await pageCookieHeader(page), referer: 'https://www.tiktok.com/explore' }, warnings);
+    log(`explore via browser, category ${category}: ${parsed.items.length}/${parsed.raw} items`);
+    return { ...parsed, warnings };
+  });
 }
 
 /**

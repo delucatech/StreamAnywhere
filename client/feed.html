@@ -18,16 +18,22 @@
           <button class="tab" data-source="explore" type="button">Explore</button>
           <button class="tab" data-source="foryou" type="button">For You</button>
         </nav>
-        <button class="top-icon" id="searchBtn" type="button" title="Search – coming later" aria-label="Search">
+        <button class="top-icon" id="searchBtn" type="button" title="Search (/)" aria-label="Search">
           <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" d="M10.5 4a6.5 6.5 0 1 1 0 13 6.5 6.5 0 0 1 0-13zm5.3 11.3L20 19.5" /></svg>
         </button>
       </header>
       <div class="chips hidden" id="chips" aria-label="Explore categories"></div>
+      <!-- what is playing when it is not a source: a search or an account's videos -->
+      <div class="context hidden" id="context">
+        <span id="contextLabel"></span>
+        <button id="contextClose" class="context-close" type="button" aria-label="Back to the feed">✕</button>
+      </div>
 
       <main id="feed" class="feed" tabindex="0" aria-label="Video feed"></main>
 
       <!-- right-hand action column (acts on the video in view) -->
       <aside class="actions" id="actions">
+        <button class="act" id="actAuthor" type="button" title="Who posted this video (P)"><span class="ico avatar"><img id="actAuthorImg" alt="" draggable="false" /></span><small>Profile</small></button>
         <button class="act" id="actMute" type="button" title="Sound on/off (M)"><span class="ico" id="actMuteIco">🔊</span><small>Sound</small></button>
         <button class="act" id="actDownload" type="button" title="Download this video (D)"><span class="ico" id="actDownloadIco">⬇</span><small>Save</small></button>
         <button class="act" id="actAuto" type="button" title="Auto-scroll to the next video when one ends (A)"><span class="ico">⏭</span><small id="actAutoLabel">Auto</small></button>
@@ -43,7 +49,7 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm7 1a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM1 20c0-3.3 3.6-6 8-6s8 2.7 8 6v1H1zm16.5-5c3.1.3 5.5 2.3 5.5 4.8V21h-4v-1c0-1.6-.6-3.2-1.5-5z" /></svg><span>Friends</span>
         </button>
         <button class="nav plus" id="navPlus" type="button" title="Coming later" aria-label="Create"><span class="plus-box">+</span></button>
-        <button class="nav" id="navInbox" type="button" title="Coming later">
+        <button class="nav" id="navInbox" type="button" title="Messages">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-5 4v-4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z" /></svg><span>Inbox</span>
         </button>
         <button class="nav" id="navProfile" type="button" title="Sign in / account">
@@ -97,6 +103,66 @@
         </div>
       </div>
 
+      <!-- search -->
+      <div id="search" class="panel hidden" role="dialog" aria-label="Search">
+        <div class="panel-card">
+          <form id="searchForm" class="panel-head" autocomplete="off">
+            <button id="searchClose" class="btn ghost icon-btn" type="button" aria-label="Close">✕</button>
+            <input id="searchInput" type="search" placeholder="Search videos and accounts" enterkeyhint="search" aria-label="Search" />
+            <button id="searchGo" class="btn primary" type="submit">Search</button>
+          </form>
+          <div id="searchStatus" class="panel-status hidden"></div>
+          <div id="searchUsers" class="user-list"></div>
+          <div id="searchVideos" class="video-grid"></div>
+          <div class="panel-foot"><button id="searchMore" class="btn hidden" type="button">More videos</button></div>
+        </div>
+      </div>
+      <!-- account profile -->
+      <div id="profile" class="panel hidden" role="dialog" aria-label="Account">
+        <div class="panel-card">
+          <div class="panel-head">
+            <button id="profileClose" class="btn ghost icon-btn" type="button" aria-label="Close">✕</button>
+            <div id="profileHandle" class="panel-title">@…</div>
+          </div>
+          <div id="profileStatus" class="panel-status hidden"></div>
+          <div class="profile-head">
+            <img id="profileAvatar" class="profile-avatar" alt="" draggable="false" />
+            <div class="profile-names">
+              <div id="profileNick" class="profile-nick"></div>
+              <div id="profileStats" class="profile-stats"></div>
+            </div>
+          </div>
+          <div id="profileBio" class="profile-bio"></div>
+          <div class="panel-actions">
+            <button id="profileFollow" class="btn primary" type="button">Follow</button>
+            <button id="profileMessage" class="btn" type="button">Message</button>
+            <button id="profilePlay" class="btn" type="button">Play videos</button>
+            <a id="profileLink" class="btn ghost" target="_blank" rel="noopener">Open on TikTok</a>
+          </div>
+          <div id="profileVideos" class="video-grid"></div>
+          <div class="panel-foot"><button id="profileMore" class="btn hidden" type="button">More videos</button></div>
+        </div>
+      </div>
+      <!-- messages -->
+      <div id="inbox" class="panel hidden" role="dialog" aria-label="Messages">
+        <div class="panel-card inbox-card">
+          <div class="panel-head">
+            <button id="inboxClose" class="btn ghost icon-btn" type="button" aria-label="Close">✕</button>
+            <button id="inboxBack" class="btn ghost icon-btn hidden" type="button" aria-label="Back to the list">←</button>
+            <div id="inboxTitle" class="panel-title">Messages</div>
+            <button id="inboxRefresh" class="btn ghost small" type="button">Refresh</button>
+          </div>
+          <div id="inboxStatus" class="panel-status hidden"></div>
+          <div id="inboxList" class="conv-list"></div>
+          <div id="inboxThread" class="thread hidden">
+            <div id="inboxMessages" class="messages"></div>
+            <form id="inboxForm" class="compose" autocomplete="off">
+              <input id="inboxText" type="text" maxlength="1000" placeholder="Send a message" enterkeyhint="send" aria-label="Message" />
+              <button id="inboxSend" class="btn primary" type="submit">Send</button>
+            </form>
+          </div>
+        </div>
+      </div>
       <div id="start" class="start">
         <button id="startBtn" class="start-btn" type="button">Tap to start</button>
         <p class="start-hint">Swipe or drag up/down for the next video · tap to pause · F for fullscreen</p>

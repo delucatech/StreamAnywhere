@@ -1,4 +1,4 @@
-import type { FeedRequest, FeedResponse, HealthResponse, LoginMode, ReportRequest, ResolveRequest, ResolveResponse, ServerProbe, SessionInputRequest, SessionStatus } from '../../shared/types';
+import type { ConversationResponse, FeedRequest, FeedResponse, FollowRequest, FollowResponse, HealthResponse, InboxResponse, LoginMode, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SendMessageResponse, ServerProbe, SessionInputRequest, SessionStatus } from '../../shared/types';
 
 /**
  * API base URL. Empty = same origin (dev server proxy or SERVE_CLIENT deployments). When the
@@ -88,4 +88,16 @@ export const api = {
   sessionLogout: (): Promise<SessionStatus> => post('/api/session/logout', {}),
   sessionCancel: (): Promise<SessionStatus> => post('/api/session/cancel', {}),
   sessionInput: (req: SessionInputRequest): Promise<SessionStatus> => post('/api/session/input', req),
+  search: (req: SearchRequest): Promise<SearchResponse> => post('/api/search', req),
+  profile: (req: ProfileRequest): Promise<ProfileResponse> => post('/api/profile', req),
+  follow: (req: FollowRequest): Promise<FollowResponse> => post('/api/follow', req),
+  inbox: async (): Promise<InboxResponse> => {
+    const res = await fetch(apiUrl('/api/inbox'), { mode: 'cors', credentials: 'same-origin' });
+    toLoginOn401(res);
+    const json = await res.json().catch(() => undefined);
+    if (!res.ok) throw new ApiError((json as { error?: string })?.error || `inbox ${res.status}`, res.status, json);
+    return json as InboxResponse;
+  },
+  inboxOpen: (id: string): Promise<ConversationResponse> => post('/api/inbox/open', { id }),
+  inboxSend: (req: SendMessageRequest): Promise<SendMessageResponse> => post('/api/inbox/send', req),
 };

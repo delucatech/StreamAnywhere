@@ -175,6 +175,122 @@ export interface FeedResponse {
   elapsedMs: number;
 }
 
+// ---------------------------------------------------------------- search / profiles / follow / messages
+// All served by the headless browser on the server (server/src/social.ts). Search and profiles work
+// without a sign-in (TikTok's guest view); follow and messages need the signed-in session.
+
+export interface UserSummary {
+  id?: string;
+  secUid?: string;
+  uniqueId: string;
+  nickname?: string;
+  avatar?: string;
+  signature?: string;
+  verified?: boolean;
+  followers?: number;
+  following?: number;
+  likes?: number;
+  videos?: number;
+  /** As TikTok reports it for the signed-in account (unknown when signed out) */
+  followState?: FollowState;
+}
+
+export type FollowState = 'none' | 'following' | 'friends' | 'requested' | 'unknown';
+
+export interface SearchRequest {
+  q: string;
+  /** Continuation from the previous response (0 for a new search) */
+  offset?: number;
+}
+
+export interface SearchResponse {
+  q: string;
+  items: FeedItem[];
+  users: UserSummary[];
+  hasMore: boolean;
+  offset: number;
+  warnings: string[];
+  elapsedMs: number;
+}
+
+export interface ProfileRequest {
+  /** @handle without the @ */
+  user: string;
+  /** Videos already received (the server scrolls the profile page until it has more) */
+  offset?: number;
+  count?: number;
+}
+
+export interface ProfileResponse {
+  user: UserSummary;
+  items: FeedItem[];
+  offset: number;
+  hasMore: boolean;
+  warnings: string[];
+  elapsedMs: number;
+}
+
+export interface FollowRequest {
+  user: string;
+  follow: boolean;
+}
+
+export interface FollowResponse {
+  user: string;
+  followState: FollowState;
+  warnings: string[];
+}
+
+export interface Conversation {
+  /** Opaque id the server uses to find the thread again (its place in TikTok's list + title) */
+  id: string;
+  title: string;
+  avatar?: string;
+  preview?: string;
+  time?: string;
+  unread?: boolean;
+}
+
+export interface ChatMessage {
+  id: string;
+  from: 'me' | 'them' | 'unknown';
+  text: string;
+  time?: string;
+  /** A shared video / image / other non-text message (text then describes it) */
+  kind: 'text' | 'media' | 'other';
+  link?: string;
+}
+
+export interface InboxResponse {
+  conversations: Conversation[];
+  warnings: string[];
+  elapsedMs: number;
+}
+
+export interface ConversationRequest {
+  /** A conversation id from the inbox, or "@handle" to open (or start) the thread with that user */
+  id: string;
+}
+
+export interface ConversationResponse {
+  conversation: Conversation;
+  messages: ChatMessage[];
+  /** Whether the page offers a message box (false = TikTok does not allow messaging this user) */
+  canSend: boolean;
+  warnings: string[];
+  elapsedMs: number;
+}
+
+export interface SendMessageRequest {
+  id: string;
+  text: string;
+}
+
+export interface SendMessageResponse extends ConversationResponse {
+  /** Whether the sent text appeared in the thread */
+  sent: boolean;
+}
+
 export interface ExploreCategory {
   id: number;
   label: string;

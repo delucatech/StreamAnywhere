@@ -9,8 +9,10 @@
  *  - Swipe (touch) or drag (mouse) up/down = next/previous video. Tap/click = pause/resume.
  *    ↑/↓ (or J/K) move, Space pauses, M mutes, F fullscreen, D downloads, A toggles auto-scroll,
  *    W hides the bars.
- *  - Right-hand action column: sound, save (download), auto-scroll, fullscreen. Bottom bar: Home,
- *    Friends, +, Inbox (placeholders for later), Profile (sign-in panel).
+ *  - Right-hand action column: who posted it (profile), sound, save (download), auto-scroll,
+ *    fullscreen. Bottom bar: Home, Friends, + (placeholders), Inbox (messages), Profile (sign-in).
+ *  - Search (top bar) and account profiles (social.ts) hand the feed a play list: search results
+ *    or an account's videos then play in place of the source, with a pill to go back.
  *  - Download: fetches the cookie-free CDN URL (CORS *) as a blob and saves it as @author_id.mp4;
  *    falls back to the server proxy when the direct fetch fails.
  *
@@ -23,6 +25,7 @@ import { EXPLORE_CATEGORIES, type FeedItem, type FeedSource, type LoginMode, typ
 import { api, ApiError, apiUrl } from '../api';
 import { pressed } from '../busy';
 import { FeedPlayer, feedPlayerMode } from './player';
+import { closeTopPanel, initSocial, openInbox, openProfile, openSearch, panelOpen, type PlayList } from './social';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const el = document.getElementById(id);
@@ -35,7 +38,12 @@ const el = {
   feed: $('feed'),
   tabs: $('tabs'),
   chips: $('chips'),
+  context: $('context'),
+  contextLabel: $('contextLabel'),
+  contextClose: $<HTMLButtonElement>('contextClose'),
   searchBtn: $<HTMLButtonElement>('searchBtn'),
+  actAuthor: $<HTMLButtonElement>('actAuthor'),
+  actAuthorImg: $<HTMLImageElement>('actAuthorImg'),
   actMute: $<HTMLButtonElement>('actMute'),
   actMuteIco: $('actMuteIco'),
   actDownload: $<HTMLButtonElement>('actDownload'),
@@ -96,6 +104,8 @@ interface Entry {
   failed: boolean;
   /** True while the viewer drags the progress bar (the ticker must not move it then) */
   isSeeking: () => boolean;
+  /** Play URLs being fetched for an item that came without any (guest search results) */
+  resolving?: Promise<boolean>;
 }
 
 const playerMode = feedPlayerMode();
@@ -125,7 +135,11 @@ function savePrefs(): void {
 }
 const prefs = loadPrefs();
 
+/** What the feed plays: the chosen source, or a play list handed over by search / a profile. */
+type FeedMode = { kind: 'source' } | PlayList;
+
 const state = {
+  mode: { kind: 'source' } as FeedMode,
   entries: [] as Entry[],
   ids: new Set<string>(),
   active: -1,
@@ -176,8 +190,12 @@ let suppressClickUntil = 0;
 
 // ---------- top bar: source tabs + explore categories ----------
 function renderSourceUi(): void {
-  for (const b of el.tabs.querySelectorAll<HTMLButtonElement>('.tab')) b.classList.toggle('active', b.dataset.source === prefs.source);
-  el.chips.classList.toggle('hidden', prefs.source !== 'explore');
+  const listMode = state.mode.kind !== 'source';
+  for (const b of el.tabs.querySelectorAll<HTMLButtonElement>('.tab')) b.classList.toggle('active', !listMode && b.dataset.source === prefs.source);
+  el.chips.classList.toggle('hidden', listMode || prefs.source !== 'explore');
+  el.context.classList.toggle('hidden', !listMode);
+  if (state.mode.kind === 'search') el.contextLabel.textContent = `Search: ${state.mode.q}`;
+  else if (state.mode.kind === 'profile') el.contextLabel.textContent = `@${state.mode.user}`;
   for (const c of el.chips.querySelectorAll<HTMLButtonElement>('.chip')) c.classList.toggle('active', Number(c.dataset.id) === prefs.category);
 }
 async function setSource(src: FeedSource, announce = true): Promise<void> {
@@ -186,13 +204,27 @@ async function setSource(src: FeedSource, announce = true): Promise<void> {
     await openSessionPanel();
     return;
   }
-  if (prefs.source === src) return;
+  if (prefs.source === src && state.mode.kind === 'source') return;
   prefs.source = src;
+  state.mode = { kind: 'source' };
   savePrefs();
   renderSourceUi();
   if (announce) toast(src === 'foryou' ? 'For You' : 'Explore');
   await reload();
 }
+/** Plays a list from search or a profile (social.ts), starting at `startIndex`. */
+function playList(list: PlayList, startIndex: number): void {
+  state.mode = list;
+  renderSourceUi();
+  toast(list.kind === 'search' ? `Search: ${list.q}` : `Videos of @${list.user}`);
+  void reload(list.items, startIndex);
+}
+el.contextClose.addEventListener('click', () => {
+  if (state.mode.kind === 'source') return;
+  state.mode = { kind: 'source' };
+  renderSourceUi();
+  void reload();
+});
 for (const c of EXPLORE_CATEGORIES) {
   const b = document.createElement('button');
   b.className = 'chip';
@@ -212,7 +244,7 @@ el.tabs.addEventListener('click', (e) => {
   const b = (e.target as HTMLElement).closest<HTMLButtonElement>('.tab');
   if (b?.dataset.source) pressed(b, () => setSource(b.dataset.source as FeedSource));
 });
-el.searchBtn.addEventListener('click', () => toast('Search is coming later'));
+el.searchBtn.addEventListener('click', () => openSearch());
 renderSourceUi();
 
 // ---------- actions column + bottom bar ----------
@@ -229,7 +261,12 @@ el.navHome.addEventListener('click', () => {
 });
 el.navFriends.addEventListener('click', () => toast('Friends is coming later'));
 el.navPlus.addEventListener('click', () => toast('Upload is coming later'));
-el.navInbox.addEventListener('click', () => toast('Inbox is coming later'));
+el.navInbox.addEventListener('click', () => pressed(el.navInbox, () => openInbox()));
+el.actAuthor.addEventListener('click', () => {
+  const cur = activeEntry();
+  if (cur?.item.author.uniqueId) void openProfile(cur.item.author.uniqueId);
+});
+initSocial({ play: playList, toast, isLoggedIn: () => state.session?.state === 'logged_in', openSessionPanel, fmtCount });
 el.navProfile.addEventListener('click', () => pressed(el.navProfile, () => openSessionPanel()));
 el.sessionClose.addEventListener('click', () => closeSessionPanel());
 el.sessionRefresh.addEventListener('click', () =>
@@ -682,6 +719,8 @@ async function signOut(cancelOnly = false): Promise<void> {
 // ---------- loading indicator: centered with details while the viewer waits, a small chip otherwise ----------
 let loadingTicker = 0;
 function sourceLabel(): string {
+  if (state.mode.kind === 'search') return `search results for “${state.mode.q}”`;
+  if (state.mode.kind === 'profile') return `videos of @${state.mode.user}`;
   if (prefs.source === 'foryou') return 'your For You feed';
   const cat = EXPLORE_CATEGORIES.find((c) => c.id === prefs.category);
   return `Explore${cat && cat.id !== 120 ? ' · ' + cat.label : ''}`;
@@ -734,7 +773,7 @@ function showRetryStatus(delayMs: number): void {
 }
 
 // ---------- feed loading ----------
-async function reload(): Promise<void> {
+async function reload(preloaded?: FeedItem[], startIndex = 0): Promise<void> {
   state.generation++;
   clearTimeout(state.retryTimer);
   for (const e of state.entries) releasePlayer(e);
@@ -746,7 +785,50 @@ async function reload(): Promise<void> {
   state.wantNext = false;
   el.feed.innerHTML = '';
   el.feed.scrollTop = 0;
+  if (preloaded?.length) {
+    // A play list (search results / an account's videos): show it at once, from the tapped video.
+    addItems(preloaded);
+    const idx = Math.max(0, Math.min(state.entries.length - 1, startIndex));
+    if (!state.started) start();
+    el.feed.scrollTo({ top: idx * el.feed.clientHeight });
+    setActive(idx);
+    return;
+  }
   await loadMore();
+}
+
+/** Appends new videos (duplicates and items without a playable URL are skipped); returns how many. */
+function addItems(items: FeedItem[]): number {
+  let added = 0;
+  for (const item of items) {
+    // An item without formats (search results) is kept: its play URLs are resolved when it comes up.
+    if (state.ids.has(item.id) || (item.formats.length && !sourceCandidates(item).length)) continue;
+    state.ids.add(item.id);
+    state.entries.push(makeEntry(item));
+    added++;
+  }
+  return added;
+}
+
+/** The next batch for the current mode: the source, or the continuation of a play list. */
+async function fetchBatch(): Promise<{ items: FeedItem[]; warnings: string[]; hasMore: boolean }> {
+  const mode = state.mode;
+  if (mode.kind === 'search') {
+    if (!mode.hasMore) return { items: [], warnings: [], hasMore: false };
+    const r = await api.search({ q: mode.q, offset: mode.offset });
+    mode.offset = r.offset;
+    mode.hasMore = r.hasMore;
+    return { items: r.items, warnings: r.warnings, hasMore: r.hasMore };
+  }
+  if (mode.kind === 'profile') {
+    if (!mode.hasMore) return { items: [], warnings: [], hasMore: false };
+    const r = await api.profile({ user: mode.user, offset: mode.offset, count: BATCH });
+    mode.offset = r.offset + r.items.length;
+    mode.hasMore = r.hasMore;
+    return { items: r.items, warnings: r.warnings, hasMore: r.hasMore };
+  }
+  const r = await api.feed({ source: prefs.source, category: prefs.source === 'explore' ? prefs.category : undefined, count: BATCH });
+  return { items: r.items, warnings: r.warnings, hasMore: r.hasMore };
 }
 
 /** The sign-in panel was opened because the For You feed reported a missing session (once per sign-out) */
@@ -765,18 +847,17 @@ async function loadMore(): Promise<number> {
   startLoadingStatus();
   let added = 0;
   try {
-    const r = await api.feed({ source: prefs.source, category: prefs.source === 'explore' ? prefs.category : undefined, count: BATCH });
+    const r = await fetchBatch();
     if (gen !== state.generation) return 0;
-    for (const item of r.items) {
-      if (state.ids.has(item.id) || !sourceCandidates(item).length) continue;
-      state.ids.add(item.id);
-      state.entries.push(makeEntry(item));
-      added++;
-    }
+    added = addItems(r.items);
     for (const w of r.warnings) console.warn('[feed]', w);
     if (!added) {
       state.emptyBatches++;
-      if (!r.items.length && !r.hasMore) state.exhausted = true;
+      if (!r.hasMore) {
+        // A play list has an end (unlike the sources): stop asking, tell the viewer once.
+        state.exhausted = true;
+        if (state.mode.kind !== 'source' && state.entries.length) toast('That was the last video of this list', false, 4000);
+      }
     } else state.emptyBatches = 0;
     if (!state.entries.length && state.emptyBatches >= 3) showEmpty(r.warnings[0] || 'The feed returned no playable videos. Try again or pick another category.');
     if (state.active < 0 && state.entries.length) setActive(0);
@@ -879,6 +960,13 @@ function makeEntry(item: FeedItem): Entry {
   a.target = '_blank';
   a.rel = 'noopener';
   a.textContent = `@${item.author.uniqueId || item.author.nickname || '?'}`;
+  if (item.author.uniqueId) {
+    a.title = 'Open this account';
+    a.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      void openProfile(item.author.uniqueId!);
+    });
+  }
   author.appendChild(a);
   info.appendChild(author);
   if (item.desc) {
@@ -1033,8 +1121,34 @@ function onPlayerError(entry: Entry, e: Error): void {
   if (activeEntry() === entry && prefs.autoscroll) window.setTimeout(() => activeEntry() === entry && goTo(state.active + 1), 1500);
 }
 
+/**
+ * Items from a guest search carry no play URLs: ask the resolver for them (same formats as the feed)
+ * before the player is attached. False when TikTok has nothing playable for it.
+ */
+function ensureFormats(entry: Entry): Promise<boolean> {
+  if (entry.item.formats.length) return Promise.resolve(true);
+  if (!entry.resolving) {
+    entry.resolving = api
+      .resolve({ url: entry.item.canonicalUrl, probe: false })
+      .then((r) => {
+        entry.item.formats = r.formats.filter((f) => f.directUrl || f.proxyUrl);
+        if (!entry.item.formats.length) throw new Error(r.warnings[0] || 'no playable format');
+        return true;
+      })
+      .catch((e) => {
+        entry.failed = true;
+        entry.err.textContent = `This video could not be resolved (${errMsg(e)})`;
+        entry.err.classList.remove('hidden');
+        if (activeEntry() === entry && prefs.autoscroll) window.setTimeout(() => activeEntry() === entry && goTo(state.active + 1), 1500);
+        return false;
+      });
+  }
+  return entry.resolving;
+}
+
 async function playEntry(entry: Entry): Promise<void> {
   if (!state.started || entry.failed) return;
+  if (!(await ensureFormats(entry)) || activeEntry() !== entry) return;
   if (!attachSource(entry)) return;
   const p = entry.player!;
   p.loop = !prefs.autoscroll;
@@ -1057,13 +1171,16 @@ function setActive(idx: number): void {
   state.active = idx;
   state.userPaused = false;
   const cur = state.entries[idx];
+  if (cur.item.author.avatar) el.actAuthorImg.src = cur.item.author.avatar;
+  else el.actAuthorImg.removeAttribute('src');
+  el.actAuthor.disabled = !cur.item.author.uniqueId;
   void playEntry(cur);
   // Warm the neighbours (their players fetch and decode the first frames, then idle on
   // backpressure), release the rest so decoders and audio contexts do not pile up.
   state.entries.forEach((e, i) => {
     const d = Math.abs(i - idx);
     if (d === 1) {
-      if (!e.failed) attachSource(e);
+      if (!e.failed) void ensureFormats(e).then((ok) => ok && Math.abs(state.entries.indexOf(e) - state.active) === 1 && attachSource(e));
     } else if (d > 2 && e.player) {
       releasePlayer(e);
     }
@@ -1172,8 +1289,20 @@ async function download(entry: Entry): Promise<void> {
 // ---------- keyboard ----------
 document.addEventListener('keydown', (e) => {
   if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement) return;
+  if (panelOpen()) {
+    if (e.key === 'Escape') closeTopPanel();
+    return;
+  }
   const cur = activeEntry();
   switch (e.key) {
+    case '/':
+      e.preventDefault();
+      openSearch();
+      break;
+    case 'p':
+    case 'P':
+      if (cur?.item.author.uniqueId) void openProfile(cur.item.author.uniqueId);
+      break;
     case 'ArrowDown':
     case 'j':
     case 'J':
