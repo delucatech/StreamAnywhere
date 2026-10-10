@@ -116,8 +116,6 @@ interface SessionInternal {
   qrVerifyTries?: number;
   /** When the server pressed "Send code" (once per verification; never again by itself) */
   qrCodeSentAt?: number;
-  /** When the remembered code was typed automatically for the current verification */
-  qrAutoCodeAt?: number;
   /** Last time TikTok's page sent a verification request (code check, send code, ...) */
   qrVerifyNetAt?: number;
   /** When "Resend" was last pressed for the user */
@@ -139,9 +137,6 @@ interface SessionInternal {
   qrTokenOurs?: string;
   /** When TikTok answered 'confirmed' with a redirect (the finishing phase counts from here) */
   qrRedirectAt?: number;
-  /** The code last submitted to TikTok's field, and whether the server typed it by itself */
-  qrLastCode?: string;
-  qrLastCodeAuto?: boolean;
   /** Since when the code field has been missing from the dialog while the step is still 'code' */
   qrCodeGoneAt?: number;
   /** Shown in the UI for a few minutes (why the attempt restarted, what to do) */
@@ -161,12 +156,12 @@ interface SessionInternal {
 const s: SessionInternal = { state: 'none', pending: [], seenIds: new Set() };
 
 /**
- * The e-mailed verification code and the verification ticket survive a server restart: TikTok keeps
- * the code valid for hours, so the user should never have to fetch the e-mail twice.
+ * The verification ticket survives a server restart: a scan within 48 h of an accepted code needs no
+ * new e-mail. The e-mailed code itself is never stored or typed by the server on its own - only a code
+ * the user types and submits with "Verify" is entered (an old one would burn TikTok's tries).
  */
 const VERIFY_STORE = path.join(path.dirname(PROFILE_DIR), 'tiktok-verify.json');
 interface VerifyStore {
-  code?: { value: string; at: number };
   ticket?: { value: string; at: number };
 }
 let verifyStore: VerifyStore | undefined;
@@ -180,9 +175,9 @@ function loadVerifyStore(): VerifyStore {
     } catch {
       /* none yet */
     }
-    verifyStore = { code: j.code, ticket: j.ticket };
+    verifyStore = { ticket: j.ticket };
   }
-  verifyStore = { code: freshEntry(verifyStore.code), ticket: freshEntry(verifyStore.ticket) };
+  verifyStore = { ticket: freshEntry(verifyStore.ticket) };
   return verifyStore;
 }
 function saveVerifyStore(patch: Partial<VerifyStore>): void {
@@ -195,23 +190,6 @@ function saveVerifyStore(patch: Partial<VerifyStore>): void {
   }
 }
 
-/**
- * Saves an e-mail code the user already has (or forgets it when empty). It is typed into TikTok's
- * code field automatically after the next scan - and right away if that field is up now.
- */
-export async function saveVerifyCode(raw: string): Promise<SessionStatus> {
-  const code = raw.replace(/\D+/g, '').slice(0, 8);
-  if (!code) {
-    saveVerifyStore({ code: undefined, ticket: undefined });
-    s.qrTicket = s.qrTicketAt = undefined;
-    feedLog?.('saved verification code and ticket forgotten');
-    return sessionStatus();
-  }
-  saveVerifyStore({ code: { value: code, at: Date.now() } });
-  feedLog?.(`verification code saved for later (ends in ${code.slice(-2)})`);
-  if (s.state === 'login_pending' && s.loginMode === 'qr' && s.qrState === 'verify' && s.qrVerifyStep === 'code' && s.qrPage && !s.qrPage.isClosed()) return sessionInput({ type: 'code', code });
-  return sessionStatus();
-}
 let puppeteerMod: typeof import('puppeteer-core') | undefined;
 let feedLog: ((m: string) => void) | undefined;
 const guestAllowed = (): boolean => /^(1|true|yes)$/i.test(process.env.FORYOU_ALLOW_GUEST || '');
@@ -378,8 +356,6 @@ export function sessionStatus(): SessionStatus {
   const browser = sup.executable ? path.basename(sup.executable) : undefined;
   if (!sup.ok) return { supported: false, state: 'unsupported', error: sup.reason, message: 'Sign-in needs the Node server on a machine with Chrome, Edge or Chromium.' };
   const base: SessionStatus = { supported: true, state: s.state, username: s.username, nickname: s.nickname, avatar: s.avatar, error: s.error, browser };
-  const savedCode = loadVerifyStore().code;
-  if (savedCode && s.state !== 'logged_in') base.savedCode = { hint: savedCode.value.slice(-2), at: savedCode.at };
   if (s.state === 'none') {
     base.message = !profileExists()
       ? 'Not signed in.'
@@ -569,14 +545,11 @@ function resetVerifyFields(): void {
   s.qrVerifySentAt = undefined;
   s.qrVerifyTries = undefined;
   s.qrCodeSentAt = undefined;
-  s.qrAutoCodeAt = undefined;
   s.qrResendAt = undefined;
   s.qrVerifyResult = undefined;
   s.qrTextBeforeCode = undefined;
   s.qrVerifyNetAt = undefined;
   s.qrCodeGoneAt = undefined;
-  s.qrLastCode = undefined;
-  s.qrLastCodeAuto = undefined;
 }
 
 /** Ends a QR attempt that cannot go on (browser gone, start-up failure, timeout): back to "Not signed in" + why. */
@@ -704,7 +677,6 @@ function installQrHandlers(page: Page, log: (m: string) => void): void {
             const d = j?.data || {};
             if (j?.message === 'error' || (typeof d.error_code === 'number' && d.error_code !== 0)) {
               s.qrVerifyResult = { state: 'rejected', text: String(d.description || d.error_msg || 'error ' + d.error_code).slice(0, 160), at: Date.now() };
-              forgetRejectedCode(log);
             }
           }
         })
@@ -1139,15 +1111,7 @@ async function driveVerifyDialog(page: Page, log: (m: string) => void): Promise<
       } else s.qrCodeSentAt = s.qrVerifySentAt || now; // TikTok sent the code when the method was chosen
     }
     if (s.qrVerifyResult?.state === 'checking') checkCodeOutcome(v.text, log);
-    // A code saved earlier (TikTok re-sends the same one for hours): type it without waiting for the user.
-    const saved = loadVerifyStore().code;
-    if (saved && !s.qrVerifyResult && !s.qrAutoCodeAt && now - (s.qrCodeSentAt || now) > 1500) {
-      s.qrAutoCodeAt = now;
-      s.qrNotice = `Trying the code you entered earlier (ends in ${saved.value.slice(-2)}) by itself…`;
-      s.qrNoticeAt = now;
-      log('verification: typing the remembered code automatically');
-      await enterVerifyCode(page, saved.value, log, true);
-    }
+    // Nothing is typed here: the code is entered only when the user submits it with "Verify".
     return;
   }
   if (s.qrVerifyResult?.state === 'checking') checkCodeOutcome(v.text, log);
@@ -1196,22 +1160,6 @@ async function driveVerifyDialog(page: Page, log: (m: string) => void): Promise<
       log('verification: no code field appeared after choosing the method; asking the user to act on the live picture');
     }
   } else s.qrVerifyStep = 'choose';
-}
-
-/**
- * TikTok rejected the code that was just submitted: a stored copy of it must not be typed again (after
- * "Resend code", a restart or the next sign-in). The notice is only for a code the server tried by itself.
- */
-function forgetRejectedCode(log: (m: string) => void): void {
-  const stored = loadVerifyStore().code;
-  if (s.qrLastCode && stored && stored.value === s.qrLastCode) {
-    saveVerifyStore({ code: undefined });
-    log('verification: the rejected code is forgotten');
-  }
-  if (s.qrLastCodeAuto) {
-    s.qrNotice = 'The code from earlier is no longer accepted - enter the one from the newest e-mail.';
-    s.qrNoticeAt = Date.now();
-  }
 }
 
 const ENABLED_FN = Function('e', 'return !e.disabled && e.getAttribute("aria-disabled") !== "true";') as ElFn;
@@ -1333,12 +1281,9 @@ async function typeVerifyCode(page: Page, code: string, log: (m: string) => void
   return text;
 }
 
-/** Puts a verification code into TikTok's code field and submits it (Next/Verify button, else Enter). */
-async function enterVerifyCode(page: Page, code: string, log: (m: string) => void, auto = false): Promise<void> {
-  // Synchronously first: qrLoop's driveVerifyDialog runs concurrently and would otherwise auto-type the
-  // same (just saved) code a second time while this one is still scanning the dialog.
-  s.qrLastCode = code;
-  s.qrLastCodeAuto = auto;
+/** Puts the code the user submitted into TikTok's code field and submits it (Next/Verify button, else Enter). */
+async function enterVerifyCode(page: Page, code: string, log: (m: string) => void): Promise<void> {
+  // Set synchronously: qrLoop's driveVerifyDialog runs concurrently and reads the result state.
   s.qrVerifyResult = { state: 'checking', at: Date.now() };
   s.qrTextBeforeCode = (await scanVerifyDialog(page))?.text || s.qrVerifyText || '';
   s.qrVerifyResult = { state: 'checking', at: Date.now() };
@@ -1413,7 +1358,6 @@ function checkCodeOutcome(text: string, log: (m: string) => void): void {
   if (bad) {
     s.qrVerifyResult = { state: 'rejected', text: bad.slice(0, 160), at: Date.now() };
     log('verification: TikTok rejected the code: ' + bad.slice(0, 160));
-    forgetRejectedCode(log);
     return;
   }
   if (Date.now() - r.at > 25_000) {
@@ -1462,9 +1406,8 @@ export async function sessionInput(req: SessionInputRequest): Promise<SessionSta
       case 'code': {
         const code = String(req.code || '').replace(/\s+/g, '').slice(0, 12);
         if (code) {
-          feedLog?.(`verification: entering the ${code.length}-digit code`);
-          saveVerifyStore({ code: { value: code, at: Date.now() } });
-          await enterVerifyCode(page, code, (m) => feedLog?.(m), false);
+          feedLog?.(`verification: entering the ${code.length}-digit code the user submitted`);
+          await enterVerifyCode(page, code, (m) => feedLog?.(m));
         }
         break;
       }
@@ -1476,10 +1419,6 @@ export async function sessionInput(req: SessionInputRequest): Promise<SessionSta
           s.qrResendAt = Date.now();
           s.qrCodeSentAt = Date.now();
           s.qrVerifyResult = undefined;
-          // Older codes stop working once a new one is sent: forget the stored one, and type nothing by
-          // itself until the user enters the code from the new e-mail.
-          saveVerifyStore({ code: undefined });
-          s.qrAutoCodeAt = Date.now();
           await activate(page, btn.el, 0, (m) => feedLog?.(m), 'pressing "Resend"');
         } else feedLog?.('verification: no Resend button on the page');
         break;

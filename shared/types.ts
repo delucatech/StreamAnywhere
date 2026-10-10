@@ -269,9 +269,6 @@ export interface SessionStatus {
   verifyUntil?: number;
   /** Outcome of the last code the user entered ('checking' until TikTok answers) */
   verifyResult?: { state: 'checking' | 'accepted' | 'rejected' | 'unknown'; text?: string; at: number };
-  /** An e-mail code the user saved (or entered) within the last 48 h: the server types it by itself as
-   *  soon as TikTok shows its code field after a scan. `hint` = last two digits. */
-  savedCode?: { hint: string; at: number };
   /** Something the user should know about the current attempt (e.g. "started over: TikTok's QR session
    *  expired while waiting for the e-mail code; the verification is re-used") */
   notice?: string;
