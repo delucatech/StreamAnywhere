@@ -12,6 +12,8 @@ import { buildServer } from '../index';
 import { hostAllowed, ipIsPrivate, assertSafeUpstream } from '../ssrf';
 import { parseTikTokUrl } from '../tiktok';
 import { itemToFeedItem } from '../feed';
+import { Reservoir, expiredSoon } from '../reservoir';
+import type { FeedItem } from '../../../shared/types';
 import type { FeedResponse } from '../../../shared/types';
 import { openUpstream } from '../http';
 import type { ResolveResponse } from '../../../shared/types';
@@ -99,6 +101,70 @@ async function offline(): Promise<void> {
   }
   check('item without video is skipped', itemToFeedItem({ id: '1' }) === undefined);
   check('item without any URL is skipped', itemToFeedItem({ id: '1', video: { bitrateInfo: [{ GearName: 'x', PlayAddr: { UrlList: [] } }] } }) === undefined);
+
+  console.log('\n== 4. feed reservoir (offline)');
+  await reservoirChecks();
+}
+
+/** A fake item: one format whose play URL expires at `expiresAt` (unix seconds; undefined = unknown). */
+const fakeItem = (id: string, expiresAt?: number): FeedItem => ({
+  id,
+  canonicalUrl: 'https://www.tiktok.com/@x/video/' + id,
+  author: {},
+  stats: {},
+  formats: [{ id: 'f', label: 'f', codec: 'h264', requiresCookies: true, directUrl: 'https://www.tiktok.com/aweme/v1/play/?x=' + id, expiresAt }],
+});
+
+async function reservoirChecks(): Promise<void> {
+  let now = 1_000_000;
+  const clock = () => now;
+  // Source: numbered items, with every batch repeating the previous batch's last 3 ids (like TikTok's random overlap).
+  let next = 1;
+  let calls = 0;
+  let fail = 0;
+  const source = async ({ count }: { count: number }) => {
+    calls++;
+    if (fail > 0) {
+      fail--;
+      throw new Error('empty body');
+    }
+    const items: FeedItem[] = [];
+    for (let i = Math.max(1, next - 3); i < next; i++) items.push(fakeItem('v' + i));
+    for (let i = 0; i < count; i++) items.push(fakeItem('v' + next++));
+    return { items, warnings: [] };
+  };
+  const r = new Reservoir('test', source, { target: 20, low: 10, batch: 10, gapMs: 0, idleMs: 60_000, now: clock });
+  const t1 = await r.take(5);
+  check('empty stock waits for one fill and serves from it', t1.items.length === 5 && !t1.fromStock && calls === 1, { got: t1.items.length, calls });
+  await new Promise((res) => setTimeout(res, 30));
+  check('a low stock is refilled in the background', r.ready >= 10 && calls === 2, { ready: r.ready, calls });
+  const t2 = await r.take(10);
+  const seen = new Set<string>([...t1.items, ...t2.items].map((i) => i.id));
+  check('second take served from stock, no duplicates', t2.fromStock && t2.items.length === 10 && seen.size === 15, { ids: t2.items.map((i) => i.id) });
+  await new Promise((res) => setTimeout(res, 30));
+  let drained = 0;
+  while (r.ready > 0) drained += (await r.take(10)).items.length;
+  check('the stock drains without repeating ids', drained > 0, { drained, calls });
+  // Idle: no take() for longer than idleMs -> no background fill.
+  now += 61_000;
+  const callsBefore = calls;
+  await new Promise((res) => setTimeout(res, 30));
+  check('an idle reservoir stops asking the source', calls === callsBefore, { calls, callsBefore });
+  // A failing source: take() surfaces the error, the next take retries.
+  fail = 1;
+  let err = '';
+  try {
+    await r.take(5);
+  } catch (e) {
+    err = (e as Error).message;
+  }
+  check('empty stock + source failure -> error surfaced', /empty body/.test(err), err);
+  now += 5000;
+  const t3 = await r.take(5);
+  check('the next take retries the source and recovers', t3.items.length === 5, { got: t3.items.length });
+  r.stop();
+  check('expiredSoon: unknown expiry is kept', !expiredSoon(fakeItem('a'), 1000));
+  check('expiredSoon: far expiry is kept, near one dropped', !expiredSoon(fakeItem('a', 2000), 1000) && expiredSoon(fakeItem('a', 1), 1000));
 }
 
 const TEST_PASSWORD = 'test-password';

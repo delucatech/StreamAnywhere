@@ -2,9 +2,12 @@
  * TikTok feed sources.
  *
  *  explore: GET https://www.tiktok.com/api/explore/item_list/?aid=1988&categoryType=<id>&count=<n>
- *           Verified 2026-10-08: answers without any signature (no msToken / X-Bogus / X-Gnarly)
- *           with a fresh random batch per call (cursor is always 0, hasMore true), so "more" simply
- *           means "call again". Needs the tt_chain_token/ttwid cookies of a page visit first; the
+ *           Verified 2026-10-08: answers without any signature (no msToken / X-Bogus / X-Gnarly);
+ *           cursor is always 0, hasMore true, so "more" means "call again". Measured 2026-10-10:
+ *           the same category+count is answered from a cache for ~1 min (identical batch), a
+ *           different count gives a fresh sample, and "All" holds ~110 distinct videos per minute
+ *           before it repeats (reservoir.ts / index.ts vary the count and borrow categories).
+ *           Needs the tt_chain_token/ttwid cookies of a page visit first; the
  *           playAddr URLs in the response are signed for THAT session (proxy-only, like the resolver).
  *           Every bitrate variant also carries the cookie-free /aweme/v1/play URL (browser-direct).
  *           TikTok occasionally answers with an empty body (anti-bot); the caller retries.

@@ -752,6 +752,11 @@ async function reload(): Promise<void> {
 /** The sign-in panel was opened because the For You feed reported a missing session (once per sign-out) */
 let signedOutPanelShown = false;
 
+/** Videos per request: the server answers from its stock, and a bigger batch costs TikTok the same call. */
+const BATCH = 30;
+/** Keep at least this many unplayed videos ahead of the viewer. */
+const AHEAD = 8;
+
 /** Fetches the next batch; returns how many videos were added. */
 async function loadMore(): Promise<number> {
   if (state.loading || state.exhausted) return 0;
@@ -760,7 +765,7 @@ async function loadMore(): Promise<number> {
   startLoadingStatus();
   let added = 0;
   try {
-    const r = await api.feed({ source: prefs.source, category: prefs.source === 'explore' ? prefs.category : undefined, count: 12 });
+    const r = await api.feed({ source: prefs.source, category: prefs.source === 'explore' ? prefs.category : undefined, count: BATCH });
     if (gen !== state.generation) return 0;
     for (const item of r.items) {
       if (state.ids.has(item.id) || !sourceCandidates(item).length) continue;
@@ -804,14 +809,15 @@ async function loadMore(): Promise<number> {
 }
 
 /**
- * Like the app, the feed never ends: when the viewer is close to the last loaded video and the
- * previous batch brought nothing (TikTok's soft limits, duplicates), retry with a growing delay.
+ * Like the app, the feed never ends: whenever fewer than AHEAD unplayed videos are left after the
+ * current one, the next batch is requested. When the previous batch brought nothing (TikTok's
+ * soft limits, duplicates), retry with a growing delay.
  */
 function scheduleMoreIfNeeded(): void {
   clearTimeout(state.retryTimer);
   if (state.exhausted || state.loading) return;
-  const nearEnd = state.active >= state.entries.length - 3;
-  if (!nearEnd) return;
+  const ahead = state.entries.length - 1 - state.active;
+  if (ahead >= AHEAD) return;
   const delay = state.emptyBatches === 0 ? 0 : Math.min(20_000, 3000 * 2 ** (state.emptyBatches - 1));
   if (delay) showRetryStatus(delay);
   state.retryTimer = window.setTimeout(() => void loadMore(), delay);
@@ -849,6 +855,7 @@ function makeEntry(item: FeedItem): Entry {
     cover.src = item.cover;
     cover.alt = '';
     cover.decoding = 'async';
+    cover.loading = 'lazy'; // a batch of 30 covers is not downloaded at once
     cover.draggable = false;
     root.appendChild(cover);
   }

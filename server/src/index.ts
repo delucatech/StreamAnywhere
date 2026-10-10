@@ -3,6 +3,7 @@ import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+import { EXPLORE_CATEGORIES } from '../../shared/types';
 import type { FeedRequest, FeedResponse, HealthResponse, ProbeRequest, ReportRequest, ResolveRequest, ResolveResponse, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
 import { registerAuth } from './auth';
 import { config, findUp } from './config';
@@ -11,12 +12,70 @@ import { isTikTokUrl, probeUrl, resolveTikTokNative, TikTokError } from './tikto
 import { detectYtDlp, resolveWithYtDlp } from './ytdlp';
 import { defaultExpiry, mediaCount, registerMedia } from './mediaStore';
 import { hostAllowed } from './ssrf';
-import { FeedError, fetchExploreFeed, normalizeExploreOptions } from './feed';
-import { cancelLogin, fetchExploreViaBrowser, fetchForYou, logout, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
+import { EXPLORE_DEFAULT_CATEGORY, FeedError, fetchExploreFeed, normalizeExploreOptions, type ExploreResult } from './feed';
+import { cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouStock, logout, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
+import { Reservoir, type ReservoirStats } from './reservoir';
 
 /** After the browser path rescued an explore request, prefer it for a while (datacenter IPs). */
 let exploreViaBrowserUntil = 0;
 const EXPLORE_VIA_BROWSER_ENV = /^(1|true|yes)$/i.test(process.env.EXPLORE_VIA_BROWSER || '');
+
+/**
+ * One Explore batch from TikTok: the plain request first, the headless browser as rescue (and
+ * preferred for 15 min after a rescue, since datacenter IPs get refused by the plain request).
+ */
+async function fetchExploreAny(category: number, count: number, log: (m: string) => void, warn: (err: string, msg: string) => void): Promise<ExploreResult> {
+  const browserOk = sessionSupported().ok;
+  if (browserOk && (EXPLORE_VIA_BROWSER_ENV || Date.now() < exploreViaBrowserUntil)) {
+    try {
+      return await fetchExploreViaBrowser(category, count, log);
+    } catch (e) {
+      warn((e as Error).message, 'explore via browser failed; trying the direct request');
+    }
+  }
+  try {
+    return await fetchExploreFeed({ category, count, log });
+  } catch (e) {
+    if (!browserOk) throw e;
+    warn((e as Error).message, 'direct explore request failed; trying through the headless browser');
+    const r = await fetchExploreViaBrowser(category, count, log);
+    r.warnings.push('direct explore request was blocked; served through the headless browser');
+    exploreViaBrowserUntil = Date.now() + 15 * 60 * 1000;
+    return r;
+  }
+}
+
+/**
+ * Explore stock per category, filled in the background while someone is watching (see reservoir.ts).
+ *
+ * Measured 2026-10-10: TikTok answers the same category+count from a cache for about a minute (a
+ * repeat within seconds is identical), while a different count gives a fresh sample at once; the
+ * pool behind "All" holds roughly 110 distinct videos per minute, then repeats until it rotates.
+ * So every fill uses a different count, and "All" borrows from another category when it runs dry.
+ */
+const exploreReservoirs = new Map<number, Reservoir>();
+function exploreReservoir(category: number, log: (m: string) => void, warn: (err: string, msg: string) => void): Reservoir {
+  let r = exploreReservoirs.get(category);
+  if (!r) {
+    r = new Reservoir(
+      `explore ${category}`,
+      ({ count, index, lastAdded }) => {
+        const n = Math.max(12, count - (index % 8));
+        let cat = category;
+        if (category === EXPLORE_DEFAULT_CATEGORY && lastAdded !== undefined && lastAdded < 5) {
+          const others = EXPLORE_CATEGORIES.filter((c) => c.id !== category);
+          cat = others[index % others.length].id;
+          log(`explore ${category}: pool dry (${lastAdded} new last time), borrowing from category ${cat}`);
+        }
+        return fetchExploreAny(cat, n, log, warn);
+      },
+      { log },
+    );
+    exploreReservoirs.set(category, r);
+  }
+  return r;
+}
+export const exploreStock = (): Record<string, ReservoirStats> => Object.fromEntries([...exploreReservoirs].map(([k, v]) => [String(k), v.stats]));
 
 export async function buildServer() {
   const app = Fastify({
@@ -153,32 +212,16 @@ export async function buildServer() {
     const source = b.source === 'foryou' ? 'foryou' : 'explore';
     const count = Math.max(1, Math.min(30, Number(b.count) || 12));
     const t0 = Date.now();
-    const log = (msg: string) => req.log.info({ source }, msg);
+    const log = (msg: string) => app.log.info({ source }, msg);
+    const warn = (err: string, msg: string) => app.log.warn({ source, err }, msg);
     try {
       if (source === 'explore') {
         const category = b.category !== undefined && Number.isInteger(Number(b.category)) ? Number(b.category) : undefined;
         const norm = normalizeExploreOptions({ category, count });
-        const browserOk = sessionSupported().ok;
-        let r;
-        if (browserOk && (EXPLORE_VIA_BROWSER_ENV || Date.now() < exploreViaBrowserUntil)) {
-          try {
-            r = await fetchExploreViaBrowser(norm.category, norm.count, log);
-          } catch (e) {
-            req.log.warn({ err: (e as Error).message }, 'explore via browser failed; trying the direct request');
-          }
-        }
-        if (!r) {
-          try {
-            r = await fetchExploreFeed({ category, count, log });
-          } catch (e) {
-            if (!browserOk) throw e;
-            req.log.warn({ err: (e as Error).message }, 'direct explore request failed; trying through the headless browser');
-            r = await fetchExploreViaBrowser(norm.category, norm.count, log);
-            r.warnings.push('direct explore request was blocked; served through the headless browser');
-            exploreViaBrowserUntil = Date.now() + 15 * 60 * 1000;
-          }
-        }
-        const resp: FeedResponse = { source, items: r.items, hasMore: r.hasMore, warnings: r.warnings, elapsedMs: Date.now() - t0 };
+        // Served from the stock (filled in the background); only an empty stock waits for TikTok.
+        const r = await exploreReservoir(norm.category, log, warn).take(norm.count);
+        const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0 };
+        log(`explore ${norm.category}: ${r.items.length} served ${r.fromStock ? 'from stock' : 'after a fill'}, ${r.ready} ready, ${resp.elapsedMs} ms`);
         return resp;
       }
       const r = await fetchForYou(count, log);
@@ -217,7 +260,7 @@ export async function buildServer() {
 
   registerProxyRoutes(app);
 
-  app.get('/api/stats', async () => ({ mediaRecords: mediaCount(), uptimeSec: Math.round(process.uptime()) }));
+  app.get('/api/stats', async () => ({ mediaRecords: mediaCount(), exploreStock: exploreStock(), forYouStock: forYouStock(), uptimeSec: Math.round(process.uptime()) }));
 
   if (config.serveClient) {
     const dist = findUp(path.join('client', 'dist')) || findUp(path.join('client', 'dist'), process.cwd()) || path.resolve('client', 'dist');

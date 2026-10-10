@@ -1890,9 +1890,60 @@ export interface ForYouResult {
   warnings: string[];
 }
 
+/** How many captured For You items the pump keeps ready while someone is watching */
+const FORYOU_TARGET = 20;
+/** The pump stops this long after the last feed request */
+const FORYOU_IDLE_MS = 3 * 60 * 1000;
+let forYouAskedAt = 0;
+let forYouPump: Promise<void> | undefined;
+
+export const forYouStock = (): { pending: number; pumping: boolean; lastError?: string } => ({ pending: s.pending.length, pumping: Boolean(forYouPump), lastError: s.lastFeedError });
+
+/** Scroll + ArrowDown: TikTok's feed loads the next batch when the reader approaches the end of the loaded list. */
+async function nudgeFeedPage(page: Page): Promise<void> {
+  await page
+    .evaluate(`(() => { const el = document.scrollingElement || document.body; el.scrollTop = el.scrollHeight; window.dispatchEvent(new Event('scroll')); })()`)
+    .catch(() => undefined);
+  await page.keyboard.press('ArrowDown').catch(() => undefined);
+}
+
 /**
- * Returns up to `count` not-yet-delivered items from the signed-in For You feed, nudging the page
- * (scroll + ArrowDown) until TikTok loads more, for at most ~12 s.
+ * Keeps the headless /foryou page loading in the background while a viewer is active, so that a
+ * feed request finds its items already captured instead of nudging the page itself and waiting.
+ * Runs until the feed has been idle for FORYOU_IDLE_MS, the page is gone or a QR sign-in needs the
+ * browser; the next request starts it again.
+ */
+function startForYouPump(): void {
+  if (forYouPump) return;
+  forYouPump = (async () => {
+    feedLog?.('For You pump: started');
+    let idleRounds = 0;
+    while (Date.now() - forYouAskedAt < FORYOU_IDLE_MS) {
+      const page = s.feedPage;
+      if (!page || page.isClosed() || !s.headless?.isConnected() || s.qrPage) break;
+      if (s.pending.length < FORYOU_TARGET) {
+        idleRounds = 0;
+        await nudgeFeedPage(page);
+        await new Promise((r) => setTimeout(r, 1200));
+      } else {
+        // Enough in stock: a page that reports an error now and then is left alone until items are taken.
+        idleRounds++;
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+      if (s.lastFeedError && idleRounds === 0 && s.pending.length === 0) {
+        // The page answers without items: pause the nudging so a stuck page is not hammered.
+        await new Promise((r) => setTimeout(r, 8000));
+      }
+    }
+    feedLog?.(`For You pump: stopped (${s.pending.length} pending)`);
+  })().finally(() => {
+    forYouPump = undefined;
+  });
+}
+
+/**
+ * Returns up to `count` not-yet-delivered items from the signed-in For You feed. The background
+ * pump keeps the page loading; this waits (at most ~12 s) only when the stock is empty.
  */
 export async function fetchForYou(count: number, log: (m: string) => void): Promise<ForYouResult> {
   feedLog = wrapLog(log);
@@ -1904,22 +1955,21 @@ export async function fetchForYou(count: number, log: (m: string) => void): Prom
     await sessionProbe(true);
     if ((s.state as SessionStatus['state']) !== 'logged_in') throw new Error(s.error ? `Not signed in (${s.error})` : 'Not signed in to TikTok. Use "Sign in" first.');
   }
+  forYouAskedAt = Date.now();
   const page = await feedPage();
+  startForYouPump();
   const deadline = Date.now() + 12_000;
   // Return early with a partial batch: the viewer prefetches ahead, so latency matters more than size.
   const enough = Math.min(count, 4);
-  let nudges = 0;
+  let polls = 0;
   while (s.pending.length < enough && Date.now() < deadline) {
-    if (nudges > 0 || s.pending.length === 0) {
-      // TikTok's feed loads the next batch when the reader approaches the end of the loaded list.
-      await page
-        .evaluate(`(() => { const el = document.scrollingElement || document.body; el.scrollTop = el.scrollHeight; window.dispatchEvent(new Event('scroll')); })()`)
-        .catch(() => undefined);
-      await page.keyboard.press('ArrowDown').catch(() => undefined);
+    if (!forYouPump) {
+      // The pump could not run (QR sign-in, page gone): nudge here as before.
+      await nudgeFeedPage(page);
     }
-    nudges++;
-    await new Promise((r) => setTimeout(r, 600));
-    if (s.lastFeedError && nudges > 6) break;
+    polls++;
+    await new Promise((r) => setTimeout(r, 300));
+    if (s.lastFeedError && polls > 12 && !s.pending.length) break;
   }
   if (!s.pending.length) {
     // Maybe the page is stuck on a dialog or the session expired: reload once.
