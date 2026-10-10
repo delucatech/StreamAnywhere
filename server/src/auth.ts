@@ -7,8 +7,16 @@
  * The repository is public, so only a salted scrypt hash of the password is stored here. New hash:
  *   node -e "const c=require('crypto'),s=c.randomBytes(16);console.log('scrypt:'+s.toString('hex')+':'+c.scryptSync(process.argv[1],s,32).toString('hex'))" "<password>"
  * APP_PASSWORD_HASH=off turns the password off (local experiments only).
+ *
+ * The cookie is signed with a SECRET key, never with the (public) hash alone: APP_COOKIE_SECRET, or a
+ * random key generated on first start and kept in a 0600 file next to the TikTok profile directory
+ * (APP_COOKIE_SECRET_FILE overrides the path), so cookies survive restarts and redeploys. The password
+ * hash is mixed into the key as well, so a new password still signs every browser out.
  */
 import * as crypto from 'node:crypto';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 
 const DEFAULT_HASH = 'scrypt:eb3fc89f8fc253c2e01a4a85d7c3530d:268de6a1156ad761dedda11285beb7e24f97f2edf61467cedb0d6cecb8fcd49c';
@@ -21,6 +29,34 @@ const PUBLIC_PATHS = new Set(['/login', '/api/health']);
 /** Set by registerAuth (read then, not at import, so tests can supply their own hash). */
 let passwordHash = DEFAULT_HASH;
 let cookieKey: Buffer = Buffer.alloc(0);
+
+function secretFilePath(): string {
+  if (process.env.APP_COOKIE_SECRET_FILE) return process.env.APP_COOKIE_SECRET_FILE;
+  const dir = process.env.TIKTOK_PROFILE_DIR ? path.dirname(process.env.TIKTOK_PROFILE_DIR) : path.join(os.homedir(), '.streamanywhere');
+  return path.join(dir, 'cookie-secret');
+}
+
+/** The cookie-signing secret: the environment, else the persisted random key (created on first start). */
+function loadCookieSecret(warn: (m: string) => void): Buffer {
+  const env = (process.env.APP_COOKIE_SECRET || '').trim();
+  if (env) return Buffer.from(env, 'utf8');
+  const file = secretFilePath();
+  try {
+    const text = fs.readFileSync(file, 'utf8').trim();
+    if (/^[0-9a-f]{64}$/i.test(text)) return Buffer.from(text, 'hex');
+    warn(`cookie secret file ${file} is not a 64-hex-digit key; replacing it`);
+  } catch {
+    /* none yet */
+  }
+  const fresh = crypto.randomBytes(32);
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, fresh.toString('hex') + '\n', { mode: 0o600 });
+  } catch (e) {
+    warn(`cookie secret could not be saved to ${file} (${(e as Error).message}): login cookies will not survive a restart`);
+  }
+  return fresh;
+}
 
 function sign(issued: number): string {
   return crypto.createHmac('sha256', cookieKey).update(`sa1.${issued}`).digest('base64url');
@@ -67,10 +103,20 @@ async function passwordMatches(input: string): Promise<boolean> {
   return crypto.timingSafeEqual(got, expected);
 }
 
-/** Only same-site paths: no "//host" or "/\host" open redirects. */
+/**
+ * Only same-site paths: no "//host" or "/\host" open redirects. Browsers strip tabs and newlines
+ * before parsing a URL ("/\t/evil.example" becomes "//evil.example"), so control characters are
+ * refused and the WHATWG parser has the final say on where the path would lead.
+ */
 function safeNext(v: unknown): string {
   const s = typeof v === 'string' ? v : '';
-  return /^\/(?![/\\])/.test(s) ? s : '/';
+  if (!/^\/(?![/\\])/.test(s) || /[\x00-\x20\x7f]/.test(s)) return '/';
+  try {
+    const u = new URL(s, 'http://x');
+    return u.origin === 'http://x' ? u.pathname + u.search : '/';
+  } catch {
+    return '/';
+  }
 }
 
 const esc = (s: string): string => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -102,11 +148,13 @@ ${wrong ? '<p class="err">Wrong password.</p>' : ''}
 
 export function registerAuth(app: FastifyInstance): void {
   passwordHash = (process.env.APP_PASSWORD_HASH || DEFAULT_HASH).trim();
-  cookieKey = crypto.createHash('sha256').update('streamanywhere-cookie|' + passwordHash).digest();
   if (/^(off|none|0|false)$/i.test(passwordHash)) {
     app.log.warn('APP_PASSWORD_HASH=off: the site is open to anyone');
     return;
   }
+  // Key = HMAC(secret, hash): unknowable without the secret, and different for every password.
+  const secret = loadCookieSecret((m) => app.log.warn(m));
+  cookieKey = crypto.createHmac('sha256', secret).update('streamanywhere-cookie|' + passwordHash).digest();
 
   // The login form posts application/x-www-form-urlencoded (works without JavaScript)
   app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string' }, (_req, body, done) => {

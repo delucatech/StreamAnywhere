@@ -23,6 +23,11 @@ export async function buildServer() {
     logger: { level: config.logLevel },
     bodyLimit: 64 * 1024,
     disableRequestLogging: config.logLevel !== 'debug',
+    // Behind Caddy (reverse_proxy from 127.0.0.1) every request would otherwise count as coming from
+    // 127.0.0.1: one bucket for all visitors, so ten anonymous wrong passwords a minute would lock
+    // the owner out of /login. Trust X-Forwarded-For/-Proto only from a loopback peer (TRUST_PROXY
+    // overrides, e.g. "true" on a hosting platform whose proxy is not local).
+    trustProxy: config.trustProxy,
   });
 
   // Same-origin deployments (SERVE_CLIENT) need no CORS; otherwise allow the configured client origins.

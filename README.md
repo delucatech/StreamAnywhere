@@ -105,8 +105,13 @@ open). The login page sets an HttpOnly cookie that is valid for a year and renew
 is used, so each browser types the password once. The repository holds only a salted scrypt hash
 of it (`server/src/auth.ts`); `APP_PASSWORD_HASH` replaces it (the command to make a hash is in
 that file, and a new password signs every browser out). `APP_PASSWORD_HASH=off` turns the
-password off. The cookie goes to the same origin only, so a client on another origin (GitHub
-Pages, `?api=`) cannot use a password-protected server. The IIS handler has no password.
+password off. The cookie is signed with a secret the server generates on first start and keeps in
+`cookie-secret` next to the TikTok profile directory (`APP_COOKIE_SECRET` or
+`APP_COOKIE_SECRET_FILE` override it); the hash alone, which is public, cannot mint a cookie.
+Behind a reverse proxy on the same host (Caddy) the per-visitor limits use `X-Forwarded-For`
+(`TRUST_PROXY`, default `loopback`). The cookie goes to the same origin only, so a client on
+another origin (GitHub Pages, `?api=`) cannot use a password-protected server. The IIS handler
+has no password.
 
 ### Public copies
 

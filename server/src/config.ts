@@ -63,6 +63,14 @@ const argPort = (() => {
   return i >= 0 ? Number(process.argv[i + 1]) : undefined;
 })();
 
+function parseTrustProxy(v: string | undefined): boolean | string {
+  const s = (v || '').trim();
+  if (!s) return 'loopback';
+  if (/^(1|true|yes)$/i.test(s)) return true;
+  if (/^(0|false|no)$/i.test(s)) return false;
+  return s;
+}
+
 export const config = {
   port: argPort || Number(process.env.PORT || 8787),
   /** Bind loopback for local dev; all interfaces when serving the built client or on a hosting platform. */
@@ -79,6 +87,8 @@ export const config = {
     mediaPerMinute: Number(process.env.RATE_LIMIT_MEDIA || 120),
   },
   logLevel: process.env.LOG_LEVEL || 'info',
+  /** Which reverse proxies' X-Forwarded-* headers to believe (Fastify trustProxy): 'loopback' = Caddy on this host. */
+  trustProxy: parseTrustProxy(process.env.TRUST_PROXY),
   userAgent:
     process.env.UPSTREAM_USER_AGENT ||
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',

@@ -108,6 +108,8 @@ async function network(): Promise<void> {
   const crypto = await import('node:crypto');
   const salt = crypto.randomBytes(16);
   process.env.APP_PASSWORD_HASH = `scrypt:${salt.toString('hex')}:${crypto.scryptSync(TEST_PASSWORD, salt, 32).toString('hex')}`;
+  // A throw-away cookie secret for this run (no file is written next to the real profile directory).
+  process.env.APP_COOKIE_SECRET = crypto.randomBytes(32).toString('hex');
   const app = await buildServer();
   await app.listen({ port: 0, host: '127.0.0.1' });
   const base = `http://127.0.0.1:${(app.server.address() as { port: number }).port}`;
@@ -153,14 +155,38 @@ async function network(): Promise<void> {
     check('wrong password -> 401, no cookie', wrong.status === 401 && !wrong.headers['set-cookie'], wrong.status);
     const evil = await call('POST', '/login', `password=${TEST_PASSWORD}&next=%2F%2Fevil.example`);
     check('open redirect refused', evil.status === 303 && evil.headers.location === '/', evil.headers.location);
-    const ok = await call('POST', '/login', `password=${encodeURIComponent(TEST_PASSWORD)}&next=%2Ffeed.html`);
+    // Browsers drop tabs/newlines before parsing: "/\t/evil.example" would become "//evil.example".
+    for (const [label, next] of [
+      ['tab', '%2F%09%2Fevil.example'],
+      ['newline', '%2F%0A%2Fevil.example'],
+      ['backslash', '%2F%5Cevil.example'],
+      ['scheme', 'https%3A%2F%2Fevil.example%2F'],
+    ]) {
+      const r = await call('POST', '/login', `password=${TEST_PASSWORD}&next=${next}`);
+      check(`open redirect refused (${label})`, r.status === 303 && r.headers.location === '/', r.headers.location);
+    }
+    const ok = await call('POST', '/login', `password=${encodeURIComponent(TEST_PASSWORD)}&next=%2Ffeed.html%3Fx%3D1`);
     const setCookie = String(ok.headers['set-cookie'] || '');
-    check('right password -> cookie + redirect', ok.status === 303 && ok.headers.location === '/feed.html' && /^sa_auth=\d+\.[\w-]{43};.*HttpOnly/.test(setCookie), { status: ok.status, setCookie });
+    check('right password -> cookie + redirect (query kept)', ok.status === 303 && ok.headers.location === '/feed.html?x=1' && /^sa_auth=\d+\.[\w-]{43};.*HttpOnly/.test(setCookie), { status: ok.status, setCookie });
     const forged = await call('GET', '/api/session', undefined, { cookie: setCookie.split(';')[0].replace(/=\d+\./, '=1.') });
     check('forged cookie -> 401', forged.status === 401, forged.status);
+    // A token signed the way an attacker who read the public repository would try: HMAC with a key
+    // derived from the (public) password hash alone must NOT be accepted.
+    const issued = Math.floor(Date.now() / 1000);
+    const publicKey = crypto.createHash('sha256').update('streamanywhere-cookie|' + process.env.APP_PASSWORD_HASH).digest();
+    const minted = `${issued}.${crypto.createHmac('sha256', publicKey).update(`sa1.${issued}`).digest('base64url')}`;
+    const mintedRes = await call('GET', '/api/session', undefined, { cookie: `sa_auth=${minted}` });
+    check('cookie minted from the public hash alone -> 401', mintedRes.status === 401, mintedRes.status);
     cookie = setCookie.split(';')[0];
     const withCookie = await call('GET', '/api/session');
     check('API with cookie -> 200', withCookie.status === 200, withCookie.status);
+    // Behind the loopback proxy (Caddy) the client address comes from X-Forwarded-For, so the per-IP
+    // /login limit (10 a minute) is per visitor: 10 wrong attempts from one address do not lock out another.
+    for (let i = 0; i < 10; i++) await call('POST', '/login', 'password=nope&next=%2F', { 'x-forwarded-for': '203.0.113.9' });
+    const limited = await call('POST', '/login', 'password=nope&next=%2F', { 'x-forwarded-for': '203.0.113.9' });
+    check('11th wrong password from one address -> 429', limited.status === 429, limited.status);
+    const other = await call('POST', '/login', `password=${encodeURIComponent(TEST_PASSWORD)}&next=%2F`, { 'x-forwarded-for': '198.51.100.7' });
+    check('another address still signs in', other.status === 303, other.status);
 
     console.log('\n== 3. Proxy Range relay (public CORS MP4)');
     const r = await call('POST', '/api/resolve', { url: TEST_MP4 });

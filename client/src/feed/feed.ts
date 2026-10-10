@@ -237,7 +237,18 @@ el.navPlus.addEventListener('click', () => toast('Upload is coming later'));
 el.navInbox.addEventListener('click', () => toast('Inbox is coming later'));
 el.navProfile.addEventListener('click', () => pressed(el.navProfile, () => openSessionPanel()));
 el.sessionClose.addEventListener('click', () => closeSessionPanel());
-el.sessionRefresh.addEventListener('click', () => pressed(el.sessionRefresh, () => refreshSession(true), { label: 'Checking' }));
+el.sessionRefresh.addEventListener('click', () =>
+  pressed(
+    el.sessionRefresh,
+    async () => {
+      sessionPollFailures = 0;
+      await refreshSession(true);
+      // A sign-in or profile check still running on the server is followed again from here.
+      if (state.session?.state === 'login_pending' || state.session?.probing) pollSession();
+    },
+    { label: 'Checking' },
+  ),
+);
 el.sessionLogin.addEventListener('click', () => pressed(el.sessionLogin, () => startLogin('qr'), { label: 'Starting' }));
 el.sessionLoginWindow.addEventListener('click', () => pressed(el.sessionLoginWindow, () => startLogin('window'), { label: 'Opening' }));
 // A code the user already has, saved before the scan (the server types it when TikTok asks for it).
@@ -354,7 +365,11 @@ function sendVerifyCode(): void {
     el.sessionCodeSend,
     async () => {
       el.sessionCodeText.blur(); // closes the on-screen keyboard so the answer is visible
-      await sendLiveInput({ type: 'code', code });
+      if (!(await sendLiveInput({ type: 'code', code }))) {
+        // The request never reached the server (connection, restart): nothing is being checked.
+        codePending = false;
+        showCodeResult('err', 'The code did not reach the server – check the connection and press Verify again.');
+      }
     },
     { label: 'Verifying' },
   );
@@ -415,13 +430,16 @@ function livePoint(e: PointerEvent): { x: number; y: number } {
   const size = state.session?.pageShotSize || { w: el.sessionQrImg.naturalWidth || 1, h: el.sessionQrImg.naturalHeight || 1 };
   return { x: Math.round(((e.clientX - r.left) / Math.max(1, r.width)) * size.w), y: Math.round(((e.clientY - r.top) / Math.max(1, r.height)) * size.h) };
 }
-async function sendLiveInput(req: SessionInputRequest): Promise<void> {
+/** Sends one input to the server's sign-in page; true when the server took it. */
+async function sendLiveInput(req: SessionInputRequest): Promise<boolean> {
   el.sessionQrImg.classList.add('busy');
   try {
     state.session = await api.sessionInput(req);
     renderSession();
+    return true;
   } catch (e) {
     toast(`Could not reach the sign-in page: ${errMsg(e)}`, true);
+    return false;
   } finally {
     el.sessionQrImg.classList.remove('busy');
   }
@@ -595,22 +613,46 @@ window.setInterval(() => {
   if (state.session && !el.session.classList.contains('hidden') && !el.sessionQr.classList.contains('hidden')) renderQrHint(state.session);
 }, 1000);
 
+/** Consecutive failed status polls; the last known status is kept meanwhile (a blip must not end the live view) */
+let sessionPollFailures = 0;
+const SESSION_POLL_GIVE_UP = 90; // ~3 minutes of 2 s polls
+/** The saved preference was For You but the server was still checking the profile at boot: switch when it says signed in */
+let restoreForYou = false;
+
 async function refreshSession(announce = false): Promise<SessionStatus | undefined> {
   try {
     const prev = state.session?.state;
+    const prevProbing = Boolean(state.session?.probing);
     state.session = await api.session();
+    sessionPollFailures = 0;
+    if (state.session.state === 'logged_in') signedOutPanelShown = false;
     renderSession();
     if (announce) toast(state.session.message || state.session.state);
-    if (state.session.state === 'logged_in' && prev === 'login_pending') {
+    if (state.session.state === 'logged_in' && (prev === 'login_pending' || (restoreForYou && prevProbing))) {
+      restoreForYou = false;
       closeSessionPanel();
       toast(`Signed in as @${state.session.username || '?'} – loading your For You feed`);
       prefs.source = 'foryou';
       savePrefs();
       renderSourceUi();
       void reload();
+    } else if (restoreForYou && !state.session.probing) {
+      // The profile check finished without a session: Explore stays, and the preference follows.
+      restoreForYou = false;
+      savePrefs();
+      if (state.session.supported) toast('Sign in (Profile) to see your For You feed; showing Explore meanwhile.', false, 5000);
     }
     return state.session;
   } catch (e) {
+    const prev = state.session;
+    sessionPollFailures++;
+    if (prev && prev.supported && (prev.state === 'login_pending' || prev.probing) && sessionPollFailures < SESSION_POLL_GIVE_UP) {
+      // The server is still mid-flow (its state lives there, not here): keep what we know, keep polling,
+      // and only mention the hiccup. Replacing the status would hide the QR / code box and stop the poll.
+      state.session = { ...prev, notice: `Connection problem (${errMsg(e)}) – retrying…` };
+      renderSession();
+      return prev;
+    }
     state.session = { supported: false, state: 'unsupported', error: `Server unreachable: ${errMsg(e)}` };
     renderSession();
     return undefined;
@@ -763,6 +805,9 @@ async function reload(): Promise<void> {
   await loadMore();
 }
 
+/** The sign-in panel was opened because the For You feed reported a missing session (once per sign-out) */
+let signedOutPanelShown = false;
+
 /** Fetches the next batch; returns how many videos were added. */
 async function loadMore(): Promise<number> {
   if (state.loading || state.exhausted) return 0;
@@ -793,7 +838,15 @@ async function loadMore(): Promise<number> {
     console.warn('[feed] batch failed:', msg);
     if (state.emptyBatches === 1 || state.emptyBatches % 4 === 0) toast(`Feed: ${msg} – retrying`, true, 5000);
     if (!state.entries.length && state.emptyBatches >= 3) showEmpty(`Feed failed: ${msg}`);
-    if (prefs.source === 'foryou' && /not signed in|session/i.test(msg)) void openSessionPanel();
+    if (prefs.source === 'foryou' && /not signed in|session/i.test(msg)) {
+      // The TikTok session is gone: retrying every 20 s would only reopen this panel again and again.
+      // Stop the loop (signing in or switching the source calls reload(), which starts it afresh).
+      state.exhausted = true;
+      if (!signedOutPanelShown) {
+        signedOutPanelShown = true;
+        void openSessionPanel();
+      }
+    }
   } finally {
     state.loading = false;
     hideLoading();
@@ -1414,6 +1467,12 @@ void (async () => {
       await feedReady;
       toast(`Signed in as @${state.session.username || '?'} – loading your For You feed`);
       void reload();
+    } else if (state.session?.probing) {
+      // The server is still checking the saved profile (a cold browser start on a small VM can take
+      // longer than a minute): keep the For You preference and keep polling; refreshSession switches
+      // over when the server reports the sign-in, or settles on Explore when it reports none.
+      restoreForYou = true;
+      pollSession();
     } else {
       savePrefs();
       if (state.session?.supported) toast('Sign in (Profile) to see your For You feed; showing Explore meanwhile.', false, 5000);

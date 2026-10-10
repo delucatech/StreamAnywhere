@@ -133,6 +133,17 @@ interface SessionInternal {
   /** QR token for which the saved ticket was already tried (one try per token) */
   qrTicketTriedToken?: string;
   qrTicketRetryAt?: number;
+  /** The ticket value OUR retry sent (the SDK's own retry carries a fresh, different ticket) */
+  qrTicketTriedValue?: string;
+  /** Token of a QR the SERVER requested (requestNewQr): TikTok's page does not poll it, so the loop must */
+  qrTokenOurs?: string;
+  /** When TikTok answered 'confirmed' with a redirect (the finishing phase counts from here) */
+  qrRedirectAt?: number;
+  /** The code last submitted to TikTok's field, and whether the server typed it by itself */
+  qrLastCode?: string;
+  qrLastCodeAuto?: boolean;
+  /** Since when the code field has been missing from the dialog while the step is still 'code' */
+  qrCodeGoneAt?: number;
   /** Shown in the UI for a few minutes (why the attempt restarted, what to do) */
   qrNotice?: string;
   qrNoticeAt?: number;
@@ -159,16 +170,19 @@ interface VerifyStore {
   ticket?: { value: string; at: number };
 }
 let verifyStore: VerifyStore | undefined;
+/** An entry that is still within the 48 h hold (checked on every use: the service runs for weeks). */
+const freshEntry = (e: any): { value: string; at: number } | undefined => (e && typeof e.value === 'string' && e.value && typeof e.at === 'number' && Date.now() - e.at < VERIFY_HOLD_MS ? { value: e.value, at: e.at } : undefined);
 function loadVerifyStore(): VerifyStore {
-  if (verifyStore) return verifyStore;
-  let j: any = {};
-  try {
-    j = JSON.parse(fs.readFileSync(VERIFY_STORE, 'utf8'));
-  } catch {
-    /* none yet */
+  if (!verifyStore) {
+    let j: any = {};
+    try {
+      j = JSON.parse(fs.readFileSync(VERIFY_STORE, 'utf8'));
+    } catch {
+      /* none yet */
+    }
+    verifyStore = { code: j.code, ticket: j.ticket };
   }
-  const fresh = (e: any): { value: string; at: number } | undefined => (e && typeof e.value === 'string' && e.value && typeof e.at === 'number' && Date.now() - e.at < VERIFY_HOLD_MS ? { value: e.value, at: e.at } : undefined);
-  verifyStore = { code: fresh(j.code), ticket: fresh(j.ticket) };
+  verifyStore = { code: freshEntry(verifyStore.code), ticket: freshEntry(verifyStore.ticket) };
   return verifyStore;
 }
 function saveVerifyStore(patch: Partial<VerifyStore>): void {
@@ -330,8 +344,19 @@ async function hasSessionCookie(page: Page): Promise<boolean> {
   return cookies.some((c) => (c.name === 'sessionid' || c.name === 'sid_tt' || c.name === 'sessionid_ss') && c.value);
 }
 
+interface AccountCheck {
+  ok: boolean;
+  username?: string;
+  nickname?: string;
+  avatar?: string;
+  error?: string;
+  /** TikTok itself answered that there is no session (error 13 session_expired / 8 not logged in).
+   *  false = no usable answer (empty body = soft anti-bot, navigation, timeout): NOT a sign-out. */
+  signedOut?: boolean;
+}
+
 /** Asks TikTok who is signed in (same-origin fetch from inside the page, so cookies/signing apply). */
-async function fetchAccount(page: Page): Promise<{ username?: string; nickname?: string; avatar?: string; ok: boolean; error?: string }> {
+async function fetchAccount(page: Page): Promise<AccountCheck> {
   try {
     const info: any = await page.evaluate(
       `fetch('https://www.tiktok.com/passport/web/account/info/?aid=1988', { credentials: 'include' }).then((r) => r.json())`,
@@ -339,9 +364,12 @@ async function fetchAccount(page: Page): Promise<{ username?: string; nickname?:
     if (info?.data && !info.data.error_code) {
       return { ok: true, username: info.data.username || info.data.screen_name, nickname: info.data.screen_name || info.data.username, avatar: info.data.avatar_url };
     }
-    return { ok: false, error: info?.data?.description || info?.message || 'not signed in' };
+    const code = Number(info?.data?.error_code);
+    const description = String(info?.data?.description || info?.message || 'not signed in');
+    const signedOut = code === 13 || code === 8 || /session|log ?in|sign ?in|not logged/i.test(description);
+    return { ok: false, signedOut, error: description };
   } catch (e) {
-    return { ok: false, error: (e as Error).message };
+    return { ok: false, signedOut: false, error: (e as Error).message.split('\n')[0] };
   }
 }
 
@@ -352,7 +380,15 @@ export function sessionStatus(): SessionStatus {
   const base: SessionStatus = { supported: true, state: s.state, username: s.username, nickname: s.nickname, avatar: s.avatar, error: s.error, browser };
   const savedCode = loadVerifyStore().code;
   if (savedCode && s.state !== 'logged_in') base.savedCode = { hint: savedCode.value.slice(-2), at: savedCode.at };
-  if (s.state === 'none') base.message = profileExists() ? 'A saved browser profile exists; checking it on first use.' : 'Not signed in.';
+  if (s.state === 'none') {
+    base.message = !profileExists()
+      ? 'Not signed in.'
+      : !probed
+        ? probeTries
+          ? 'A saved browser profile exists, but TikTok did not answer the last check; it is checked again shortly ("Check again").'
+          : 'A saved browser profile exists; checking it on first use.'
+        : 'A saved browser profile exists, but it holds no valid TikTok session.';
+  }
   if (s.state === 'login_pending') {
     base.loginMode = s.loginMode;
     if (s.loginMode === 'qr') {
@@ -402,28 +438,70 @@ function verifyTarget(): string {
 }
 
 let probe: Promise<void> | undefined;
+/** true once the saved profile was checked CONCLUSIVELY (signed in, or TikTok said there is no session) */
 let probed = false;
+/** Inconclusive checks so far (browser failed to start, empty answer, timeout); re-tried after a pause */
+let probeTries = 0;
+let probeRetryAt = 0;
+const PROBE_MAX_TRIES = 6;
+const PROBE_RETRY_MS = 30_000;
 
 /**
- * Verifies a saved profile (headless) once per server run so the status is right after a restart.
- * The check launches a browser and can take seconds, so GET /api/session starts it in the
- * background and answers immediately with `probing: true`; clients poll until it is false.
- * `wait` = true (used before fetching For You) awaits the result instead.
+ * Verifies a saved profile (headless) so the status is right after a restart. The check launches a
+ * browser and can take seconds, so GET /api/session starts it in the background and answers
+ * immediately with `probing: true`; clients poll until it is false. `wait` = true (used before
+ * fetching For You) awaits the result instead.
+ *
+ * Only a conclusive answer ends the probing: a session (logged_in) or TikTok's own "no session"
+ * answer. A browser that failed to start, a 45 s page load or TikTok's empty anti-bot body (all
+ * seen on the small VM) are retried after PROBE_RETRY_MS, a few times, so a valid saved sign-in
+ * is not reported as "not signed in" - that would send the user back to the QR code and the e-mail
+ * verification for nothing.
  */
 export async function sessionProbe(wait = false): Promise<SessionStatus> {
-  if (!probed && s.state === 'none' && profileExists() && sessionSupported().ok) {
+  if (!probed && s.state === 'none' && profileExists() && sessionSupported().ok && Date.now() >= probeRetryAt) {
     probe =
       probe ||
       (async () => {
+        let conclusive = false;
+        let problem = '';
         try {
           const page = await feedPage();
-          const acc = await fetchAccount(page);
-          if (acc.ok) markLoggedIn(acc);
-          // not ok: the saved profile holds no (valid) session - stay 'none' without reporting an error.
+          if (!(await hasSessionCookie(page))) {
+            conclusive = true; // no session cookie at all: nothing to check with TikTok
+            feedLog?.('saved profile holds no session cookie');
+          } else {
+            let acc = await fetchAccount(page);
+            // One quick in-page retry: the first answer after a cold start is often the empty one.
+            if (!acc.ok && !acc.signedOut) {
+              await new Promise((r) => setTimeout(r, 2500));
+              acc = await fetchAccount(page);
+            }
+            if (acc.ok) {
+              markLoggedIn(acc);
+              conclusive = true;
+              feedLog?.(`saved profile is signed in as @${acc.username}`);
+            } else if (acc.signedOut) {
+              conclusive = true; // the saved profile holds no valid session - stay 'none' without an error
+              feedLog?.('saved profile: TikTok reports no valid session (' + acc.error + ')');
+            } else problem = acc.error || 'no answer';
+          }
         } catch (e) {
-          s.error = (e as Error).message;
+          problem = (e as Error).message.split('\n')[0];
         } finally {
-          probed = true;
+          if (conclusive) {
+            probed = true;
+            probeTries = 0;
+            s.error = undefined;
+          } else {
+            probeTries++;
+            probeRetryAt = Date.now() + PROBE_RETRY_MS;
+            feedLog?.(`saved profile check inconclusive (${problem}); try ${probeTries}/${PROBE_MAX_TRIES}`);
+            if (probeTries >= PROBE_MAX_TRIES) {
+              probed = true;
+              s.error = `The saved sign-in could not be checked (${problem}). Sign in again, or restart the server to retry.`;
+            } else s.error = `The saved sign-in could not be checked yet (${problem}); retrying shortly.`;
+          }
           probe = undefined;
         }
       })();
@@ -438,6 +516,8 @@ export async function sessionProbe(wait = false): Promise<SessionStatus> {
 }
 
 function markLoggedIn(acc: { username?: string; nickname?: string; avatar?: string }): void {
+  probed = true;
+  probeTries = 0;
   s.state = 'logged_in';
   s.username = acc.username;
   s.nickname = acc.nickname;
@@ -463,7 +543,7 @@ const wrapLog = (log: (m: string) => void): ((m: string) => void) => (m) => {
 };
 
 export async function startLogin(mode: LoginMode, rawLog: (m: string) => void): Promise<SessionStatus> {
-  if (s.state === 'login_pending' && (s.loginBrowser || s.qrPage)) return sessionStatus();
+  if (s.state === 'login_pending' && (s.loginBrowser?.isConnected() || (s.qrPage && !s.qrPage.isClosed()))) return sessionStatus();
   if (probe) await probe.catch(() => undefined);
   probed = true;
   const log = (m: string): void => {
@@ -474,8 +554,49 @@ export async function startLogin(mode: LoginMode, rawLog: (m: string) => void): 
   return mode === 'window' ? startWindowLogin(log) : startQrLogin(log);
 }
 
+/**
+ * Counts QR attempts. startQrLogin takes a number; cancelLogin/logout bump it. A launch that is still
+ * in flight (tens of seconds on the small VM) notices that its attempt was abandoned and stops instead
+ * of opening an orphan page, and qrLoop's exit only touches the state of its own attempt.
+ */
+let qrAttempt = 0;
+
+/** Per-verification fields (dialog, code, result); kept apart from the ticket, which outlives a verification. */
+function resetVerifyFields(): void {
+  s.qrVerifyStep = undefined;
+  s.qrVerifyText = undefined;
+  s.qrVerifyAutoAt = undefined;
+  s.qrVerifySentAt = undefined;
+  s.qrVerifyTries = undefined;
+  s.qrCodeSentAt = undefined;
+  s.qrAutoCodeAt = undefined;
+  s.qrResendAt = undefined;
+  s.qrVerifyResult = undefined;
+  s.qrTextBeforeCode = undefined;
+  s.qrVerifyNetAt = undefined;
+  s.qrCodeGoneAt = undefined;
+  s.qrLastCode = undefined;
+  s.qrLastCodeAuto = undefined;
+}
+
+/** Ends a QR attempt that cannot go on (browser gone, start-up failure, timeout): back to "Not signed in" + why. */
+function failQrAttempt(error: string): void {
+  s.state = 'none';
+  s.error = error;
+  s.loginMode = undefined;
+  s.qr = s.qrState = s.qrPageHint = s.qrPageShot = s.qrRedirect = s.qrRedirectAt = s.qrExpireAt = undefined;
+  s.qrNotice = s.qrNoticeAt = undefined;
+  s.qrVerifyAt = undefined;
+  resetVerifyFields();
+}
+
 // ---------------------------------------------------------------- QR sign-in (headless, no display)
 async function startQrLogin(log: (m: string) => void): Promise<SessionStatus> {
+  const attempt = ++qrAttempt;
+  // A previous page of ours (e.g. left behind by a start-up failure) must not stay open.
+  const stale = s.qrPage;
+  s.qrPage = undefined;
+  if (stale && !stale.isClosed()) await stale.close().catch(() => undefined);
   s.state = 'login_pending';
   s.loginMode = 'qr';
   s.error = undefined;
@@ -498,11 +619,12 @@ async function startQrLogin(log: (m: string) => void): Promise<SessionStatus> {
   s.qrNotice = undefined;
   s.qrNoticeAt = undefined;
   s.qrTicketTriedToken = undefined;
-  s.qrCodeSentAt = undefined;
-  s.qrAutoCodeAt = undefined;
-  s.qrResendAt = undefined;
-  s.qrVerifyResult = undefined;
-  s.qrTextBeforeCode = undefined;
+  s.qrTicketTriedValue = undefined;
+  s.qrTicketRetryAt = undefined;
+  s.qrRateLimitedAt = undefined;
+  s.qrTokenOurs = undefined;
+  s.qrRedirectAt = undefined;
+  resetVerifyFields();
   s.qrState = 'new';
   s.loginStartedAt = Date.now();
   const stored = loadVerifyStore();
@@ -511,13 +633,49 @@ async function startQrLogin(log: (m: string) => void): Promise<SessionStatus> {
     s.qrTicketAt = stored.ticket.at;
     log('verification ticket restored from disk (a scan within 48 h of the last code needs no e-mail)');
   }
-  const browser = await headlessBrowser();
-  // An e2-micro cannot run three TikTok tabs: close the feed/explore pages while the QR is pending.
-  await closeSecondaryPages();
-  const page = await browser.newPage();
-  await preparePage(page, browser);
-  await page.setViewport({ ...QR_VIEWPORT, deviceScaleFactor: 1 }).catch(() => undefined);
-  s.qrPage = page;
+  /** Cancel / Sign out / another Sign in while the browser was starting: this attempt is over. */
+  const abandoned = (): boolean => attempt !== qrAttempt || s.state !== 'login_pending' || s.loginMode !== 'qr';
+  let page: Page | undefined;
+  try {
+    const browser = await headlessBrowser();
+    if (abandoned()) return sessionStatus();
+    // An e2-micro cannot run three TikTok tabs: close the feed/explore pages while the QR is pending.
+    await closeSecondaryPages();
+    if (abandoned()) return sessionStatus();
+    page = await browser.newPage();
+    await preparePage(page, browser);
+    await page.setViewport({ ...QR_VIEWPORT, deviceScaleFactor: 1 }).catch(() => undefined);
+    if (abandoned()) {
+      await page.close().catch(() => undefined);
+      return sessionStatus();
+    }
+    s.qrPage = page;
+    installQrHandlers(page, log);
+    // The first load of TikTok's page can exceed puppeteer's wait on the starved VM; the navigation
+    // goes on in the background and the loop below picks the QR up (or reloads), so this is not fatal.
+    await page.goto(QR_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch((e) => log('QR page did not finish loading in time (' + (e as Error).message.split('\n')[0] + '); the loop keeps watching it'));
+    if (abandoned()) {
+      if (s.qrPage === page) s.qrPage = undefined;
+      await page.close().catch(() => undefined);
+      return sessionStatus();
+    }
+    log('QR sign-in page opened');
+    void qrLoop(page, browser, log, attempt);
+  } catch (e) {
+    const msg = (e as Error).message.split('\n')[0];
+    log('QR sign-in could not start: ' + msg);
+    if (page && s.qrPage === page) s.qrPage = undefined;
+    if (page) await page.close().catch(() => undefined);
+    if (!abandoned()) failQrAttempt(`The sign-in could not start on the server (${msg}). Press "Sign in with QR code" to try again.`);
+    throw e;
+  }
+  // Give the first QR a moment so the first status answer already carries it.
+  for (let i = 0; i < 20 && !s.qr && s.qrPage === page; i++) await new Promise((r) => setTimeout(r, 250));
+  return sessionStatus();
+}
+
+/** TikTok's answers on the QR page: QR images, scan status, verification requests and tickets. */
+function installQrHandlers(page: Page, log: (m: string) => void): void {
   // Diagnostic: what TikTok's QR API answers (datacenter IPs get rate-limited / empty answers).
   // The QR comes from TikTok's own API answer (data.qrcode = base64 PNG) - no need to wait for the
   // page to draw it into a canvas, which a small VM may never get around to. The qrconnect poll
@@ -546,6 +704,7 @@ async function startQrLogin(log: (m: string) => void): Promise<SessionStatus> {
             const d = j?.data || {};
             if (j?.message === 'error' || (typeof d.error_code === 'number' && d.error_code !== 0)) {
               s.qrVerifyResult = { state: 'rejected', text: String(d.description || d.error_msg || 'error ' + d.error_code).slice(0, 160), at: Date.now() };
+              forgetRejectedCode(log);
             }
           }
         })
@@ -558,56 +717,79 @@ async function startQrLogin(log: (m: string) => void): Promise<SessionStatus> {
         s.qrApi = `${res.status()} ${new URL(res.url()).pathname} ${body.replace(/\s+/g, ' ').slice(0, 160)}`;
         if (res.url().includes('get_qrcode')) s.qrGetUrl = res.url();
         else if (!s.qrCheckUrl) s.qrCheckUrl = res.url();
+        // Answer to a status check that carried the verification ticket (the SDK's retry after the code,
+        // or our own re-use of a saved ticket): this is where we learn whether the token survived.
+        const sentTicket = res.request().headers()['x-tt-passport-ticket'];
+        const ticketed = Boolean(sentTicket);
+        let urlToken: string | null = null;
+        try {
+          urlToken = new URL(res.url()).searchParams.get('token');
+        } catch {
+          /* ignore */
+        }
+        // Our own re-use of a SAVED ticket (retryWithTicket), as opposed to the SDK's retry with a fresh one.
+        const ourRetry = ticketed && Boolean(s.qrTicketTriedValue) && sentTicket === s.qrTicketTriedValue && Boolean(urlToken) && urlToken === s.qrTicketTriedToken;
         let json: any;
         try {
           json = JSON.parse(body);
         } catch {
           log('QR API (not JSON): ' + s.qrApi);
+          if (ourRetry) ticketRetryLost(page, log, 'empty or non-JSON answer');
           return;
         }
         const d = json?.data || {};
-        // Answer to a status check that carried the verification ticket (the SDK's retry after the code,
-        // or our own re-use of a saved ticket): this is where we learn whether the token survived.
-        const ticketed = Boolean(res.request().headers()['x-tt-passport-ticket']);
-        if (ticketed) log('status check with verification ticket answered: ' + body.replace(/\s+/g, ' ').slice(0, 200));
+        if (ticketed) {
+          s.qrTicketRetryAt = undefined; // answered
+          log('status check with verification ticket answered: ' + body.replace(/\s+/g, ' ').slice(0, 200));
+        }
         if (typeof d.qrcode === 'string' && d.qrcode.length > 100 && s.qrPage === page) {
           s.qr = 'data:image/png;base64,' + d.qrcode;
           s.qrState = 'new';
           s.qrPageHint = undefined;
           s.qrPageShot = undefined;
           s.scannedAt = undefined;
-          if (s.qrVerifyAt) log('verification abandoned - TikTok issued a new QR code');
+          if (s.qrVerifyAt) {
+            log('verification abandoned - TikTok issued a new QR code');
+            resetVerifyFields();
+          }
           s.qrVerifyAt = undefined;
-          s.qrVerifyStep = undefined;
-          s.qrVerifyText = undefined;
           if (typeof d.token === 'string') s.qrToken = d.token;
           s.qrExpireAt = typeof d.expire_time === 'number' && d.expire_time > 1e9 ? d.expire_time * 1000 : Date.now() + 55_000;
           log(`QR code received from TikTok's API (${d.qrcode.length} chars, valid ${Math.round((s.qrExpireAt - Date.now()) / 1000)} s)`);
         } else if (typeof d.status === 'string') {
           // The page keeps polling ITS token; once we drive our own, only answers for our token count.
-          let urlToken: string | null = null;
-          try {
-            urlToken = new URL(res.url()).searchParams.get('token');
-          } catch {
-            /* ignore */
-          }
           if (s.qrToken && urlToken && urlToken !== s.qrToken) return;
           if (d.status === 'scanned' || d.status === 'confirmed') {
             if (s.qrState !== 'scanned') log(`QR ${d.status} - waiting for TikTok to finish the sign-in`);
             s.qrState = 'scanned';
             s.scannedAt = s.scannedAt || Date.now();
-            if (d.status === 'confirmed' && typeof d.redirect_url === 'string' && d.redirect_url.startsWith('http')) s.qrRedirect = d.redirect_url;
+            if (d.status === 'confirmed' && typeof d.redirect_url === 'string' && d.redirect_url.startsWith('http')) {
+              if (!s.qrRedirect) s.qrRedirectAt = Date.now();
+              s.qrRedirect = d.redirect_url;
+            }
           } else if (d.status === 'expired' && ticketed) {
             // The code was accepted, but TikTok had already retired the QR token (~1 min life). Start over
             // with a fresh code; the ticket is re-used for it so the e-mail is not asked again.
             void restartAfterVerify(page, log, "Your verification went through, but TikTok's QR session had expired by then (its codes live about a minute). A fresh code is loading: scan it again. The server re-uses the verification, so no second e-mail should be needed.");
           } else if (d.status === 'expired' && (s.qrState as string) !== 'scanned') s.qrState = 'expired';
         } else if (json?.message === 'error' || d.error_code) {
-          if (ticketed && d.error_code !== 2135) {
+          if (ticketed && !ourRetry && d.error_code !== 2135) {
             void restartAfterVerify(page, log, `TikTok did not accept the verified sign-in (${d.description || 'error ' + d.error_code}). A fresh code is loading: scan it again.`);
-          } else if (d.error_code === 2135 && res.url().includes('qrconnect')) {
-            if (ticketed) log('TikTok did not accept the saved verification ticket for this token; asking for a fresh verification');
-            else if (retryWithTicket(page, log)) return; // the ticketed answer decides (confirmed / 2135 again)
+          } else if ((d.error_code === 2135 || (ourRetry && d.error_code !== 7)) && res.url().includes('qrconnect')) {
+            if (ourRetry) {
+              // The SAVED ticket (an older attempt, maybe another account) is no good: forget it, or every
+              // new token would be retried with it and the attempt would restart forever.
+              log(`TikTok rejected the saved verification ticket (${d.description || 'error ' + d.error_code}); forgetting it and starting a fresh verification`);
+              s.qrTicket = s.qrTicketAt = s.qrTicketTriedValue = undefined;
+              saveVerifyStore({ ticket: undefined });
+              resetVerifyFields();
+            } else if (ticketed) {
+              // The SDK's own retry after an accepted code was answered with 2135 again: a NEW verification
+              // starts; nothing of the old one (Send code pressed, result, typed code) applies to it.
+              log('TikTok asks for another verification after the accepted code; starting the dialog afresh');
+              s.qrTicketTriedToken = s.qrToken; // do not re-send the ticket TikTok just refused for this token
+              resetVerifyFields();
+            } else if (retryWithTicket(page, log)) return; // the ticketed answer decides (confirmed / 2135 again)
             // "IDV required": the phone confirmed, but TikTok wants an identity verification (captcha,
             // code, ...) inside THIS page before it hands over the session. Its SDK renders that as a
             // modal; the UI shows the page live and forwards the user's clicks/typing (sessionInput).
@@ -625,12 +807,6 @@ async function startQrLogin(log: (m: string) => void): Promise<SessionStatus> {
       })
       .catch(() => undefined);
   });
-  await page.goto(QR_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 });
-  log('QR sign-in page opened');
-  void qrLoop(page, browser, log);
-  // Give the first QR a moment so the first status answer already carries it.
-  for (let i = 0; i < 20 && !s.qr && s.qrPage === page; i++) await new Promise((r) => setTimeout(r, 250));
-  return sessionStatus();
 }
 
 async function captureQr(page: Page): Promise<string | undefined> {
@@ -665,12 +841,14 @@ async function requestNewQr(page: Page, log: (m: string) => void): Promise<boole
     if (typeof d.qrcode === 'string' && d.qrcode.length > 100) {
       s.qr = 'data:image/png;base64,' + d.qrcode;
       s.qrToken = typeof d.token === 'string' ? d.token : s.qrToken;
+      // TikTok's page knows nothing of this token and keeps polling its own: qrLoop polls ours.
+      s.qrTokenOurs = s.qrToken;
       s.qrExpireAt = typeof d.expire_time === 'number' && d.expire_time > 1e9 ? d.expire_time * 1000 : Date.now() + 55_000;
       s.qrState = 'new';
       s.scannedAt = undefined;
       s.qrPageHint = undefined;
       s.qrPageShot = undefined;
-      log(`new QR requested in page (valid ${Math.round((s.qrExpireAt - Date.now()) / 1000)} s)`);
+      log(`new QR requested in page (valid ${Math.round((s.qrExpireAt - Date.now()) / 1000)} s); the server polls its status`);
       return true;
     }
     log('in-page get_qrcode answered without a QR: ' + JSON.stringify(json).slice(0, 160));
@@ -685,7 +863,11 @@ async function requestNewQr(page: Page, log: (m: string) => void): Promise<boole
   return false;
 }
 
-/** Polls check_qrconnect for OUR token (kept for diagnostics; the page's own polling is used in normal operation). */
+/**
+ * Polls check_qrconnect for OUR token. Normally TikTok's page polls its own token and the response
+ * hook reads along; a token the server requested (requestNewQr) is polled from qrLoop with this - the
+ * fetch runs inside the page, so the same response hook handles the answer.
+ */
 export async function pollQrToken(page: Page): Promise<{ status?: string; redirect?: string; raw?: string }> {
   if (!s.qrToken) return {};
   const base = s.qrCheckUrl || (s.qrGetUrl ? s.qrGetUrl.replace('/get_qrcode/', '/check_qrconnect/') : undefined);
@@ -710,15 +892,37 @@ function retryWithTicket(page: Page, log: (m: string) => void): boolean {
   if (!s.qrTicket || !s.qrToken || Date.now() - (s.qrTicketAt || 0) > TICKET_KEEP_MS || s.qrTicketTriedToken === s.qrToken) return false;
   const base = s.qrCheckUrl || (s.qrGetUrl ? s.qrGetUrl.replace('/get_qrcode/', '/check_qrconnect/') : undefined);
   if (!base) return false;
-  s.qrTicketTriedToken = s.qrToken;
+  const token = s.qrToken;
+  s.qrTicketTriedToken = token;
+  s.qrTicketTriedValue = s.qrTicket;
   s.qrTicketRetryAt = Date.now();
   const u = new URL(unsignedUrl(base));
-  u.searchParams.set('token', s.qrToken);
+  u.searchParams.set('token', token);
   log('re-using the verification ticket from the previous attempt for the new QR token');
   void page
     .evaluate(`fetch(${JSON.stringify(u.toString())}, { credentials: 'include', headers: { 'x-tt-passport-ticket': ${JSON.stringify(s.qrTicket)} } }).then((r) => r.text())`)
-    .catch((e) => log('ticketed status check failed: ' + (e as Error).message.split('\n')[0]));
+    .then(
+      (text) => {
+        if (!String(text || '').trim()) ticketRetryLost(page, log, 'empty answer');
+        // a JSON answer is handled by the response hook (confirmed / expired / 2135 / other error)
+      },
+      (e) => ticketRetryLost(page, log, (e as Error).message.split('\n')[0]),
+    );
   return true;
+}
+
+/**
+ * Our ticketed status check got no usable answer (TikTok's empty anti-bot body, a protocol timeout, a
+ * navigation). Nobody else will answer for this token, so the normal verification dialog takes over -
+ * the phone did confirm, and the SDK's modal is on the page.
+ */
+function ticketRetryLost(page: Page, log: (m: string) => void, why: string): void {
+  if (s.qrPage !== page || s.qrToken !== s.qrTicketTriedToken || (s.qrState as string) !== 'scanned' || s.qrRedirect) return;
+  log(`ticketed status check brought no answer (${why}); continuing with the verification dialog`);
+  s.qrTicketRetryAt = undefined;
+  s.qrState = 'verify';
+  s.qrVerifyAt = Date.now();
+  s.scannedAt = s.scannedAt || Date.now();
 }
 
 let restarting = false;
@@ -732,20 +936,14 @@ async function restartAfterVerify(page: Page, log: (m: string) => void, notice: 
     s.qrNotice = notice;
     s.qrNoticeAt = Date.now();
     s.qrVerifyAt = undefined;
-    s.qrVerifyStep = undefined;
-    s.qrVerifyText = undefined;
-    s.qrVerifyAutoAt = undefined;
-    s.qrVerifySentAt = undefined;
-    s.qrCodeSentAt = undefined;
-    s.qrAutoCodeAt = undefined;
-    s.qrResendAt = undefined;
-    s.qrVerifyResult = undefined;
-    s.qrTextBeforeCode = undefined;
+    resetVerifyFields();
     s.qrState = 'expired';
     s.qr = undefined;
     s.qrExpireAt = undefined;
     s.scannedAt = undefined;
     s.qrRedirect = undefined;
+    s.qrRedirectAt = undefined;
+    s.qrTokenOurs = undefined;
     // The attempt starts afresh: the 10-minute scan window counts from now again.
     s.loginStartedAt = Date.now();
     await page.goto(QR_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => undefined);
@@ -930,6 +1128,7 @@ async function driveVerifyDialog(page: Page, log: (m: string) => void): Promise<
     // itself: every press makes TikTok issue a new code and the one in the user's inbox goes stale.
     if (s.qrVerifyStep !== 'code') log('verification: code field is up');
     s.qrVerifyStep = 'code';
+    s.qrCodeGoneAt = undefined;
     s.qrVerifyTries = 0;
     if (!s.qrCodeSentAt) {
       const send = await findInPage(page, '^(send|get) (the )?code$|^send$', 'resend');
@@ -947,11 +1146,30 @@ async function driveVerifyDialog(page: Page, log: (m: string) => void): Promise<
       s.qrNotice = `Trying the code you entered earlier (ends in ${saved.value.slice(-2)}) by itself…`;
       s.qrNoticeAt = now;
       log('verification: typing the remembered code automatically');
-      await enterVerifyCode(page, saved.value, log);
+      await enterVerifyCode(page, saved.value, log, true);
     }
     return;
   }
   if (s.qrVerifyResult?.state === 'checking') checkCodeOutcome(v.text, log);
+  if (s.qrVerifyStep === 'code') {
+    // The code field is gone. While TikTok judges the code, or after it accepted it (modal closed, its
+    // ticketed status check still under way), the step stays 'code' and nothing on the page is touched.
+    const r = s.qrVerifyResult;
+    if (r?.state === 'checking') return;
+    if (r?.state === 'accepted') {
+      // The ticketed status check that follows the acceptance can be lost (empty body, timeout). We hold
+      // ticket + token: send it ourselves once after 15 s, and start over with a fresh QR after 60 s.
+      if (now - r.at > 60_000) void restartAfterVerify(page, log, 'TikTok accepted the code but did not finish the sign-in. A fresh code is loading: scan it again. The server re-uses the verification, so no second e-mail should be needed.');
+      else if (now - r.at > 15_000 && s.qrTicketTriedToken !== s.qrToken && retryWithTicket(page, log)) log('verification: no answer after the accepted code - sending the status check with the ticket ourselves');
+      return;
+    }
+    // Otherwise a short grace period: TikTok re-renders the dialog between steps.
+    s.qrCodeGoneAt = s.qrCodeGoneAt || now;
+    if (now - s.qrCodeGoneAt < 8000) return;
+    s.qrCodeGoneAt = undefined;
+    s.qrVerifyStep = 'choose';
+    log('verification: the code field is gone; looking at the dialog again');
+  }
   if (now - (s.qrVerifyAutoAt || 0) < 5000) return; // give the dialog time to change after an activation
   // The Email row (label + masked address) first, the bare word as fallback, phone/SMS after that.
   const email = (await findInPage(page, '\\bemail\\b.*@', 'password')) || (await findInPage(page, '\\bemail\\b|\\be-mail\\b', 'password'));
@@ -970,7 +1188,30 @@ async function driveVerifyDialog(page: Page, log: (m: string) => void): Promise<
     }
     return;
   }
-  if (s.qrVerifyStep !== 'sending' || now - (s.qrVerifyAutoAt || 0) > 20_000) s.qrVerifyStep = s.qrVerifyStep === 'sending' ? 'sending' : 'choose';
+  // Neither a code field nor a method row: 'sending' (a row was activated) falls back to 'choose' after
+  // 20 s, so the UI tells the user to tap the live picture instead of waiting for a field forever.
+  if (s.qrVerifyStep === 'sending') {
+    if (now - (s.qrVerifyAutoAt || 0) > 20_000) {
+      s.qrVerifyStep = 'choose';
+      log('verification: no code field appeared after choosing the method; asking the user to act on the live picture');
+    }
+  } else s.qrVerifyStep = 'choose';
+}
+
+/**
+ * TikTok rejected the code that was just submitted: a stored copy of it must not be typed again (after
+ * "Resend code", a restart or the next sign-in). The notice is only for a code the server tried by itself.
+ */
+function forgetRejectedCode(log: (m: string) => void): void {
+  const stored = loadVerifyStore().code;
+  if (s.qrLastCode && stored && stored.value === s.qrLastCode) {
+    saveVerifyStore({ code: undefined });
+    log('verification: the rejected code is forgotten');
+  }
+  if (s.qrLastCodeAuto) {
+    s.qrNotice = 'The code from earlier is no longer accepted - enter the one from the newest e-mail.';
+    s.qrNoticeAt = Date.now();
+  }
 }
 
 const ENABLED_FN = Function('e', 'return !e.disabled && e.getAttribute("aria-disabled") !== "true";') as ElFn;
@@ -1093,7 +1334,12 @@ async function typeVerifyCode(page: Page, code: string, log: (m: string) => void
 }
 
 /** Puts a verification code into TikTok's code field and submits it (Next/Verify button, else Enter). */
-async function enterVerifyCode(page: Page, code: string, log: (m: string) => void): Promise<void> {
+async function enterVerifyCode(page: Page, code: string, log: (m: string) => void, auto = false): Promise<void> {
+  // Synchronously first: qrLoop's driveVerifyDialog runs concurrently and would otherwise auto-type the
+  // same (just saved) code a second time while this one is still scanning the dialog.
+  s.qrLastCode = code;
+  s.qrLastCodeAuto = auto;
+  s.qrVerifyResult = { state: 'checking', at: Date.now() };
   s.qrTextBeforeCode = (await scanVerifyDialog(page))?.text || s.qrVerifyText || '';
   s.qrVerifyResult = { state: 'checking', at: Date.now() };
   const problem = await typeVerifyCode(page, code, log);
@@ -1167,11 +1413,7 @@ function checkCodeOutcome(text: string, log: (m: string) => void): void {
   if (bad) {
     s.qrVerifyResult = { state: 'rejected', text: bad.slice(0, 160), at: Date.now() };
     log('verification: TikTok rejected the code: ' + bad.slice(0, 160));
-    if (s.qrAutoCodeAt && s.qrAutoCodeAt >= r.at - 1000) {
-      saveVerifyStore({ code: undefined });
-      s.qrNotice = 'The code from earlier is no longer accepted - enter the one from the newest e-mail.';
-      s.qrNoticeAt = Date.now();
-    }
+    forgetRejectedCode(log);
     return;
   }
   if (Date.now() - r.at > 25_000) {
@@ -1222,7 +1464,7 @@ export async function sessionInput(req: SessionInputRequest): Promise<SessionSta
         if (code) {
           feedLog?.(`verification: entering the ${code.length}-digit code`);
           saveVerifyStore({ code: { value: code, at: Date.now() } });
-          await enterVerifyCode(page, code, (m) => feedLog?.(m));
+          await enterVerifyCode(page, code, (m) => feedLog?.(m), false);
         }
         break;
       }
@@ -1234,6 +1476,10 @@ export async function sessionInput(req: SessionInputRequest): Promise<SessionSta
           s.qrResendAt = Date.now();
           s.qrCodeSentAt = Date.now();
           s.qrVerifyResult = undefined;
+          // Older codes stop working once a new one is sent: forget the stored one, and type nothing by
+          // itself until the user enters the code from the new e-mail.
+          saveVerifyStore({ code: undefined });
+          s.qrAutoCodeAt = Date.now();
           await activate(page, btn.el, 0, (m) => feedLog?.(m), 'pressing "Resend"');
         } else feedLog?.('verification: no Resend button on the page');
         break;
@@ -1251,22 +1497,39 @@ export async function sessionInput(req: SessionInputRequest): Promise<SessionSta
   return sessionStatus();
 }
 
-async function qrLoop(page: Page, browser: Browser, log: (m: string) => void): Promise<void> {
+async function qrLoop(page: Page, browser: Browser, log: (m: string) => void, attempt: number): Promise<void> {
   let lastReload = Date.now();
   let lastShotAt = 0;
   let misses = 0;
   let confirmingNavigated = false;
+  /** When the session cookie first appeared after TikTok's confirmation: the sign-in is being finished */
+  let cookieSeenAt = 0;
+  let lastOwnPoll = 0;
+  let nextAccountCheck = 0;
+  let accountFailures = 0;
+  let exit: 'timeout' | 'browser' | undefined;
   try {
     while (s.qrPage === page) {
-      // 10 minutes to scan; once TikTok asks for a verification the attempt is held for VERIFY_HOLD_MS.
+      // 10 minutes to scan, counted from the last progress (start, scan, accepted code, confirmation,
+      // cookie); once TikTok asks for a verification the attempt is held for VERIFY_HOLD_MS instead.
       const inVerify = (s.qrState as string) === 'verify';
-      const deadline = inVerify ? (s.qrCodeSentAt || s.qrVerifyAt || Date.now()) + VERIFY_HOLD_MS : (s.loginStartedAt || 0) + LOGIN_TIMEOUT_MS;
-      if (Date.now() > deadline) break;
-      if (!browser.isConnected() || page.isClosed()) break;
+      const progressAt = Math.max(s.loginStartedAt || 0, s.scannedAt || 0, s.qrTicketAt || 0, s.qrRedirectAt || 0, cookieSeenAt);
+      const deadline = inVerify ? (s.qrCodeSentAt || s.qrVerifyAt || Date.now()) + VERIFY_HOLD_MS : progressAt + LOGIN_TIMEOUT_MS;
+      if (Date.now() > deadline && !(s.qrRedirect && !confirmingNavigated)) {
+        exit = 'timeout';
+        break;
+      }
+      if (!browser.isConnected() || page.isClosed()) {
+        exit = 'browser';
+        break;
+      }
       // --- TikTok's page drives the cycle (one poll stream = no extra rate-limit pressure). We only
       //     react: when its code expired, click the code area (TikTok's refresh) and wait for the new one.
       const verifying = (s.qrState as string) === 'verify';
-      const confirming = verifying || ((s.qrState as string) === 'scanned' && Date.now() - (s.scannedAt || 0) < 120_000);
+      if (!s.qrRedirect) cookieSeenAt = 0; // a restart (restartAfterVerify) dropped the confirmation
+      /** TikTok confirmed the sign-in (redirect / cookie): no QR refresh or reload may interfere now. */
+      const finishing = Boolean(s.qrRedirect) || cookieSeenAt > 0;
+      const confirming = verifying || finishing || ((s.qrState as string) === 'scanned' && Date.now() - (s.scannedAt || 0) < 120_000);
       const expiredNow = (s.qrState as string) === 'expired' || (s.qrExpireAt ? Date.now() > s.qrExpireAt + 1500 : false);
       if (s.qrRedirect && !confirmingNavigated) {
         // TikTok confirmed the scan and told the page where to go; follow it ourselves in case the page
@@ -1274,6 +1537,12 @@ async function qrLoop(page: Page, browser: Browser, log: (m: string) => void): P
         confirmingNavigated = true;
         log('QR confirmed - following the TikTok redirect to finish the sign-in');
         await page.goto(s.qrRedirect, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => undefined);
+      }
+      // A QR the SERVER requested is unknown to TikTok's page, which keeps polling its own old token:
+      // poll ours (inside the page, so the response hook handles the answer like any other).
+      if (!verifying && !finishing && s.qr && s.qrToken && s.qrTokenOurs === s.qrToken && !s.qrRateLimitedAt && Date.now() - lastOwnPoll > 2000) {
+        lastOwnPoll = Date.now();
+        await pollQrToken(page);
       }
       if (s.qr && expiredNow && !s.qrRateLimitedAt && !confirming) {
         const before = s.qr;
@@ -1297,7 +1566,7 @@ async function qrLoop(page: Page, browser: Browser, log: (m: string) => void): P
         if (await requestNewQr(page, log)) misses = 0;
       }
       if (s.qrRateLimitedAt && Date.now() - s.qrRateLimitedAt > 120_000) s.qrRateLimitedAt = undefined;
-      if (await hasSessionCookie(page).catch(() => false)) {
+      if (Date.now() >= nextAccountCheck && (await hasSessionCookie(page).catch(() => false))) {
         const acc = await fetchAccount(page);
         if (acc.ok) {
           markLoggedIn(acc);
@@ -1307,11 +1576,25 @@ async function qrLoop(page: Page, browser: Browser, log: (m: string) => void): P
           await resetFeedPage();
           return;
         }
+        if (acc.signedOut) {
+          // A stale cookie from an earlier session (the profile was signed in once): not a sign-in.
+          nextAccountCheck = Date.now() + (s.qrRedirect ? 2000 : 15_000);
+        } else if (s.qrRedirect) {
+          // The confirmation arrived and the cookie is there, but TikTok did not answer the account
+          // check (empty body / timeout, seen from the VM): keep asking, never throw the sign-in away.
+          if (!cookieSeenAt) {
+            cookieSeenAt = Date.now();
+            log('session cookie present after the confirmation - waiting for TikTok to answer the account check');
+          }
+          accountFailures++;
+          if (accountFailures % 10 === 0) log(`account check still unanswered (${acc.error}); retrying`);
+          nextAccountCheck = Date.now() + 2000;
+        }
       }
       const text = String(await page.evaluate('document.body.innerText').catch(() => '')).toLowerCase();
       // Reload for a fresh QR only when TikTok says the current one expired (or it is past the expiry
       // it announced). Never while a scan is being confirmed: a reload there threw the login away.
-      const scanning = verifying || ((s.qrState as string) === 'scanned' && Date.now() - (s.scannedAt || 0) < 90_000);
+      const scanning = verifying || finishing || ((s.qrState as string) === 'scanned' && Date.now() - (s.scannedAt || 0) < 90_000);
       // Refresh a little BEFORE TikTok's expiry (codes live ~55 s; a reload on a small VM takes as long),
       // so there is always a scannable code on screen.
       const expired = !s.qrGetUrl && !s.qr && ((s.qrState as string) === 'expired' || /expired|refresh/.test(text) || Date.now() - lastReload > QR_RELOAD_MS);
@@ -1375,30 +1658,57 @@ async function qrLoop(page: Page, browser: Browser, log: (m: string) => void): P
       }
       await new Promise((r) => setTimeout(r, (s.qrState as string) === 'scanned' ? 700 : 1500));
     }
-    if (s.qrPage === page && s.state === 'login_pending') {
-      s.state = 'none';
-      s.error = (s.qrState as string) === 'verify' ? 'The verification was not completed within 48 hours; sign in again.' : 'QR sign-in timed out after 10 minutes.';
-      s.qr = undefined;
-      s.qrPage = undefined;
-      await page.close().catch(() => undefined);
+    // Our page never outlives the loop (an orphan tab would block the browser for Explore and keep
+    // reacting to TikTok's answers).
+    if (s.qrPage === page) s.qrPage = undefined;
+    await page.close().catch(() => undefined);
+    // Only THIS attempt's state is concluded: a newer attempt (Start over) or a cancel own the state now.
+    if (attempt === qrAttempt && s.state === 'login_pending' && s.loginMode === 'qr') {
+      const wasVerifying = (s.qrState as string) === 'verify';
+      if (exit === 'timeout' && cookieSeenAt) {
+        // TikTok confirmed the sign-in and set the cookie, but never answered the account check: the
+        // profile may well be signed in. Let the saved-profile check decide instead of asking for a scan.
+        probed = false;
+        probeTries = 0;
+        probeRetryAt = 0;
+        failQrAttempt('TikTok confirmed the scan but did not answer the account check in time. The saved profile is checked again; press "Check again" in a moment.');
+      } else if (exit === 'timeout') failQrAttempt(wasVerifying ? 'The verification was not completed within 48 hours; sign in again.' : 'QR sign-in timed out after 10 minutes.');
+      else failQrAttempt('The browser on the server stopped during the sign-in (it may have run out of memory). Press "Sign in with QR code" to start again.');
+      log('QR sign-in ended: ' + s.error);
     }
   } catch (e) {
-    if (s.qrPage === page) {
+    if (s.qrPage === page) s.qrPage = undefined;
+    await page.close().catch(() => undefined);
+    if (attempt === qrAttempt && s.state === 'login_pending' && s.loginMode === 'qr') {
+      failQrAttempt((e as Error).message.split('\n')[0]);
       s.state = 'error';
-      s.error = (e as Error).message;
-      s.qrPage = undefined;
+      log('QR sign-in failed: ' + s.error);
     }
   }
 }
 
 // ---------------------------------------------------------------- window sign-in (needs a desktop)
 async function startWindowLogin(log: (m: string) => void): Promise<SessionStatus> {
+  // A headless launch still in flight (explore fallback) would hold the profile lock: let it finish first.
+  if (headlessLaunch) await headlessLaunch.catch(() => undefined);
   await closeHeadless();
   s.state = 'login_pending';
   s.loginMode = 'window';
   s.error = undefined;
   s.loginStartedAt = Date.now();
-  const browser = await launch(false);
+  let browser: Browser;
+  try {
+    browser = await launch(false);
+  } catch (e) {
+    const msg = (e as Error).message.split('\n')[0];
+    log('sign-in window could not be opened: ' + msg);
+    if (s.state === 'login_pending' && s.loginMode === 'window') {
+      s.state = 'none';
+      s.loginMode = undefined;
+      s.error = `The sign-in window could not be opened on the server (${msg}).`;
+    }
+    throw e;
+  }
   s.loginBrowser = browser;
   const page = (await browser.pages())[0] || (await browser.newPage());
   browser.on('disconnected', () => {
@@ -1463,11 +1773,17 @@ async function headlessBrowser(): Promise<Browser> {
       feedLog?.('headless browser launched: ' + (await browser.version()));
       s.headless = browser;
       browser.on('disconnected', () => {
-        if (s.headless === browser) {
-          s.headless = undefined;
-          s.feedPage = undefined;
-          s.qrPage = undefined;
-          s.explorePage = undefined;
+        if (s.headless !== browser) return;
+        s.headless = undefined;
+        s.feedPage = undefined;
+        s.explorePage = undefined;
+        const qrPending = Boolean(s.qrPage) && s.state === 'login_pending' && s.loginMode === 'qr';
+        s.qrPage = undefined;
+        if (qrPending) {
+          // Chromium died (OOM on the small VM) under a pending QR sign-in: without this the status
+          // would stay 'login_pending' with no page and no loop, and the panel would wait forever.
+          failQrAttempt('The browser on the server stopped during the sign-in (it may have run out of memory). Press "Sign in with QR code" to start again.');
+          feedLog?.('headless browser disconnected during the QR sign-in');
         }
       });
       return browser;
@@ -1589,6 +1905,7 @@ export async function fetchExploreViaBrowser(category: number, count: number, lo
  * next "Sign in" starts the whole process from zero. Keeps the headless browser (slow to relaunch).
  */
 export async function cancelLogin(): Promise<SessionStatus> {
+  qrAttempt++; // a QR launch still in flight stops instead of opening an orphan page
   const lb = s.loginBrowser;
   s.loginBrowser = undefined;
   if (lb) await lb.close().catch(() => undefined);
@@ -1598,24 +1915,26 @@ export async function cancelLogin(): Promise<SessionStatus> {
   if (s.state === 'login_pending') s.state = 'none';
   s.error = undefined;
   s.loginMode = undefined;
-  s.qr = s.qrState = s.qrPageHint = s.qrPageShot = s.qrToken = s.qrGetUrl = s.qrCheckUrl = s.qrRedirect = undefined;
-  s.qrExpireAt = s.scannedAt = s.qrVerifyAt = s.qrVerifyAutoAt = s.qrVerifySentAt = s.qrVerifyTries = undefined;
-  s.qrVerifyConf = s.qrVerifyStep = s.qrVerifyText = s.qrNotice = s.qrTextBeforeCode = undefined;
-  s.qrNoticeAt = s.qrCodeSentAt = s.qrAutoCodeAt = s.qrResendAt = s.qrTicketRetryAt = undefined;
-  s.qrTicketTriedToken = undefined;
-  s.qrVerifyResult = undefined;
+  s.qr = s.qrState = s.qrPageHint = s.qrPageShot = s.qrToken = s.qrTokenOurs = s.qrGetUrl = s.qrCheckUrl = s.qrRedirect = s.qrRedirectAt = undefined;
+  s.qrExpireAt = s.scannedAt = s.qrVerifyAt = s.qrVerifyConf = s.qrNotice = s.qrNoticeAt = undefined;
+  s.qrTicketRetryAt = s.qrTicketTriedToken = s.qrTicketTriedValue = s.qrRateLimitedAt = undefined;
+  resetVerifyFields();
   feedLog?.('sign-in cancelled by the user');
   probed = true;
   return sessionStatus();
 }
 
 export async function logout(): Promise<SessionStatus> {
+  qrAttempt++;
   const lb = s.loginBrowser;
   s.loginBrowser = undefined;
   if (lb) await lb.close().catch(() => undefined);
   await closeHeadless();
   s.state = 'none';
   s.username = s.nickname = s.avatar = s.error = s.qr = s.qrState = s.loginMode = undefined;
+  s.qrPageShot = s.qrPageHint = s.qrRedirect = s.qrRedirectAt = s.qrTokenOurs = undefined;
+  s.qrVerifyAt = undefined;
+  resetVerifyFields();
   s.pending = [];
   s.seenIds = new Set();
   probed = true;
@@ -1666,11 +1985,16 @@ export async function fetchForYou(count: number, log: (m: string) => void): Prom
   if (!s.pending.length) {
     // Maybe the page is stuck on a dialog or the session expired: reload once.
     const acc = await fetchAccount(page);
-    if (!acc.ok && s.state === 'logged_in') {
+    if (acc.signedOut && s.state === 'logged_in') {
+      // Only TikTok's own "no session" answer ends the signed-in state. An empty body, a timeout or a
+      // navigation (all seen from the VM) must not: that would send the user back to the QR code and
+      // the e-mail verification although the saved profile is still signed in.
       s.state = 'none';
       s.error = `TikTok session is no longer valid (${acc.error}). Sign in again.`;
+      log('For You: TikTok reports the session as ended - ' + acc.error);
       throw new Error(s.error);
     }
+    if (!acc.ok) warnings.push(`TikTok did not answer the account check (${acc.error}); the session is kept.`);
     await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => undefined);
     await new Promise((r) => setTimeout(r, 4000));
     if (!s.pending.length) warnings.push(s.lastFeedError || 'TikTok did not deliver feed items; try again in a moment.');
