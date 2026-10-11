@@ -1822,13 +1822,32 @@ async function closeSecondaryPages(): Promise<void> {
  * at a time (the lock), because those navigate the tab. The tab is closed during a QR sign-in.
  */
 let workLock: Promise<void> = Promise.resolve();
-export async function withWorkPage<T>(log: (m: string) => void, fn: (page: Page) => Promise<T>): Promise<T> {
+/** What the work page is doing (for /api/stats and to pause the For You pump meanwhile). */
+const work = { busy: false, op: '', since: 0, last: '', lastMs: 0, waiting: 0 };
+export const workState = (): { busy: boolean; op: string; forMs: number; last: string; lastMs: number; waiting: number; pageUrl?: string } => ({
+  busy: work.busy,
+  op: work.op,
+  forMs: work.busy ? Date.now() - work.since : 0,
+  last: work.last,
+  lastMs: work.lastMs,
+  waiting: work.waiting,
+  pageUrl: s.explorePage && !s.explorePage.isClosed() ? s.explorePage.url() : undefined,
+});
+/** Logs through the session log ring as well (GET /api/session/log shows it on the deployed server). */
+export const rememberLog = (log: (m: string) => void): ((m: string) => void) => wrapLog(log);
+
+export async function withWorkPage<T>(log: (m: string) => void, fn: (page: Page) => Promise<T>, op = 'work'): Promise<T> {
   feedLog = feedLog || wrapLog(log);
   if (!sessionSupported().ok) throw new Error(sessionSupported().reason);
   const prev = workLock;
   let release!: () => void;
   workLock = new Promise<void>((r) => (release = r));
+  work.waiting++;
   await prev;
+  work.waiting--;
+  work.busy = true;
+  work.op = op;
+  work.since = Date.now();
   try {
     if (s.qrPage && !s.qrPage.isClosed()) throw new Error('A QR sign-in is in progress; the browser is reserved for it for the moment');
     const browser = await headlessBrowser();
@@ -1842,8 +1861,18 @@ export async function withWorkPage<T>(log: (m: string) => void, fn: (page: Page)
     }
     return await fn(page);
   } finally {
+    work.busy = false;
+    work.last = op;
+    work.lastMs = Date.now() - work.since;
     release();
   }
+}
+/** The work page, reloaded on /explore (a page whose scripts got stuck is replaced). */
+export async function resetWorkPage(log: (m: string) => void): Promise<void> {
+  const page = s.explorePage;
+  s.explorePage = undefined;
+  if (page && !page.isClosed()) await page.close().catch(() => undefined);
+  log('work page closed; the next use opens a fresh one');
 }
 
 /** Cookie header of the headless browser's tiktok.com cookies (what the proxy must send for cookie-bound URLs). */
@@ -1857,7 +1886,7 @@ export const isLoggedIn = (): boolean => s.state === 'logged_in';
 export async function fetchExploreViaBrowser(category: number, count: number, log: (m: string) => void): Promise<ExploreResult> {
   return withWorkPage(log, async (page) => {
     const url = exploreApiUrl(category, count);
-    const text = String(await page.evaluate(`fetch(${JSON.stringify(url)}, { credentials: 'include' }).then((r) => r.text())`));
+    const text = String(await page.evaluate(`fetch(${JSON.stringify(url)}, { credentials: 'include', signal: AbortSignal.timeout(25000) }).then((r) => r.text())`));
     if (!text.trim()) throw new Error('TikTok explore API returned an empty body (through the browser as well)');
     const warnings: string[] = [];
     const parsed = parseExploreBody(text, { cookieHeader: await pageCookieHeader(page), referer: 'https://www.tiktok.com/explore' }, warnings);
@@ -1948,10 +1977,16 @@ function startForYouPump(): void {
     while (Date.now() - forYouAskedAt < FORYOU_IDLE_MS) {
       const page = s.feedPage;
       if (!page || page.isClosed() || !s.headless?.isConnected() || s.qrPage) break;
+      if (work.busy || work.waiting) {
+        // A search / profile / messages request is using the browser: the small VM has one core,
+        // so the feed page stays still until it is done.
+        await new Promise((r) => setTimeout(r, 1000));
+        continue;
+      }
       if (s.pending.length < FORYOU_TARGET) {
         idleRounds = 0;
         await nudgeFeedPage(page);
-        await new Promise((r) => setTimeout(r, 1200));
+        await new Promise((r) => setTimeout(r, 2500));
       } else {
         // Enough in stock: a page that reports an error now and then is left alone until items are taken.
         idleRounds++;

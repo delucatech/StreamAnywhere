@@ -13,7 +13,7 @@ import { detectYtDlp, resolveWithYtDlp } from './ytdlp';
 import { defaultExpiry, mediaCount, registerMedia } from './mediaStore';
 import { hostAllowed } from './ssrf';
 import { EXPLORE_DEFAULT_CATEGORY, FeedError, fetchExploreFeed, normalizeExploreOptions, type ExploreResult } from './feed';
-import { cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouStock, logout, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
+import { cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouStock, logout, rememberLog, workState, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
 import { Reservoir, type ReservoirStats } from './reservoir';
 import { conversation, fetchProfile, followUser, inbox, inboxDebug, searchTikTok, sendMessage, SocialError } from './social';
 
@@ -237,7 +237,7 @@ export async function buildServer() {
   });
 
   // ---- search / profiles / follow / messages (headless work page; see social.ts)
-  const socialLog = (what: string) => (msg: string) => app.log.info({ what }, msg);
+  const socialLog = (what: string) => rememberLog((msg: string) => app.log.info({ what }, msg));
   const socialFail = (reply: import('fastify').FastifyReply, e: unknown, t0: number) => {
     const err = e as Error;
     app.log.warn({ err: err.message }, 'social request failed');
@@ -344,7 +344,7 @@ export async function buildServer() {
 
   registerProxyRoutes(app);
 
-  app.get('/api/stats', async () => ({ mediaRecords: mediaCount(), exploreStock: exploreStock(), forYouStock: forYouStock(), uptimeSec: Math.round(process.uptime()) }));
+  app.get('/api/stats', async () => ({ mediaRecords: mediaCount(), exploreStock: exploreStock(), forYouStock: forYouStock(), workPage: workState(), uptimeSec: Math.round(process.uptime()) }));
 
   if (config.serveClient) {
     const dist = findUp(path.join('client', 'dist')) || findUp(path.join('client', 'dist'), process.cwd()) || path.resolve('client', 'dist');

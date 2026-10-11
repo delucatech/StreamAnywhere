@@ -24,7 +24,7 @@
 import type { Page } from 'puppeteer-core';
 import type { ChatMessage, Conversation, ConversationResponse, FeedItem, FollowResponse, FollowState, InboxResponse, ProfileResponse, SearchResponse, SendMessageResponse, UserSummary } from '../../shared/types';
 import { itemToFeedItem } from './feed';
-import { isLoggedIn, pageCookieHeader, withWorkPage } from './session';
+import { isLoggedIn, pageCookieHeader, resetWorkPage, withWorkPage } from './session';
 
 const TT = 'https://www.tiktok.com';
 const MESSAGES_URL = `${TT}/messages?lang=en`;
@@ -150,11 +150,31 @@ const COMMON = {
 /** TikTok's continuation of a search is tied to the first answer's log id */
 let lastSearch: { q: string; id?: string } | undefined;
 
-async function fetchInPage(page: Page, url: string, attempts = 3): Promise<string> {
+/** Seconds an in-page request may take: puppeteer's protocol timeout is 45 s, the page must answer before. */
+const FETCH_TIMEOUT_MS = 25_000;
+
+/**
+ * A fetch run inside the page (signed by TikTok's SDK). Bounded in the page itself, so a request
+ * TikTok stalls (observed on the Google VM: "Runtime.evaluate timed out" after 45 s) comes back as
+ * a clear error instead of a protocol timeout.
+ */
+async function fetchInPage(page: Page, url: string, attempts = 3, log?: (m: string) => void): Promise<string> {
   let text = '';
   for (let attempt = 1; attempt <= attempts; attempt++) {
-    const r = (await page.evaluate(`fetch(${JSON.stringify(url)}, { credentials: 'include' }).then(async (r) => ({ status: r.status, text: await r.text() }))`)) as { status: number; text: string };
+    const t0 = Date.now();
+    const r = (await page.evaluate(`(async () => {
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), ${FETCH_TIMEOUT_MS});
+      try {
+        const r = await fetch(${JSON.stringify(url)}, { credentials: 'include', signal: ctl.signal });
+        return { status: r.status, text: await r.text() };
+      } catch (e) {
+        return { status: 0, text: '', error: String((e && e.name === 'AbortError') ? 'no answer within ${FETCH_TIMEOUT_MS / 1000} s' : (e && e.message) || e) };
+      } finally { clearTimeout(timer); }
+    })()`)) as { status: number; text: string; error?: string };
+    log?.(`in-page request ${url.split('?')[0].slice(22)}: HTTP ${r.status}, ${r.text.length} bytes, ${Date.now() - t0} ms${r.error ? ', ' + r.error : ''}`);
     if (r.status === 403) throw new SocialError('TikTok refused the request (HTTP 403)');
+    if (r.error && attempt === attempts) throw new SocialError(`TikTok did not answer (${r.error})`);
     text = r.text;
     if (text.trim()) break;
     if (attempt < attempts) await sleep(1200 * attempt);
@@ -165,10 +185,19 @@ async function fetchInPage(page: Page, url: string, attempts = 3): Promise<strin
 export async function searchTikTok(q: string, offset: number, log: (m: string) => void): Promise<SearchResponse> {
   const t0 = Date.now();
   const warnings: string[] = [];
+  const params = new URLSearchParams({ ...COMMON, from_page: 'search', keyword: q, offset: String(offset), search_source: 'normal_search', web_search_code: '{"tiktok":{"client_params_x":{"search_engine":{"ies_mt_user_live_video_card_use_libra":1,"mt_search_general_user_live_card":1}},"search_server":{}}}' });
+  if (offset && lastSearch?.q === q && lastSearch.id) params.set('search_id', lastSearch.id);
+  const url = `${TT}/api/search/general/full/?${params}`;
+  let text = '';
+  try {
+    text = await withWorkPage(log, (page) => fetchInPage(page, url, 2, log), 'search');
+  } catch (e) {
+    // The page's scripts may be stuck (a stalled SDK, a page left on a heavy profile): once more on a fresh page.
+    log(`search "${q}" failed on the current work page (${(e as Error).message}); retrying on a fresh page`);
+    await resetWorkPage(log);
+    text = await withWorkPage(log, (page) => fetchInPage(page, url, 2, log), 'search');
+  }
   return withWorkPage(log, async (page) => {
-    const params = new URLSearchParams({ ...COMMON, from_page: 'search', keyword: q, offset: String(offset), search_source: 'normal_search', web_search_code: '{"tiktok":{"client_params_x":{"search_engine":{"ies_mt_user_live_video_card_use_libra":1,"mt_search_general_user_live_card":1}},"search_server":{}}}' });
-    if (offset && lastSearch?.q === q && lastSearch.id) params.set('search_id', lastSearch.id);
-    const text = await fetchInPage(page, `${TT}/api/search/general/full/?${params}`);
     if (!text.trim()) throw new SocialError('TikTok search returned an empty answer (soft rate limit); try again in a moment');
     let json: any;
     try {
@@ -205,17 +234,17 @@ export async function searchTikTok(q: string, offset: number, log: (m: string) =
       // Accounts matching the words: a separate endpoint; best effort (it may be refused).
       try {
         const up = new URLSearchParams({ ...COMMON, from_page: 'search', keyword: q, cursor: '0', count: '12', search_source: 'normal_search' });
-        const ut = await fetchInPage(page, `${TT}/api/search/user/full/?${up}`, 1);
+        const ut = await fetchInPage(page, `${TT}/api/search/user/full/?${up}`, 1, log);
         const uj = ut.trim() ? JSON.parse(ut) : undefined;
         for (const ul of Array.isArray(uj?.user_list) ? uj.user_list : []) addUser(ul?.user_info || ul);
       } catch (e) {
         warnings.push(`account search unavailable (${(e as Error).message})`);
       }
     }
-    log(`search "${q}" offset ${offset}: ${items.length} videos, ${users.length} accounts`);
+    log(`search "${q}" offset ${offset}: ${items.length} videos, ${users.length} accounts, ${Date.now() - t0} ms`);
     const next = num(json.cursor);
     return { q, items, users, hasMore: json.has_more === 1 || json.has_more === true, offset: next !== undefined && next > offset ? next : offset + Math.max(items.length, 1), warnings, elapsedMs: Date.now() - t0 };
-  });
+  }, 'search');
 }
 
 // ---------------------------------------------------------------- profile
@@ -342,7 +371,7 @@ export async function fetchProfile(user: string, offset: number, count: number, 
     const items = p.items.slice(offset, offset + count);
     log(`profile @${user}: ${items.length} videos served (offset ${offset}, ${p.items.length} captured, more: ${p.hasMore})`);
     return { user: p.info, items, offset, hasMore: p.hasMore && (stale < 8 || p.items.length > offset + count), warnings, elapsedMs: Date.now() - t0 };
-  });
+  }, `profile @${user}`);
 }
 
 // ---------------------------------------------------------------- follow
@@ -394,7 +423,7 @@ export async function followUser(user: string, follow: boolean, log: (m: string)
     if (p.info) p.info.followState = after;
     log(`@${user}: follow state now "${after}"`);
     return { user, followState: after, warnings };
-  });
+  }, `follow @${user}`);
 }
 
 // ---------------------------------------------------------------- messages
@@ -511,7 +540,7 @@ export async function inbox(log: (m: string) => void): Promise<InboxResponse> {
     }
     log(`messages: ${list.length} conversation(s)`);
     return { conversations: list.map(toConversation), warnings, elapsedMs: Date.now() - t0 };
-  });
+  }, 'inbox');
 }
 
 /** Opens the thread (an inbox id, or "@handle" through the profile's Message button) and reads it. */
@@ -563,7 +592,7 @@ export async function conversation(id: string, log: (m: string) => void): Promis
     const r = await openThread(page, id, log);
     log(`messages: "${r.conversation.title}" – ${r.messages.length} message(s), can send: ${r.canSend}`);
     return { ...r, elapsedMs: Date.now() - t0 };
-  });
+  }, 'conversation');
 }
 
 export async function sendMessage(id: string, text: string, log: (m: string) => void): Promise<SendMessageResponse> {
@@ -601,7 +630,7 @@ export async function sendMessage(id: string, text: string, log: (m: string) => 
     if (!sent) warnings.push('The message does not show in the thread yet; check the conversation again in a moment');
     log(`messages: sent to "${opened.conversation.title}": ${sent}`);
     return { conversation: opened.conversation, messages, canSend: true, sent, warnings, elapsedMs: Date.now() - t0 };
-  });
+  }, 'send message');
 }
 
 /** What the messages page contains (for tuning the selectors on the deployed server). */
@@ -615,5 +644,5 @@ export async function inboxDebug(log: (m: string) => void): Promise<unknown> {
     const messages = await page.evaluate(READ_MESSAGES).catch((e: Error) => e.message);
     const editor = await page.evaluate(READ_EDITOR).catch((e: Error) => e.message);
     return { ...dbg, conversations, messages, editor };
-  });
+  }, 'inbox debug');
 }
