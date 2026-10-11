@@ -747,10 +747,13 @@ function installQrHandlers(page: Page, log: (m: string) => void): void {
         } else if (json?.message === 'error' || d.error_code) {
           if (ticketed && !ourRetry && d.error_code !== 2135) {
             void restartAfterVerify(page, log, `TikTok did not accept the verified sign-in (${d.description || 'error ' + d.error_code}). A fresh code is loading: scan it again.`);
-          } else if ((d.error_code === 2135 || (ourRetry && d.error_code !== 7)) && res.url().includes('qrconnect')) {
+          } else if ((d.error_code === 2135 || ourRetry) && res.url().includes('qrconnect')) {
             if (ourRetry) {
               // The SAVED ticket (an older attempt, maybe another account) is no good: forget it, or every
-              // new token would be retried with it and the attempt would restart forever.
+              // new token would be retried with it and the attempt would restart forever. Observed
+              // 2026-10-11 on the VM: a ticket from the previous day answered error 7 "Maximum number of
+              // attempts reached"; treated as a session rate limit, the attempt then sat on "scanned"
+              // forever while the phone had confirmed and TikTok was waiting for the e-mail verification.
               log(`TikTok rejected the saved verification ticket (${d.description || 'error ' + d.error_code}); forgetting it and starting a fresh verification`);
               s.qrTicket = s.qrTicketAt = s.qrTicketTriedValue = undefined;
               saveVerifyStore({ ticket: undefined });
