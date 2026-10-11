@@ -46,8 +46,14 @@ const LOGIN_TIMEOUT_MS = 10 * 60 * 1000;
 /** Once TikTok e-mailed a verification code, the attempt (page, dialog, token, ticket) is held this long:
  *  the code stays valid for hours, and the user may come back to enter it much later. */
 const VERIFY_HOLD_MS = 48 * 60 * 60 * 1000;
-/** A verification ticket (code accepted) is re-used for a fresh QR token for this long. */
-const TICKET_KEEP_MS = VERIFY_HOLD_MS;
+/**
+ * A verification ticket (code accepted) is re-used for a fresh QR token for this long - within ONE
+ * attempt (the QR expired while the code was typed, a restart right after). Observed 2026-10-11 on the
+ * VM: a ticket from the previous day answered error 7 or nothing at all, and the extra status checks got
+ * the whole session rate-limited; the first sign-in (no ticket, e-mail code) had worked. So a ticket
+ * is never re-used after 10 minutes: a new sign-in goes through the e-mail code.
+ */
+const TICKET_KEEP_MS = 10 * 60 * 1000;
 const QR_RELOAD_MS = 110 * 1000;
 const FEED_URL = 'https://www.tiktok.com/foryou';
 const QR_URL = 'https://www.tiktok.com/login/qrcode';
@@ -601,10 +607,13 @@ async function startQrLogin(log: (m: string) => void): Promise<SessionStatus> {
   s.qrState = 'new';
   s.loginStartedAt = Date.now();
   const stored = loadVerifyStore();
-  if (!s.qrTicket && stored.ticket) {
+  if (!s.qrTicket && stored.ticket && Date.now() - stored.ticket.at < TICKET_KEEP_MS) {
     s.qrTicket = stored.ticket.value;
     s.qrTicketAt = stored.ticket.at;
-    log('verification ticket restored from disk (a scan within 48 h of the last code needs no e-mail)');
+    log('verification ticket restored from disk (accepted less than 10 min ago: a scan now needs no new e-mail)');
+  } else if (stored.ticket) {
+    saveVerifyStore({ ticket: undefined });
+    log('an older verification ticket was on disk; dropped (a new sign-in goes through the e-mail code)');
   }
   /** Cancel / Sign out / another Sign in while the browser was starting: this attempt is over. */
   const abandoned = (): boolean => attempt !== qrAttempt || s.state !== 'login_pending' || s.loginMode !== 'qr';
@@ -764,12 +773,13 @@ function installQrHandlers(page: Page, log: (m: string) => void): void {
               log('TikTok asks for another verification after the accepted code; starting the dialog afresh');
               s.qrTicketTriedToken = s.qrToken; // do not re-send the ticket TikTok just refused for this token
               resetVerifyFields();
-            } else if (retryWithTicket(page, log)) return; // the ticketed answer decides (confirmed / 2135 again)
+            }
             // "IDV required": the phone confirmed, but TikTok wants an identity verification (captcha,
             // code, ...) inside THIS page before it hands over the session. Its SDK renders that as a
             // modal; the UI shows the page live and forwards the user's clicks/typing (sessionInput).
             const conf = res.headers()['x-tt-verify-idv-decision-conf'] || '';
             if (s.qrState !== 'verify') log(`QR confirmed on the phone, but TikTok requires a verification on the page (2135)${conf ? ' decision=' + conf.slice(0, 300) : ''}`);
+            if (!ourRetry && !ticketed && retryWithTicket(page, log)) return; // a ticket from THIS attempt: its answer decides (confirmed / 2135 again)
             s.qrState = 'verify';
             s.qrVerifyAt = Date.now();
             s.qrVerifyConf = conf || s.qrVerifyConf;
@@ -892,7 +902,7 @@ function retryWithTicket(page: Page, log: (m: string) => void): boolean {
  * the phone did confirm, and the SDK's modal is on the page.
  */
 function ticketRetryLost(page: Page, log: (m: string) => void, why: string): void {
-  if (s.qrPage !== page || s.qrToken !== s.qrTicketTriedToken || (s.qrState as string) !== 'scanned' || s.qrRedirect) return;
+  if (s.qrPage !== page || s.qrToken !== s.qrTicketTriedToken || (s.qrState as string) === 'verify' || s.qrRedirect) return;
   log(`ticketed status check brought no answer (${why}); continuing with the verification dialog`);
   s.qrTicketRetryAt = undefined;
   s.qrState = 'verify';
