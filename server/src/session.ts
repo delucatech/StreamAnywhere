@@ -779,6 +779,14 @@ function installQrHandlers(page: Page, log: (m: string) => void): void {
             // modal; the UI shows the page live and forwards the user's clicks/typing (sessionInput).
             const conf = res.headers()['x-tt-verify-idv-decision-conf'] || '';
             if (s.qrState !== 'verify') log(`QR confirmed on the phone, but TikTok requires a verification on the page (2135)${conf ? ' decision=' + conf.slice(0, 300) : ''}`);
+            if (s.qrTokenOurs && s.qrTokenOurs === s.qrToken && (s.qrState as string) !== 'verify') {
+              // TikTok's page draws the verification dialog only for a code IT requested (its SDK polls
+              // that token). This code was requested by the server (the page's had expired), so the
+              // dialog can never appear: start over with a page-owned code (observed 2026-10-11 on the VM:
+              // the panel showed the live page with an expired code and no dialog, for good).
+              void restartAfterVerify(page, log, 'Your phone confirmed, and TikTok asks for an e-mail verification - but it cannot show that step for this code. A fresh code is loading: scan it again within a minute, and the e-mail step will appear.');
+              return;
+            }
             if (!ourRetry && !ticketed && retryWithTicket(page, log)) return; // a ticket from THIS attempt: its answer decides (confirmed / 2135 again)
             s.qrState = 'verify';
             s.qrVerifyAt = Date.now();
@@ -1103,6 +1111,12 @@ async function driveVerifyDialog(page: Page, log: (m: string) => void): Promise<
   // and the token are held (VERIFY_HOLD_MS) until the user enters it, cancels, or starts over.
   const v = await scanVerifyDialog(page);
   if (!v) return;
+  if (!v.text && !v.input && !s.qrVerifyStep && Date.now() - (s.qrVerifyAt || 0) > 45_000) {
+    // TikTok asked for a verification but its page shows no dialog (the code was not the page's own, or
+    // the page is stuck): waiting longer brings nothing, a fresh code does.
+    void restartAfterVerify(page, log, "TikTok asked for a verification, but its page did not show the step. A fresh code is loading: scan it again within a minute.");
+    return;
+  }
   if (v.text && v.text !== s.qrVerifyText) {
     s.qrVerifyText = v.text;
     log(`verification dialog (${v.frames} frame${v.frames === 1 ? '' : 's'}): ` + v.text.slice(0, 240));
@@ -1507,15 +1521,22 @@ async function qrLoop(page: Page, browser: Browser, log: (m: string) => void, at
           .catch(() => false);
         for (let i = 0; clicked && i < 30 && !s.qr; i++) await new Promise((r) => setTimeout(r, 500));
         if (s.qr && s.qr !== before) log('QR expired - TikTok refreshed it in place');
-        else if (s.qrGetUrl && (await requestNewQr(page, log))) log('QR expired - requested a new one in page');
-        else {
+        else if (Date.now() - lastReload > 30_000) {
+          // A code the page owns (its SDK polls it and can show TikTok's verification dialog for it);
+          // a code requested by the server cannot get that dialog, so the reload comes first.
           log('QR expired - reloading the login page');
           await page.goto(QR_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => undefined);
           lastReload = Date.now();
-        }
-      } else if (!s.qr && s.qrGetUrl && !s.qrRateLimitedAt && misses >= 20 && !verifying) {
-        // No code for ~40 s although the page is up: ask TikTok directly (signed by the page).
-        if (await requestNewQr(page, log)) misses = 0;
+        } else if (s.qrGetUrl && (await requestNewQr(page, log))) log('QR expired - requested a new one in page (last resort: TikTok will not show a verification for it)');
+      } else if (!s.qr && !s.qrRateLimitedAt && misses >= 20 && !verifying) {
+        // No code for ~40 s although the page is up: reload it (a page-owned code), ask directly only
+        // when a reload just happened and brought nothing.
+        if (Date.now() - lastReload > 30_000) {
+          log('no QR for 40 s - reloading the login page');
+          await page.goto(QR_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => undefined);
+          lastReload = Date.now();
+          misses = 0;
+        } else if (s.qrGetUrl && (await requestNewQr(page, log))) misses = 0;
       }
       if (s.qrRateLimitedAt && Date.now() - s.qrRateLimitedAt > 120_000) s.qrRateLimitedAt = undefined;
       if (Date.now() >= nextAccountCheck && (await hasSessionCookie(page).catch(() => false))) {
