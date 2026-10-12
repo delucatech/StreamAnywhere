@@ -292,8 +292,23 @@ Measured 2026-10-12 (dev machine and the GCP VM; the VM's IP is not bot-checked 
   the downloaded part uses the `sidx` index (`demuxer.ts`: fragment byte offset → restart the fetch
   there, point mp4box's parser at it, and let the fragment's `tfdt` set the time).
 - Needs `yt-dlp` on the server (`YTDLP_PATH`, auto-detected on PATH / pip user installs; the GCP
-  script installs and self-updates it). The `<video>` fallback renderer cannot play two files and
-  stays silent for YouTube; the download button saves the picture only.
+  script installs it in a venv and upgrades it on every deploy). The server keeps `YTDLP_DAEMONS`
+  (2) Python processes with `yt_dlp` imported (`server/scripts/ytdlp-daemon.py`) and sends them
+  extraction requests as JSON lines: importing yt_dlp costs ~11 s of CPU on the free e2-micro
+  (measured 2026-10-12), which made every CLI call 25–120 s there; warm, a listing or a resolve
+  takes the extraction time only. `YTDLP_PYTHON` names the interpreter; `YTDLP_DAEMON=0` forces the
+  CLI. The `<video>` fallback renderer cannot play two files and stays silent for YouTube; the
+  download button saves the picture only.
+
+## Diagnostics without a shell
+
+- **`/api/log`** (site password): the last 800 server log lines as text, newest last; `?n=100`,
+  `?level=warn` for problems only. The feed page reports its own failures there too (feed batch,
+  resolve, player and page errors, tagged `client=true` with the platform, video id, page and
+  device), so a problem on the Tesla or a phone can be read afterwards from any browser.
+- **`/api/health`** (public): build facts, yt-dlp and daemon status, uptime. **`/api/stats`**: feed
+  stock per category, media records, the headless work page.
+- **`/api/session/log`**: the last TikTok sign-in steps.
 
 ## Using the app
 
