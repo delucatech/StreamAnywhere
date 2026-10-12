@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b1020" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <title>StreamAnywhere</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="stylesheet" href="/src/home/home.css" />
+  </head>
+  <body class="home-body">
+    <!-- the "wallpaper": a soft gradient with two blurred blobs, behind everything -->
+    <div class="wallpaper" aria-hidden="true"><i class="blob a"></i><i class="blob b"></i></div>
+
+    <div class="screen" id="screen">
+      <header class="statusbar" aria-hidden="true">
+        <span id="clock" class="clock"></span>
+        <span class="brand">StreamAnywhere</span>
+      </header>
+
+      <!-- app icons; filled by home.ts from the platform registry -->
+      <main class="grid" id="grid" aria-label="Apps"></main>
+
+      <nav class="dock" id="dock" aria-label="Dock"></nav>
+    </div>
+
+    <!-- zoom-from-icon transition surface -->
+    <div id="zoom" class="zoom hidden" aria-hidden="true"></div>
+    <script type="module" src="/src/home/home.ts"></script>
+  </body>
+</html>

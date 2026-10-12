@@ -86,16 +86,37 @@ export async function detectYtDlp(): Promise<{ available: boolean; version?: str
   return { available: false, error: errors.join('; ') };
 }
 
-export async function resolveWithYtDlp(inputUrl: string): Promise<ResolveResponse> {
-  const t0 = Date.now();
+/** The number of yt-dlp processes running at once (a Python start costs ~1 s and ~60 MB; the VM has 1 GB). */
+const MAX_PARALLEL = 2;
+let running = 0;
+const queue: (() => void)[] = [];
+
+/**
+ * Runs yt-dlp with `args` and returns its stdout; throws with yt-dlp's last ERROR line otherwise.
+ * At most MAX_PARALLEL run concurrently, the rest wait their turn.
+ */
+export async function ytdlp(args: string[], timeoutMs = 90_000): Promise<string> {
   const det = await detectYtDlp();
   if (!det.available || !cached) throw new Error(`yt-dlp unavailable: ${det.error}`);
-  const r = await run(cached.c, ['-j', '--no-warnings', '--no-playlist', inputUrl], 90_000);
-  if (r.code !== 0 || !r.stdout.trim()) {
-    const err = r.stderr.split(/\r?\n/).filter((l) => /ERROR/i.test(l)).pop() || r.stderr.trim().slice(-300) || `exit ${r.code}`;
-    throw new Error(`yt-dlp failed: ${err}`);
+  if (running >= MAX_PARALLEL) await new Promise<void>((resolve) => queue.push(resolve));
+  running++;
+  try {
+    const r = await run(cached.c, ['--no-warnings', ...args], timeoutMs);
+    if (r.code !== 0 || !r.stdout.trim()) {
+      const err = r.stderr.split(/\r?\n/).filter((l) => /ERROR/i.test(l)).pop() || r.stderr.trim().slice(-300) || `exit ${r.code}`;
+      throw new Error(`yt-dlp failed: ${err.replace(/^ERROR:\s*/, '')}`);
+    }
+    return r.stdout;
+  } finally {
+    running--;
+    queue.shift()?.();
   }
-  const info = JSON.parse(r.stdout.trim().split(/\r?\n/).pop()!);
+}
+
+export async function resolveWithYtDlp(inputUrl: string): Promise<ResolveResponse> {
+  const t0 = Date.now();
+  const stdout = await ytdlp(['-j', '--no-playlist', inputUrl]);
+  const info = JSON.parse(stdout.trim().split(/\r?\n/).pop()!);
   const warnings: string[] = ['yt-dlp URLs are cookie-bound and only usable through the proxy'];
   const formats: MediaFormat[] = [];
   const seen = new Set<string>();

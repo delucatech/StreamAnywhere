@@ -4,6 +4,10 @@
  * No <video> element is involved. Frames are scheduled against the audio clock (or a wall
  * clock when there is no audio): on every animation frame the newest decoded frame whose
  * timestamp <= clock is painted and older ones are closed (counted as dropped).
+ *
+ * A source may come as two files (LoadSource.audioUrl - YouTube serves picture and sound
+ * separately): a second demuxer then feeds the audio samples, and the decoders are configured once
+ * both files have delivered their track descriptions (an audio file that fails is simply left out).
  */
 import type { Sample } from 'mp4box';
 import { AudioSink, WallClock, type PlaybackClock } from '../media/audioOutput';
@@ -30,6 +34,9 @@ export class WebCodecsRenderer implements Renderer {
   readonly name = 'WebCodecs + Canvas';
   private ctx2d: CanvasRenderingContext2D;
   private demuxer?: Mp4Demuxer;
+  /** Demuxer of the separate sound file (LoadSource.audioUrl); undefined when the sound is in `demuxer`'s file */
+  private audioDemuxer?: Mp4Demuxer;
+  private lastReleasedAudioSample = 0;
   private videoDecoder?: VideoDecoder;
   private audioDecoder?: AudioDecoder;
   private videoTrack?: TrackInfo;
@@ -104,10 +111,27 @@ export class WebCodecsRenderer implements Renderer {
       this.fail(new Error(support.reason!));
       return;
     }
+    // Two files: configure once both have parsed their moov (or the sound file has failed).
+    const split = Boolean(src.audioUrl);
+    let videoReady: { durationSec: number; video?: TrackInfo; audio?: TrackInfo } | undefined;
+    let audioReady: { audio?: TrackInfo } | undefined;
+    let audioFailed = false;
+    const maybeConfigure = () => {
+      if (!videoReady || (split && !audioReady && !audioFailed)) return;
+      const durationSec = videoReady.durationSec > 0 ? videoReady.durationSec : src.durationHint || 0;
+      void this.configure(durationSec, videoReady.video, split ? audioReady?.audio : videoReady.audio);
+    };
+    const onAudioSamples = (samples: Sample[]) => {
+      if (gen !== this.generation) return;
+      this.audioSamples.push(...samples);
+      this.applyBackpressure();
+      this.pump();
+    };
     this.demuxer = new Mp4Demuxer(src.url, src.fetchInit, {
       onReady: (info, video, audio) => {
         if (gen !== this.generation) return;
-        void this.configure(info.duration / info.timescale, video, audio);
+        videoReady = { durationSec: info.duration / info.timescale, video, audio };
+        maybeConfigure();
       },
       onVideoSamples: (samples) => {
         if (gen !== this.generation) return;
@@ -117,12 +141,7 @@ export class WebCodecsRenderer implements Renderer {
         this.applyBackpressure();
         this.pump();
       },
-      onAudioSamples: (samples) => {
-        if (gen !== this.generation) return;
-        this.audioSamples.push(...samples);
-        this.applyBackpressure();
-        this.pump();
-      },
+      onAudioSamples: split ? () => undefined : onAudioSamples,
       onProgress: (loaded, total) => {
         this.st.bytesLoaded = loaded;
         this.st.totalBytes = total;
@@ -138,6 +157,32 @@ export class WebCodecsRenderer implements Renderer {
       },
       onLog: (msg) => this.events.onLog('info', `[demux] ${msg}`),
     });
+    if (src.audioUrl) {
+      this.audioDemuxer = new Mp4Demuxer(src.audioUrl, src.fetchInit, {
+        onReady: (info, _video, audio) => {
+          if (gen !== this.generation) return;
+          this.events.onLog('info', `[demux audio] ${audio ? audio.codec : 'no audio track'}, ${(info.duration / info.timescale).toFixed(1)}s`);
+          audioReady = { audio };
+          maybeConfigure();
+        },
+        onVideoSamples: () => undefined,
+        onAudioSamples,
+        onProgress: () => undefined,
+        onEnd: () => undefined,
+        onError: (err) => {
+          if (gen !== this.generation) return;
+          // Sound is optional: the picture plays on a wall clock without it.
+          this.events.onLog('warn', `[demux audio] ${err.message} - playing without sound`);
+          audioFailed = true;
+          this.audioDemuxer?.destroy();
+          this.audioDemuxer = undefined;
+          if (!this.videoDecoder) maybeConfigure();
+          else this.disableAudio();
+        },
+        onLog: (msg) => this.events.onLog('info', `[demux audio] ${msg}`),
+      });
+      this.audioDemuxer.start();
+    }
     this.demuxer.start();
     this.startLoop();
   }
@@ -281,10 +326,20 @@ export class WebCodecsRenderer implements Renderer {
 
   private applyBackpressure(): void {
     if (!this.demuxer) return;
-    const full = this.videoSamples.length > MAX_QUEUED_VIDEO_SAMPLES || this.audioSamples.length > MAX_QUEUED_AUDIO_SAMPLES;
-    const low = this.videoSamples.length < MAX_QUEUED_VIDEO_SAMPLES / 2 && this.audioSamples.length < MAX_QUEUED_AUDIO_SAMPLES / 2;
-    if (full) this.demuxer.pause();
-    else if (low) this.demuxer.resume();
+    const videoFull = this.videoSamples.length > MAX_QUEUED_VIDEO_SAMPLES;
+    const audioFull = this.audioSamples.length > MAX_QUEUED_AUDIO_SAMPLES;
+    const videoLow = this.videoSamples.length < MAX_QUEUED_VIDEO_SAMPLES / 2;
+    const audioLow = this.audioSamples.length < MAX_QUEUED_AUDIO_SAMPLES / 2;
+    if (this.audioDemuxer) {
+      // Each file is throttled by its own queue.
+      if (videoFull) this.demuxer.pause();
+      else if (videoLow) this.demuxer.resume();
+      if (audioFull) this.audioDemuxer.pause();
+      else if (audioLow) this.audioDemuxer.resume();
+      return;
+    }
+    if (videoFull || audioFull) this.demuxer.pause();
+    else if (videoLow && audioLow) this.demuxer.resume();
   }
 
   /** Feed the decoders while their queues are short. */
@@ -330,6 +385,10 @@ export class WebCodecsRenderer implements Renderer {
         }
         // scheduledUntilUs only advances on output; use the chunk's own end time to bound the loop
         if (!this.audio.scheduledUntilUs || this.audio.scheduledUntilUs < ts) this.audio.scheduledUntilUs = ts;
+        if (s.number - this.lastReleasedAudioSample > 200) {
+          (this.audioDemuxer || this.demuxer)?.releaseSamples(at.id, s.number);
+          this.lastReleasedAudioSample = s.number;
+        }
       }
     }
     // End of stream: flush decoders once everything has been queued.
@@ -401,6 +460,7 @@ export class WebCodecsRenderer implements Renderer {
       return;
     }
     const rap = this.demuxer.seek(seconds);
+    this.audioDemuxer?.seek(seconds);
     this.st.extra['Last seek'] = `${seconds.toFixed(2)}s → RAP ${rap.toFixed(2)}s`;
     this.wantPlay = wasPlaying;
     this.setState(wasPlaying ? 'buffering' : 'paused');
@@ -425,6 +485,10 @@ export class WebCodecsRenderer implements Renderer {
       this.st.extra['Progressive (moov first)'] = d.isProgressive === undefined ? '?' : String(d.isProgressive);
       this.st.extra['Fetch restarts'] = String(d.restarts);
     }
+    if (this.audioDemuxer) {
+      const a = this.audioDemuxer.stats;
+      this.st.extra['Audio file'] = `${a.bytesLoaded}/${a.totalBytes || '?'} bytes, HTTP ${a.httpStatus}`;
+    }
     if (this.audio) {
       this.st.extra['Audio context'] = this.audio.contextState;
       this.st.extra['Audio chunks'] = `${this.audio.scheduledChunks} scheduled, ${this.audio.droppedChunks} dropped${this.audio.lastError ? ', err: ' + this.audio.lastError : ''}`;
@@ -446,6 +510,9 @@ export class WebCodecsRenderer implements Renderer {
     this.fallbackTimer = 0;
     this.demuxer?.destroy();
     this.demuxer = undefined;
+    this.audioDemuxer?.destroy();
+    this.audioDemuxer = undefined;
+    this.lastReleasedAudioSample = 0;
     try {
       if (this.videoDecoder && this.videoDecoder.state !== 'closed') this.videoDecoder.close();
     } catch {

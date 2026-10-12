@@ -1,0 +1,237 @@
+:root {
+  --bg: #0b1020;
+  --text: #f4f6fb;
+  --muted: rgba(244, 246, 251, 0.72);
+  --safe-t: env(safe-area-inset-top, 0px);
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  /* iPad-like icon: a rounded square (the corner radius is ~22% of the side) with the label underneath */
+  --icon: clamp(84px, 14vmin, 132px);
+  --radius: 22.37%;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  color-scheme: dark;
+}
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  overflow: hidden;
+  overscroll-behavior: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.hidden {
+  display: none !important;
+}
+
+/* ---------- wallpaper ---------- */
+.wallpaper {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  background: radial-gradient(120% 90% at 20% 10%, #1d2a5e 0%, #0b1020 55%, #05070f 100%);
+  overflow: hidden;
+}
+.blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(70px);
+  opacity: 0.55;
+}
+.blob.a {
+  width: 55vmax;
+  height: 55vmax;
+  left: -12vmax;
+  top: 35vh;
+  background: radial-gradient(circle, #fe2c55 0%, rgba(254, 44, 85, 0) 70%);
+}
+.blob.b {
+  width: 50vmax;
+  height: 50vmax;
+  right: -10vmax;
+  top: -10vmax;
+  background: radial-gradient(circle, #25f4ee 0%, rgba(37, 244, 238, 0) 70%);
+  opacity: 0.35;
+}
+
+/* ---------- screen layout ---------- */
+.screen {
+  position: relative;
+  z-index: 1;
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  padding: var(--safe-t) 16px var(--safe-b);
+  transition: opacity 0.25s ease, transform 0.3s ease;
+}
+.screen.launching {
+  opacity: 0;
+  transform: scale(1.06);
+}
+.statusbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  height: 36px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--muted);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+}
+.clock {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- app grid ---------- */
+.grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(calc(var(--icon) + 40px), max-content));
+  justify-content: center;
+  align-content: start;
+  gap: clamp(18px, 4vmin, 44px) clamp(14px, 4vmin, 40px);
+  padding: clamp(28px, 7vh, 72px) 8px 16px;
+  overflow-y: auto;
+}
+.app {
+  width: calc(var(--icon) + 40px);
+  display: grid;
+  justify-items: center;
+  gap: 9px;
+  border: 0;
+  padding: 6px 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  border-radius: 16px;
+}
+.app:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 4px;
+}
+.app .tile {
+  position: relative;
+  width: var(--icon);
+  height: var(--icon);
+  border-radius: var(--radius);
+  display: grid;
+  place-items: center;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  transition: transform 0.12s ease, filter 0.12s ease;
+}
+.app .tile svg {
+  width: 62%;
+  height: 62%;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.35));
+}
+.app:hover .tile {
+  filter: brightness(1.08);
+}
+.app:active .tile,
+.app.pressed .tile {
+  transform: scale(0.92);
+  filter: brightness(0.85);
+}
+.app .label {
+  font-size: clamp(13px, 1.7vmin, 16px);
+  font-weight: 600;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
+  white-space: nowrap;
+}
+/* signed-in badge (top-right of the tile) */
+.app .badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 11px;
+  background: #34c759;
+  color: #04210d;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 22px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+}
+.app .badge.pending {
+  background: #ff9f0a;
+  color: #2a1700;
+}
+.app .badge:empty {
+  display: none;
+}
+
+/* ---------- dock ---------- */
+.dock {
+  flex: 0 0 auto;
+  margin: 8px auto 10px;
+  padding: 12px 18px;
+  display: flex;
+  gap: clamp(14px, 3vmin, 28px);
+  border-radius: 30px;
+  background: rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  backdrop-filter: blur(22px) saturate(1.4);
+  -webkit-backdrop-filter: blur(22px) saturate(1.4);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+.dock .app {
+  --icon: clamp(56px, 9vmin, 78px);
+  width: auto;
+  padding: 0;
+  gap: 0;
+}
+.dock .app .label {
+  display: none;
+}
+.dock .app .badge {
+  top: -4px;
+  right: -4px;
+  min-width: 16px;
+  height: 16px;
+  font-size: 0;
+  padding: 0;
+  border-radius: 8px;
+}
+
+/* ---------- zoom transition ---------- */
+.zoom {
+  position: fixed;
+  z-index: 10;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  will-change: transform, border-radius, opacity;
+  pointer-events: none;
+}
+.zoom svg {
+  width: 62%;
+  height: 62%;
+  max-width: 180px;
+  max-height: 180px;
+}
+
+@media (max-width: 480px) {
+  :root {
+    --icon: clamp(64px, 19vw, 84px);
+  }
+  .grid {
+    padding-top: 24px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .screen,
+  .app .tile {
+    transition: none;
+  }
+}

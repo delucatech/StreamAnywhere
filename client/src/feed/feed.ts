@@ -21,11 +21,20 @@
  * WebCodecs is missing, a hidden <video> decodes and its frames are copied into the same canvas.
  * The active item and its two neighbours hold a player; the others are released.
  */
-import { EXPLORE_CATEGORIES, type FeedItem, type FeedSource, type LoginMode, type MediaFormat, type SessionInputRequest, type SessionStatus } from '../../../shared/types';
+import type { FeedItem, FeedSource, LoginMode, MediaFormat, SessionInputRequest, SessionStatus } from '../../../shared/types';
 import { api, ApiError, apiUrl } from '../api';
 import { pressed } from '../busy';
+import { currentPlatform, rememberApp } from '../platforms';
 import { FeedPlayer, feedPlayerMode } from './player';
 import { closeTopPanel, initSocial, openInbox, openProfile, openSearch, panelOpen, type PlayList } from './social';
+
+/** The platform this page plays (feed.html?platform=…, set by the launcher); it colours and labels the page. */
+const P = currentPlatform();
+rememberApp(P.id);
+document.title = `${P.name} – StreamAnywhere`;
+document.body.classList.add(`platform-${P.id}`);
+document.documentElement.style.setProperty('--accent', P.accent);
+document.documentElement.style.setProperty('--accent-2', P.accent2);
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const el = document.getElementById(id);
@@ -35,6 +44,7 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
 
 const el = {
   app: $('app'),
+  homeLink: $<HTMLAnchorElement>('homeLink'),
   feed: $('feed'),
   tabs: $('tabs'),
   chips: $('chips'),
@@ -99,7 +109,7 @@ interface Entry {
   progress: HTMLElement;
   err: HTMLElement;
   /** Which URL the player currently uses */
-  src?: { url: string; kind: 'direct' | 'proxy' };
+  src?: SourceCandidate;
   triedProxy: boolean;
   failed: boolean;
   /** True while the viewer drags the progress bar (the ticker must not move it then) */
@@ -111,7 +121,8 @@ interface Entry {
 const playerMode = feedPlayerMode();
 let playerModeAnnounced = false;
 
-const PREFS_KEY = 'streamanywhere.feed';
+/** Preferences are kept per platform (the TikTok key predates the launcher) */
+const PREFS_KEY = P.id === 'tiktok' ? 'streamanywhere.feed' : `streamanywhere.feed.${P.id}`;
 interface Prefs {
   source: FeedSource;
   category: number;
@@ -119,7 +130,7 @@ interface Prefs {
   muted: boolean;
 }
 function loadPrefs(): Prefs {
-  const def: Prefs = { source: 'explore', category: 120, autoscroll: true, muted: false };
+  const def: Prefs = { source: 'explore', category: P.defaultCategory, autoscroll: true, muted: false };
   try {
     return { ...def, ...(JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') as Partial<Prefs>) };
   } catch {
@@ -174,12 +185,19 @@ const esc = (s: string): string => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', 
 function pickFormat(item: FeedItem): MediaFormat | undefined {
   return item.formats.find((f) => f.codec === 'h264' && (f.directUrl || f.proxyUrl)) || item.formats.find((f) => f.directUrl || f.proxyUrl);
 }
-function sourceCandidates(item: FeedItem): { url: string; kind: 'direct' | 'proxy' }[] {
+interface SourceCandidate {
+  url: string;
+  kind: 'direct' | 'proxy';
+  /** The sound, when it comes as a second file (YouTube) */
+  audioUrl?: string;
+}
+function sourceCandidates(item: FeedItem): SourceCandidate[] {
   const f = pickFormat(item);
   if (!f) return [];
-  const out: { url: string; kind: 'direct' | 'proxy' }[] = [];
-  if (f.directUrl) out.push({ url: f.directUrl, kind: 'direct' });
-  if (f.proxyUrl) out.push({ url: apiUrl(f.proxyUrl), kind: 'proxy' });
+  const out: SourceCandidate[] = [];
+  const audioUrl = f.audioProxyUrl ? apiUrl(f.audioProxyUrl) : undefined;
+  if (f.directUrl) out.push({ url: f.directUrl, kind: 'direct', audioUrl });
+  if (f.proxyUrl) out.push({ url: apiUrl(f.proxyUrl), kind: 'proxy', audioUrl });
   return out;
 }
 const activeEntry = (): Entry | undefined => state.entries[state.active];
@@ -209,7 +227,7 @@ async function setSource(src: FeedSource, announce = true): Promise<void> {
   state.mode = { kind: 'source' };
   savePrefs();
   renderSourceUi();
-  if (announce) toast(src === 'foryou' ? 'For You' : 'Explore');
+  if (announce) toast(src === 'foryou' ? P.tabs.foryou : P.tabs.explore);
   await reload();
 }
 /** Plays a list from search or a profile (social.ts), starting at `startIndex`. */
@@ -225,7 +243,8 @@ el.contextClose.addEventListener('click', () => {
   renderSourceUi();
   void reload();
 });
-for (const c of EXPLORE_CATEGORIES) {
+for (const b of el.tabs.querySelectorAll<HTMLButtonElement>('.tab')) b.textContent = b.dataset.source === 'foryou' ? P.tabs.foryou : P.tabs.explore;
+for (const c of P.categories) {
   const b = document.createElement('button');
   b.className = 'chip';
   b.type = 'button';
@@ -261,12 +280,12 @@ el.navHome.addEventListener('click', () => {
 });
 el.navFriends.addEventListener('click', () => toast('Friends is coming later'));
 el.navPlus.addEventListener('click', () => toast('Upload is coming later'));
-el.navInbox.addEventListener('click', () => pressed(el.navInbox, () => openInbox()));
+el.navInbox.addEventListener('click', () => (P.social ? pressed(el.navInbox, () => openInbox()) : toast(`Messages are not available for ${P.name}`)));
 el.actAuthor.addEventListener('click', () => {
   const cur = activeEntry();
   if (cur?.item.author.uniqueId) void openProfile(cur.item.author.uniqueId);
 });
-initSocial({ play: playList, toast, isLoggedIn: () => state.session?.state === 'logged_in', openSessionPanel, fmtCount });
+initSocial({ play: playList, toast, isLoggedIn: () => state.session?.state === 'logged_in', openSessionPanel, fmtCount, platform: P });
 el.navProfile.addEventListener('click', () => pressed(el.navProfile, () => openSessionPanel()));
 el.sessionClose.addEventListener('click', () => closeSessionPanel());
 el.sessionRefresh.addEventListener('click', () =>
@@ -476,7 +495,11 @@ function renderSession(): void {
     return;
   }
   const lines: string[] = [];
-  if (!s.supported) {
+  if (!s.supported && P.id !== 'tiktok') {
+    // Platforms without a sign-in yet (YouTube guest mode): what works, nothing to press but Close.
+    lines.push(`<b>${esc(P.name)} sign-in is not available yet.</b>`);
+    lines.push(esc(s.message || P.signInHint));
+  } else if (!s.supported) {
     lines.push('<b>Sign-in is not available on this server.</b>');
     lines.push(s.error || '');
     lines.push('For You needs the Node server (npm run dev / npm start) on a machine with Chrome or Edge. The Explore feed works everywhere.');
@@ -495,7 +518,7 @@ function renderSession(): void {
     lines.push('A TikTok window opened on the machine running the server. Sign in there (any method). This page updates automatically.');
   } else {
     lines.push('<b>Not signed in.</b>');
-    lines.push(`"Sign in with QR code" shows TikTok's login QR here; scan it with the TikTok app on your phone. The session then lives in a private ${esc(s.browser || 'browser')} profile on the server. StreamAnywhere never sees your password.`);
+    lines.push(`${esc(P.signInHint)} The session then lives in a private ${esc(s.browser || 'browser')} profile on the server. StreamAnywhere never sees your password.`);
     if (s.error) lines.push(`<span style="color:var(--err)">${esc(s.error)}</span>`);
   }
   el.sessionText.innerHTML = lines.filter(Boolean).join('\n');
@@ -550,7 +573,7 @@ function renderSession(): void {
   el.navProfileLabel.textContent = s.state === 'logged_in' ? `@${(s.username || 'me').slice(0, 12)}` : s.state === 'login_pending' ? 'Signing in…' : 'Profile';
   el.navProfile.classList.toggle('active', s.state === 'logged_in');
 }
-const SIGNIN_KEY = 'streamanywhere.feed.signin';
+const SIGNIN_KEY = P.id === 'tiktok' ? 'streamanywhere.feed.signin' : `streamanywhere.feed.${P.id}.signin`;
 /** The code step: TikTok's answer to the last code, and how long the server keeps waiting. */
 function renderCodeStep(s: SessionStatus): void {
   const r = s.verifyResult;
@@ -604,7 +627,7 @@ async function refreshSession(announce = false): Promise<SessionStatus | undefin
   try {
     const prev = state.session?.state;
     const prevProbing = Boolean(state.session?.probing);
-    state.session = await api.session();
+    state.session = await api.session(P.id);
     sessionPollFailures = 0;
     if (state.session.state === 'logged_in') signedOutPanelShown = false;
     renderSession();
@@ -612,7 +635,7 @@ async function refreshSession(announce = false): Promise<SessionStatus | undefin
     if (state.session.state === 'logged_in' && (prev === 'login_pending' || (restoreForYou && prevProbing))) {
       restoreForYou = false;
       closeSessionPanel();
-      toast(`Signed in as @${state.session.username || '?'} – loading your For You feed`);
+      toast(`Signed in as @${state.session.username || '?'} – loading your ${P.tabs.foryou} feed`);
       prefs.source = 'foryou';
       savePrefs();
       renderSourceUi();
@@ -621,7 +644,7 @@ async function refreshSession(announce = false): Promise<SessionStatus | undefin
       // The profile check finished without a session: Explore stays, and the preference follows.
       restoreForYou = false;
       savePrefs();
-      if (state.session.supported) toast('Sign in (Profile) to see your For You feed; showing Explore meanwhile.', false, 5000);
+      if (state.session.supported) toast(`Sign in (Profile) to see your ${P.tabs.foryou} feed; showing ${P.tabs.explore} meanwhile.`, false, 5000);
     }
     return state.session;
   } catch (e) {
@@ -721,9 +744,9 @@ let loadingTicker = 0;
 function sourceLabel(): string {
   if (state.mode.kind === 'search') return `search results for “${state.mode.q}”`;
   if (state.mode.kind === 'profile') return `videos of @${state.mode.user}`;
-  if (prefs.source === 'foryou') return 'your For You feed';
-  const cat = EXPLORE_CATEGORIES.find((c) => c.id === prefs.category);
-  return `Explore${cat && cat.id !== 120 ? ' · ' + cat.label : ''}`;
+  if (prefs.source === 'foryou') return `your ${P.tabs.foryou} feed`;
+  const cat = P.categories.find((c) => c.id === prefs.category);
+  return `${P.tabs.explore}${cat && cat.id !== P.defaultCategory ? ' · ' + cat.label : ''}`;
 }
 function showLoading(title: string, detail: string, centered: boolean): void {
   el.loading.classList.remove('hidden');
@@ -745,8 +768,8 @@ function startLoadingStatus(): void {
     const first = state.entries.length === 0;
     let title = first ? `Loading ${sourceLabel()}…` : 'Loading more videos…';
     let detail = 'Asking the server for the next videos';
-    if (sec >= 5) detail = 'The server is fetching from TikTok…';
-    if (sec >= 12) detail = prefs.source === 'foryou' ? 'Reading your feed from the signed-in TikTok session\n(a fresh browser start can take up to a minute)' : 'TikTok is slow to answer; the server is retrying through its browser…';
+    if (sec >= 5) detail = `The server is fetching from ${P.name}…`;
+    if (sec >= 12) detail = prefs.source === 'foryou' ? `Reading your feed from the signed-in ${P.name} session\n(a fresh browser start can take up to a minute)` : `${P.name} is slow to answer; the server is retrying…`;
     if (sec >= 40) detail += `\n${sec} s so far – still trying`;
     if (state.emptyBatches > 0 && first) title = `Still loading ${sourceLabel()}…`;
     showLoading(title, detail, waiting());
@@ -762,8 +785,8 @@ function showRetryStatus(delayMs: number): void {
     const waiting = state.entries.length === 0 || state.wantNext || state.active >= state.entries.length - 1;
     if (!waiting) return hideLoading();
     showLoading(
-      state.entries.length ? 'No new videos yet' : `TikTok returned no videos for ${sourceLabel()}`,
-      `Retrying in ${left} s… (TikTok limits how fast it hands out videos)`,
+      state.entries.length ? 'No new videos yet' : `${P.name} returned no videos for ${sourceLabel()}`,
+      `Retrying in ${left} s… (${P.name} limits how fast it hands out videos)`,
       true,
     );
     if (left <= 0) clearInterval(loadingTicker);
@@ -815,19 +838,19 @@ async function fetchBatch(): Promise<{ items: FeedItem[]; warnings: string[]; ha
   const mode = state.mode;
   if (mode.kind === 'search') {
     if (!mode.hasMore) return { items: [], warnings: [], hasMore: false };
-    const r = await api.search({ q: mode.q, offset: mode.offset });
+    const r = await api.search({ platform: P.id, q: mode.q, offset: mode.offset });
     mode.offset = r.offset;
     mode.hasMore = r.hasMore;
     return { items: r.items, warnings: r.warnings, hasMore: r.hasMore };
   }
   if (mode.kind === 'profile') {
     if (!mode.hasMore) return { items: [], warnings: [], hasMore: false };
-    const r = await api.profile({ user: mode.user, offset: mode.offset, count: BATCH });
+    const r = await api.profile({ platform: P.id, user: mode.user, offset: mode.offset, count: BATCH });
     mode.offset = r.offset + r.items.length;
     mode.hasMore = r.hasMore;
     return { items: r.items, warnings: r.warnings, hasMore: r.hasMore };
   }
-  const r = await api.feed({ source: prefs.source, category: prefs.source === 'explore' ? prefs.category : undefined, count: BATCH });
+  const r = await api.feed({ platform: P.id, source: prefs.source, category: prefs.source === 'explore' ? prefs.category : undefined, count: BATCH });
   return { items: r.items, warnings: r.warnings, hasMore: r.hasMore };
 }
 
@@ -1100,7 +1123,7 @@ function attachSource(entry: Entry, which: 'direct' | 'proxy' | 'auto' = 'auto')
   entry.src = pick;
   entry.root.classList.remove('has-frame');
   const p = ensurePlayer(entry);
-  void p.load(pick.url, pick.kind, `TikTok ${entry.item.id} (${pick.kind})`);
+  void p.load(pick.url, pick.kind, `${P.name} ${entry.item.id} (${pick.kind})`, { audioUrl: pick.audioUrl, durationHint: entry.item.duration });
   return true;
 }
 
@@ -1133,6 +1156,22 @@ function ensureFormats(entry: Entry): Promise<boolean> {
       .then((r) => {
         entry.item.formats = r.formats.filter((f) => f.directUrl || f.proxyUrl);
         if (!entry.item.formats.length) throw new Error(r.warnings[0] || 'no playable format');
+        // A thin listing (YouTube's hashtag pages name no channel) is completed from the video itself.
+        const item = entry.item;
+        if (!item.author.uniqueId && r.author) {
+          item.author.uniqueId = r.author;
+          const a = entry.root.querySelector<HTMLAnchorElement>('.info .author a');
+          if (a) {
+            a.textContent = `@${r.author}`;
+            a.title = 'Open this account';
+            a.addEventListener('click', (ev) => {
+              ev.preventDefault();
+              void openProfile(r.author!);
+            });
+          }
+          if (activeEntry() === entry) el.actAuthor.disabled = false;
+        }
+        if (!item.duration && r.duration) item.duration = r.duration;
         return true;
       })
       .catch((e) => {
@@ -1233,7 +1272,8 @@ async function download(entry: Entry): Promise<void> {
   const item = entry.item;
   const cands = sourceCandidates(item);
   if (!cands.length) return toast('No downloadable URL for this video', true);
-  const name = `@${(item.author.uniqueId || 'tiktok').replace(/[^\w.-]+/g, '_')}_${item.id}.mp4`;
+  const name = `@${(item.author.uniqueId || P.id).replace(/[^\w.-]+/g, '_')}_${item.id}.mp4`;
+  if (cands[0].audioUrl) toast(`${P.name} serves the sound as a separate file: the saved MP4 has the picture only`, false, 5000);
   if (el.actDownload.classList.contains('busy')) return;
   el.actDownload.disabled = true;
   el.actDownload.classList.add('busy');
@@ -1521,7 +1561,7 @@ void (async () => {
   if (resuming) {
     // A sign-in was pending when the page was last open: show the panel right away, in the right step.
     el.session.classList.remove('hidden');
-    el.sessionText.innerHTML = '<b>Resuming your TikTok sign-in…</b>\nChecking where it stands on the server.';
+    el.sessionText.innerHTML = `<b>Resuming your ${esc(P.name)} sign-in…</b>\nChecking where it stands on the server.`;
   }
   const s = await refreshSession();
   if (s?.state === 'login_pending') {
@@ -1532,7 +1572,7 @@ void (async () => {
     toast('The sign-in is no longer pending on the server – start it again from Profile', false, 6000);
   }
   if (s?.probing) {
-    toast('Checking the saved TikTok sign-in on the server…');
+    toast(`Checking the saved ${P.name} sign-in on the server…`);
     const t0 = Date.now();
     while (state.session?.probing && Date.now() - t0 < 60_000) {
       await new Promise((r) => setTimeout(r, 2000));
@@ -1545,7 +1585,7 @@ void (async () => {
       savePrefs();
       renderSourceUi();
       await feedReady;
-      toast(`Signed in as @${state.session.username || '?'} – loading your For You feed`);
+      toast(`Signed in as @${state.session.username || '?'} – loading your ${P.tabs.foryou} feed`);
       void reload();
     } else if (state.session?.probing) {
       // The server is still checking the saved profile (a cold browser start on a small VM can take
@@ -1555,10 +1595,19 @@ void (async () => {
       pollSession();
     } else {
       savePrefs();
-      if (state.session?.supported) toast('Sign in (Profile) to see your For You feed; showing Explore meanwhile.', false, 5000);
+      if (state.session?.supported) toast(`Sign in (Profile) to see your ${P.tabs.foryou} feed; showing ${P.tabs.explore} meanwhile.`, false, 5000);
     }
   }
 })();
+
+// Back to the launcher: the home screen plays the reverse of its open animation for this app.
+el.homeLink.addEventListener('click', () => {
+  try {
+    sessionStorage.setItem('streamanywhere.returnFrom', P.id);
+  } catch {
+    /* ignore */
+  }
+});
 
 // Debug handle (console / automated checks): the state plus the two navigation entry points, so the
 // feed can be driven where scrolling and IntersectionObserver do not run (hidden or occluded tabs).

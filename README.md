@@ -30,6 +30,8 @@ Windows 10 (see **Test results** for exactly what was measured):
 | H.265 TikTok variants through WebCodecs | **Browser-dependent** – fails cleanly where `VideoDecoder.isConfigSupported` says no |
 | **Feed page** (`feed.html`): TikTok-style vertical stream, Explore feed without sign-in | **Working** (Node server and IIS handler) |
 | Feed page: personal **For You** feed after signing in to TikTok (QR code or window) | **Working mechanism** (signed-out test; QR rendered and refreshed); needs the Node server + Chrome/Edge/Chromium on that machine – see **Feed** |
+| **Launcher** (`home.html`, the landing page): iPad-style icons that open each platform like an app | **Working** |
+| **YouTube, guest mode**: Shorts by hashtag, search, channels; picture + sound as two files played in sync | **Working** (Node server with yt-dlp) – see **YouTube** |
 
 ## Repository layout
 
@@ -44,11 +46,13 @@ client/   Vite 4 + TypeScript front end (no framework)
   src/cors-test.ts                browser-side fetch()/<video> access tests
   src/diagnostics.ts              the six experiments (measured, with explanations)
   src/main.ts                     UI, source/renderer selection, direct-vs-proxy decision
-  feed.html + src/feed/feed.ts    the feed page: snap-scrolling stream, tap-to-pause, auto-scroll, download
+  home.html + src/home/home.ts    the launcher: one app icon per platform (src/platforms.ts), zoom-open animation
+  feed.html + src/feed/feed.ts    the feed page (feed.html?platform=tiktok|youtube): snap-scrolling stream, tap-to-pause, auto-scroll, download
 server/   Fastify 4 + TypeScript (Node 16 compatible)
   src/tiktok.ts                   native TikTok resolver (page JSON) + server-side CORS probe
   src/feed.ts                     Explore feed (unsigned TikTok API) + itemStruct → FeedItem conversion
   src/session.ts                  TikTok sign-in through a real Chrome/Edge (puppeteer-core) + For You capture
+  src/youtube.ts                  YouTube guest mode through yt-dlp: hashtag Shorts, search, channels, two-file resolve
   src/ytdlp.ts                    yt-dlp fallback resolver
   src/proxy.ts                    GET/HEAD /api/media/:id streaming relay with Range support
   src/ssrf.ts                     https-only, host allowlist, private-IP rejection
@@ -214,7 +218,7 @@ npm run typecheck
 
 ## Feed (TikTok-style stream)
 
-Open **`/feed.html`** (linked from the lab page). It is a full-window vertical stream like the app:
+Open **`/feed.html`** (from the launcher; `?platform=youtube` for YouTube). It is a full-window vertical stream like the app:
 
 - One video per screen, scroll-snap. The video that fills the viewport plays; the others pause.
   Mouse wheel, touch, ↑/↓, J/K, PageUp/PageDown move between videos.
@@ -257,6 +261,39 @@ served an error page unless it hides automation (user agent without `HeadlessChr
 Everything after sign-in was verified signed-out (TikTok's guest feed: small batches of 1–6 items,
 then a login wall); the signed-in path uses exactly the same capture. Hosted containers (Render,
 Docker) have no Chrome: the feed page then offers Explore only and says so.
+
+## Launcher and platforms
+
+**`/`** (`home.html`) is an iPad-style home screen: one icon per platform (TikTok, YouTube) plus the
+lab player, a dock, and a zoom-from-icon animation into `feed.html?platform=…`; the feed's Home
+button (top left) zooms back. A green badge on an icon means that platform is signed in on the
+server. The page has a web-app manifest, so it can be added to a phone's or tablet's home screen
+and runs full screen. Platforms are declared once in `client/src/platforms.ts` (name, colours, icon,
+categories); the feed page reads `?platform=` and labels, colours and routes itself accordingly.
+
+## YouTube (guest mode)
+
+Measured 2026-10-12 (dev machine and the GCP VM; the VM's IP is not bot-checked for guests):
+
+- **Explore** = the Shorts tab of a hashtag page (`youtube.com/hashtag/<tag>/shorts`, 30 vertical
+  videos in under 3 s); the chips are hashtags and "All" rotates through them. YouTube's Trending
+  page no longer exists (it redirects home).
+- **Search** = `yt-dlp "ytsearchN:…"` (3–4 s a page of 20). Channels (`@handle/videos`) back the
+  Profile button. Everything is guest access; YouTube sign-in / a personal feed comes later.
+- **Playback**: YouTube gives guests no muxed format (the 360p one needs a PO token and answers
+  403), so each video is resolved (`yt-dlp -j`, cached an hour) to an H.264 video-only file (up
+  to 720p, `avc1` itags 160/133/134/135/136/298) plus an AAC audio file (itag 140, original
+  language, 128 kbps). Both are fragmented MP4 and both go through the proxy: `googlevideo.com`
+  URLs are bound to the server's IP and carry no CORS header. The WebCodecs renderer runs a
+  second demuxer for the sound file and syncs the picture to its audio clock (`LoadSource.audioUrl`).
+- **Proxy chunking**: googlevideo throttles an open-ended request to ~50 KB/s but serves a bounded
+  Range at full speed (10 MB in 0.3 s), so `chunked` media records are relayed in 4 MB chunks.
+- **Seeking in fragmented files**: mp4box only knows the fragments it has parsed, so a seek beyond
+  the downloaded part uses the `sidx` index (`demuxer.ts`: fragment byte offset → restart the fetch
+  there, point mp4box's parser at it, and let the fragment's `tfdt` set the time).
+- Needs `yt-dlp` on the server (`YTDLP_PATH`, auto-detected on PATH / pip user installs; the GCP
+  script installs and self-updates it). The `<video>` fallback renderer cannot play two files and
+  stays silent for YouTube; the download button saves the picture only.
 
 ## Using the app
 

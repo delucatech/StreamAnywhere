@@ -1,4 +1,4 @@
-import type { ConversationResponse, FeedRequest, FeedResponse, FollowRequest, FollowResponse, HealthResponse, InboxResponse, LoginMode, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SendMessageResponse, ServerProbe, SessionInputRequest, SessionStatus } from '../../shared/types';
+import type { ConversationResponse, FeedRequest, FeedResponse, FollowRequest, FollowResponse, HealthResponse, InboxResponse, LoginMode, Platform, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SendMessageResponse, ServerProbe, SessionInputRequest, SessionStatus } from '../../shared/types';
 
 /**
  * API base URL. Empty = same origin (dev server proxy or SERVE_CLIENT deployments). When the
@@ -78,8 +78,8 @@ export const api = {
   probe: (url: string): Promise<ServerProbe> => post('/api/probe', { url, origin: location.origin }),
   report: (req: ReportRequest): Promise<void> => post('/api/report', req).then(() => undefined, () => undefined),
   feed: (req: FeedRequest): Promise<FeedResponse> => post('/api/feed', req),
-  session: async (): Promise<SessionStatus> => {
-    const res = await fetch(apiUrl('/api/session'), { mode: 'cors', credentials: 'same-origin' });
+  session: async (platform: Platform = 'tiktok'): Promise<SessionStatus> => {
+    const res = await fetch(apiUrl(`/api/session?platform=${platform}`), { mode: 'cors', credentials: 'same-origin' });
     toLoginOn401(res);
     if (!res.ok) throw new ApiError(`session ${res.status}`, res.status);
     return res.json();

@@ -9,6 +9,18 @@ export default defineConfig(({ mode }) => {
   return {
   // GitHub Pages serves project sites under /<repo>/; set VITE_BASE=/StreamAnywhere/ in that build.
   base: env.VITE_BASE || '/',
+  plugins: [
+    {
+      // The launcher is the landing page in dev too (the server serves home.html as the index in production).
+      name: 'home-is-index',
+      configureServer(server) {
+        server.middlewares.use((req, _res, next) => {
+          if (req.url === '/' || req.url?.startsWith('/?')) req.url = '/home.html' + (req.url.slice(1) || '');
+          next();
+        });
+      },
+    },
+  ],
   server: {
     port: Number(env.VITE_PORT) || 5173,
     strictPort: true,
@@ -34,6 +46,7 @@ export default defineConfig(({ mode }) => {
     target: 'es2020',
     rollupOptions: {
       input: {
+        home: path.resolve(__dirname, 'home.html'),
         main: path.resolve(__dirname, 'index.html'),
         feed: path.resolve(__dirname, 'feed.html'),
       },

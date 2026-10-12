@@ -3,8 +3,16 @@
  * The client imports this file directly (Vite fs.allow covers ../shared).
  */
 
-export type SourceKind = 'tiktok' | 'mp4';
+export type SourceKind = 'tiktok' | 'youtube' | 'mp4';
 export type ResolverKind = 'native' | 'ytdlp' | 'passthrough';
+
+/**
+ * A platform is one "app" on the launcher (home.html): its own feed, search and sign-in. The feed
+ * page is shared; `platform` in a request tells the server which one it is asking about.
+ */
+export type Platform = 'tiktok' | 'youtube';
+export const PLATFORM_IDS: Platform[] = ['tiktok', 'youtube'];
+export const platformOf = (v: unknown): Platform => (v === 'youtube' ? 'youtube' : 'tiktok');
 export type CodecFamily = 'h264' | 'h265' | 'av1' | 'vp9' | 'unknown';
 
 /** Result of a server-side HTTP probe of a media URL (what the *server* observed, not the browser). */
@@ -57,6 +65,12 @@ export interface MediaFormat {
   /** Proxy relay endpoint (/api/media/:id). Absent when upstream host is not allowlisted for relaying. */
   proxyUrl?: string;
   mediaId?: string;
+  /**
+   * YouTube hands out picture and sound as two files (no muxed format without a PO token); the
+   * player then fetches this second file (proxy relay, AAC in fragmented MP4) and plays both in sync.
+   */
+  audioProxyUrl?: string;
+  audioMediaId?: string;
   /** Upstream playback URL needs the session cookies the server captured (only the proxy can supply them). */
   requiresCookies: boolean;
   /** Epoch seconds at which the upstream URL stops working, if derivable from the URL */
@@ -157,8 +171,10 @@ export interface FeedItem {
 }
 
 export interface FeedRequest {
+  /** Which platform's feed (default tiktok) */
+  platform?: Platform;
   source: FeedSource;
-  /** Explore category id (see EXPLORE_CATEGORIES); default 120 = All */
+  /** Explore category id (see EXPLORE_CATEGORIES / YOUTUBE_CATEGORIES); default = All */
   category?: number;
   /** Items wanted (server clamps) */
   count?: number;
@@ -198,6 +214,7 @@ export interface UserSummary {
 export type FollowState = 'none' | 'following' | 'friends' | 'requested' | 'unknown';
 
 export interface SearchRequest {
+  platform?: Platform;
   q: string;
   /** Continuation from the previous response (0 for a new search) */
   offset?: number;
@@ -214,6 +231,7 @@ export interface SearchResponse {
 }
 
 export interface ProfileRequest {
+  platform?: Platform;
   /** @handle without the @ */
   user: string;
   /** Videos already received (the server scrolls the profile page until it has more) */
@@ -321,6 +339,40 @@ export const EXPLORE_CATEGORIES: ExploreCategory[] = [
   { id: 116, label: 'Technology' },
 ];
 
+/**
+ * YouTube guest "Explore" categories: each is a hashtag whose Shorts tab (youtube.com/hashtag/<tag>/shorts)
+ * the server lists with yt-dlp - vertical videos, no sign-in, about 30 per page (measured 2026-10-12).
+ * id 0 = All rotates through the others.
+ */
+export interface YouTubeCategory {
+  id: number;
+  label: string;
+  /** Hashtag without the # */
+  tag: string;
+}
+export const YOUTUBE_CATEGORIES: YouTubeCategory[] = [
+  { id: 0, label: 'All', tag: 'shorts' },
+  { id: 1, label: 'Funny', tag: 'funny' },
+  { id: 2, label: 'Music', tag: 'music' },
+  { id: 3, label: 'Dance', tag: 'dance' },
+  { id: 4, label: 'Gaming', tag: 'gaming' },
+  { id: 5, label: 'Sports', tag: 'sports' },
+  { id: 6, label: 'Cats', tag: 'cats' },
+  { id: 7, label: 'Dogs', tag: 'dogs' },
+  { id: 8, label: 'Food', tag: 'food' },
+  { id: 9, label: 'Cars', tag: 'cars' },
+  { id: 10, label: 'Travel', tag: 'travel' },
+  { id: 11, label: 'Fitness', tag: 'fitness' },
+  { id: 12, label: 'Science', tag: 'science' },
+  { id: 13, label: 'DIY', tag: 'diy' },
+  { id: 14, label: 'Nature', tag: 'nature' },
+  { id: 15, label: 'Anime', tag: 'anime' },
+  { id: 16, label: 'Football', tag: 'football' },
+  { id: 17, label: 'Basketball', tag: 'basketball' },
+  { id: 18, label: 'Cooking', tag: 'cooking' },
+  { id: 19, label: 'Tech', tag: 'tech' },
+];
+
 export type SessionState = 'unsupported' | 'none' | 'login_pending' | 'logged_in' | 'error';
 
 /** 'qr' = TikTok's QR login rendered by a headless page and shown in the feed page (works on servers
@@ -346,6 +398,8 @@ export type SessionInputRequest =
 
 /** State of the server-side TikTok browser session (Node server only). */
 export interface SessionStatus {
+  /** Which platform's sign-in this describes (absent = tiktok) */
+  platform?: Platform;
   /** false on servers that cannot run a browser (IIS handler, hosted containers without Chrome) */
   supported: boolean;
   state: SessionState;

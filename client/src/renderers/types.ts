@@ -14,6 +14,13 @@ export interface LoadSource {
   /** TikTok video id (embed mode) */
   videoId?: string;
   mediaId?: string;
+  /**
+   * Second file carrying the sound (YouTube hands out picture and sound separately). The WebCodecs
+   * renderer demuxes it alongside `url`; the <video> fallback cannot and plays silently.
+   */
+  audioUrl?: string;
+  /** Duration in seconds when the container does not say (fragmented files may report 0) */
+  durationHint?: number;
   /** Result of the browser-side CORS probe that selected this URL */
   corsResult?: 'passed' | 'failed' | 'not-tested' | 'same-origin';
   corsDetail?: string;

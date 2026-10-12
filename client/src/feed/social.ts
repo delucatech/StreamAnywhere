@@ -9,6 +9,7 @@
 import type { ChatMessage, Conversation, FeedItem, FollowState, UserSummary } from '../../../shared/types';
 import { api, ApiError } from '../api';
 import { pressed } from '../busy';
+import type { PlatformDef } from '../platforms';
 
 export type PlayList = { kind: 'search'; q: string; items: FeedItem[]; offset: number; hasMore: boolean } | { kind: 'profile'; user: string; items: FeedItem[]; offset: number; hasMore: boolean };
 
@@ -18,7 +19,12 @@ export interface SocialHost {
   isLoggedIn(): boolean;
   openSessionPanel(): Promise<void>;
   fmtCount(n?: number): string;
+  /** Which platform the panels search and browse (follow / messages exist on TikTok only) */
+  platform: PlatformDef;
 }
+
+/** The public page of an account on the platform */
+const accountUrl = (p: PlatformDef, handle: string): string => (p.id === 'youtube' ? `https://www.youtube.com/@${encodeURIComponent(handle)}` : `https://www.tiktok.com/@${handle}`);
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const e = document.getElementById(id);
@@ -177,7 +183,7 @@ async function runSearch(q: string, more: boolean): Promise<void> {
     status(el.searchStatus, `Searching for “${q}”…`);
   } else status(el.searchStatus, 'Loading more…');
   try {
-    const r = await api.search({ q, offset: more ? search.offset : 0 });
+    const r = await api.search({ platform: host.platform.id, q, offset: more ? search.offset : 0 });
     if (search.q !== q) return;
     search.offset = r.offset;
     search.hasMore = r.hasMore;
@@ -243,7 +249,7 @@ function renderProfileHead(): void {
     el.profileStats.appendChild(s);
   }
   el.profileBio.textContent = u.signature || '';
-  el.profileLink.href = `https://www.tiktok.com/@${u.uniqueId}`;
+  el.profileLink.href = accountUrl(host.platform, u.uniqueId);
   const followed = u.followState === 'following' || u.followState === 'friends' || u.followState === 'requested';
   el.profileFollow.textContent = followLabel(u.followState);
   el.profileFollow.classList.toggle('primary', !followed);
@@ -277,7 +283,7 @@ async function loadProfile(more: boolean): Promise<void> {
   const user = profile.user;
   status(el.profileStatus, more ? 'Loading more videos…' : `Loading @${user}… (the server opens the account page)`);
   try {
-    const r = await api.profile({ user, offset: more ? profile.offset : 0, count: 24 });
+    const r = await api.profile({ platform: host.platform.id, user, offset: more ? profile.offset : 0, count: 24 });
     if (profile.user !== user) return;
     profile.info = r.user;
     profile.offset = r.offset + r.items.length;
@@ -507,4 +513,10 @@ el.inboxForm.addEventListener('submit', (e) => {
 
 export function initSocial(h: SocialHost): void {
   host = h;
+  const p = h.platform;
+  el.searchInput.placeholder = p.social ? 'Search videos and accounts' : `Search ${p.name}`;
+  el.profileLink.textContent = `Open on ${p.name}`;
+  // Follow and messages exist on TikTok only; the other platforms show the account's videos.
+  el.profileFollow.classList.toggle('hidden', !p.social);
+  el.profileMessage.classList.toggle('hidden', !p.social);
 }

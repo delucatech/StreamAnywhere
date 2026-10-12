@@ -104,8 +104,11 @@ export class FeedPlayer {
     }
   }
 
-  /** Starts fetching/decoding `url`; resolves when the renderer accepted it (frames arrive later). */
-  async load(url: string, connection: 'direct' | 'proxy', label: string): Promise<void> {
+  /**
+   * Starts fetching/decoding `url` (plus `audioUrl`, when the sound comes as a second file);
+   * resolves when the renderer accepted it (frames arrive later).
+   */
+  async load(url: string, connection: 'direct' | 'proxy', label: string, extra: { audioUrl?: string; durationHint?: number } = {}): Promise<void> {
     if (this.destroyed) return;
     this.url = url;
     this.wantPlay = false;
@@ -116,6 +119,8 @@ export class FeedPlayer {
       sourceKind: 'tiktok',
       fetchInit: { mode: 'cors', credentials: 'same-origin' },
       corsResult: 'not-tested',
+      audioUrl: extra.audioUrl,
+      durationHint: extra.durationHint,
     };
     this.renderer.setVolume(this.muted ? 0 : 1);
     this.startTicker();

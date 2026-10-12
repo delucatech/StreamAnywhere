@@ -11,6 +11,10 @@
  *    restarted when that offset lies beyond what has been fetched; when the file is already
  *    complete in memory the samples are simply re-emitted (a Range request at EOF would be 416).
  *  - pause()/resume() stop pulling from the network when the decoder queues are full.
+ *  - Fragmented files (YouTube: moov + sidx, then moof/mdat pairs): mp4box only knows the samples
+ *    of the fragments it has parsed, so a seek beyond the downloaded part is answered from the
+ *    sidx index instead: the fetch restarts at that fragment's byte offset and mp4box is told to
+ *    parse from there (its fragments carry tfdt timestamps, so the times stay absolute).
  */
 import { createFile, MP4BoxBuffer, type ISOFile, type Movie, type Sample } from 'mp4box';
 import { describeTrack, type TrackInfo } from './codecConfig';
@@ -49,6 +53,7 @@ export class Mp4Demuxer {
   private videoTrack?: TrackInfo;
   private audioTrack?: TrackInfo;
   private ready = false;
+  private fragmented = false;
   /** The current download reached EOF (every byte of the file went through mp4box) */
   private ended = false;
   readonly stats: DemuxerStats = {
@@ -88,6 +93,17 @@ export class Mp4Demuxer {
   seek(seconds: number): number {
     if (!this.ready) return seconds;
     const r = this.file.seek(Math.max(0, seconds), true);
+    if (this.fragmented && seconds > 0.5 && r.time === 0) {
+      // Beyond the fragments parsed so far (mp4box answers "time 0"): jump by the segment index.
+      const hit = this.sidxLookup(seconds);
+      if (hit) {
+        this.paused = false;
+        this.wake();
+        this.cb.onLog(`seek ${seconds.toFixed(2)}s -> fragment at ${hit.time.toFixed(2)}s, file offset ${hit.offset} (sidx)`);
+        this.jumpTo(hit.offset);
+        return hit.time;
+      }
+    }
     const total = this.stats.totalBytes;
     const atEof = total > 0 && r.offset >= total;
     this.paused = false;
@@ -143,8 +159,49 @@ export class Mp4Demuxer {
     w.forEach((fn) => fn());
   }
 
+  /** The fragment (byte offset, start time) holding `seconds`, from the sidx index; undefined without one. */
+  private sidxLookup(seconds: number): { offset: number; time: number } | undefined {
+    const sidx = (this.file as unknown as { sidx?: { start: number; size: number; timescale: number; earliest_presentation_time: number; first_offset: number; references: { referenced_size: number; subsegment_duration: number }[] } }).sidx;
+    if (!sidx?.references?.length || !sidx.timescale) return undefined;
+    const target = seconds * sidx.timescale;
+    let t = sidx.earliest_presentation_time;
+    let offset = sidx.start + sidx.size + sidx.first_offset;
+    for (const ref of sidx.references) {
+      if (t + ref.subsegment_duration > target) break;
+      t += ref.subsegment_duration;
+      offset += ref.referenced_size;
+    }
+    return { offset, time: t / sidx.timescale };
+  }
+
+  /**
+   * Restarts the download at `offset` (a fragment boundary) and points mp4box's parser there. The
+   * samples parsed earlier stay in its tables; extraction continues with the first new fragment.
+   */
+  private jumpTo(offset: number): void {
+    const f = this.file as unknown as {
+      lastBoxStartPosition: number;
+      nextParsePosition: number;
+      parsingMdat?: unknown;
+      moov?: { traks: { first_traf_merged?: boolean }[] };
+      extractedTracks?: { trak: { nextSample: number; samples: unknown[] }; samples: unknown[] }[];
+    };
+    f.lastBoxStartPosition = offset;
+    f.nextParsePosition = offset;
+    f.parsingMdat = undefined;
+    // mp4box takes a fragment's tfdt time only for the first fragment it merges and chains every
+    // later one onto the previous sample; after a jump the next fragment must start from its tfdt.
+    for (const trak of f.moov?.traks || []) trak.first_traf_merged = false;
+    for (const t of f.extractedTracks || []) {
+      t.trak.nextSample = t.trak.samples.length;
+      t.samples = [];
+    }
+    void this.startFetch(offset);
+  }
+
   private handleReady(info: Movie): void {
     this.ready = true;
+    this.fragmented = Boolean(info.isFragmented);
     this.stats.isProgressive = info.isProgressive;
     const v = info.videoTracks?.[0];
     const a = info.audioTracks?.[0];
@@ -158,8 +215,8 @@ export class Mp4Demuxer {
     this.file.start();
     this.cb.onReady(info, this.videoTrack, this.audioTrack);
     // Non-progressive files: we may have skipped the mdat to reach moov. Ask mp4box where the
-    // first samples live and restart there.
-    if (!info.isProgressive) {
+    // first samples live and restart there. (A fragmented file has no samples yet: nothing to ask.)
+    if (!info.isProgressive && !this.fragmented) {
       const r = this.file.seek(0, true);
       if (r.offset !== this.filePos) {
         this.cb.onLog(`non-progressive file: restarting download at sample data offset ${r.offset}`);

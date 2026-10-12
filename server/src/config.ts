@@ -41,7 +41,7 @@ const list = (v: string | undefined): string[] =>
     .map((s) => s.trim())
     .filter(Boolean);
 
-/** Hosts the proxy is always allowed to relay from (TikTok CDN + the bundled test MP4 hosts). */
+/** Hosts the proxy is always allowed to relay from (TikTok CDN, YouTube media CDN + the bundled test MP4 hosts). */
 export const BUILTIN_PROXY_HOSTS = [
   '*.tiktok.com',
   '*.tiktokcdn.com',
@@ -50,6 +50,7 @@ export const BUILTIN_PROXY_HOSTS = [
   '*.tiktokv.com',
   '*.byteoversea.com',
   '*.ibyteimg.com',
+  '*.googlevideo.com',
   'mdn.github.io',
   'interactive-examples.mdn.mozilla.net',
 ];

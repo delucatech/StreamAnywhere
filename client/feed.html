@@ -5,14 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#000000" />
     <title>StreamAnywhere – Feed</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="stylesheet" href="/src/feed/feed.css" />
   </head>
   <body class="feed-body">
     <div id="app" class="app">
       <!-- transparent top bar over the video, like the app -->
       <header class="topbar" id="topbar">
-        <a class="top-icon brand" href="./index.html" title="Lab player" aria-label="Lab player">
-          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M8 5v14l11-7z" /></svg>
+        <a class="top-icon brand" id="homeLink" href="./home.html" title="Home screen (all apps)" aria-label="Home screen">
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M3 3h8v8H3zm10 0h8v8h-8zM3 13h8v8H3zm10 0h8v8h-8z" /></svg>
         </a>
         <nav class="tabs" id="tabs" aria-label="Feed source">
           <button class="tab" data-source="explore" type="button">Explore</button>
@@ -137,7 +139,7 @@
             <button id="profileFollow" class="btn primary" type="button">Follow</button>
             <button id="profileMessage" class="btn" type="button">Message</button>
             <button id="profilePlay" class="btn" type="button">Play videos</button>
-            <a id="profileLink" class="btn ghost" target="_blank" rel="noopener">Open on TikTok</a>
+            <a id="profileLink" class="btn ghost" target="_blank" rel="noopener">Open account page</a>
           </div>
           <div id="profileVideos" class="video-grid"></div>
           <div class="panel-foot"><button id="profileMore" class="btn hidden" type="button">More videos</button></div>

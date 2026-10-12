@@ -3,8 +3,8 @@ import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
-import { EXPLORE_CATEGORIES } from '../../shared/types';
-import type { ConversationRequest, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ProbeRequest, ProfileRequest, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SendMessageRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
+import { EXPLORE_CATEGORIES, YOUTUBE_CATEGORIES, platformOf } from '../../shared/types';
+import type { ConversationRequest, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ProbeRequest, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SendMessageRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
 import { registerAuth } from './auth';
 import { config, findUp } from './config';
 import { registerProxyRoutes } from './proxy';
@@ -16,6 +16,7 @@ import { EXPLORE_DEFAULT_CATEGORY, FeedError, fetchExploreFeed, normalizeExplore
 import { cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouStock, logout, rememberLog, workState, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
 import { Reservoir, type ReservoirStats } from './reservoir';
 import { conversation, fetchProfile, followUser, inbox, inboxDebug, searchTikTok, sendMessage, SocialError } from './social';
+import { channelVideos, exploreYouTube, isYouTubeUrl, resolveYouTube, searchYouTube, youTubeCategory, YouTubeError } from './youtube';
 
 /** After the browser path rescued an explore request, prefer it for a while (datacenter IPs). */
 let exploreViaBrowserUntil = 0;
@@ -78,6 +79,41 @@ function exploreReservoir(category: number, log: (m: string) => void, warn: (err
 }
 export const exploreStock = (): Record<string, ReservoirStats> => Object.fromEntries([...exploreReservoirs].map(([k, v]) => [String(k), v.stats]));
 
+/**
+ * YouTube guest Explore stock per category: page after page of the hashtag's Shorts tab. "All"
+ * rotates through the other hashtags, a page of each in turn.
+ */
+const youtubeReservoirs = new Map<number, Reservoir>();
+function youtubeReservoir(categoryId: number, log: (m: string) => void): Reservoir {
+  let r = youtubeReservoirs.get(categoryId);
+  if (!r) {
+    const cat = youTubeCategory(categoryId);
+    const others = YOUTUBE_CATEGORIES.filter((c) => c.id !== 0);
+    r = new Reservoir(
+      `youtube ${cat.tag}`,
+      async ({ count, index }) => {
+        const tag = cat.id === 0 ? others[index % others.length].tag : cat.tag;
+        const page = cat.id === 0 ? Math.floor(index / others.length) : index;
+        const res = await exploreYouTube(tag, page, count, log);
+        return { items: res.items, warnings: res.hasMore ? [] : [`#${tag} has no more Shorts`] };
+      },
+      { log, batch: 30, target: 45, low: 25, gapMs: 1000 },
+    );
+    youtubeReservoirs.set(categoryId, r);
+  }
+  return r;
+}
+export const youtubeStock = (): Record<string, ReservoirStats> => Object.fromEntries([...youtubeReservoirs].map(([k, v]) => [String(k), v.stats]));
+
+/** The guest-only YouTube sign-in status (sign-in is a later step; Explore and search work as a guest). */
+const youtubeSession = (): SessionStatus => ({
+  platform: 'youtube',
+  supported: false,
+  state: 'unsupported',
+  message: 'YouTube sign-in is coming later. Explore and search work without an account.',
+  error: 'YouTube sign-in is not available yet: this version is guest mode (Explore and search).',
+});
+
 export async function buildServer() {
   const app = Fastify({
     logger: { level: config.logLevel },
@@ -122,6 +158,16 @@ export async function buildServer() {
     const origin = body.origin || (req.headers.origin as string | undefined) || config.clientOrigins[0] || 'http://localhost:5173';
     const log = (msg: string, data?: Record<string, unknown>) => req.log.info(data || {}, msg);
     const t0 = Date.now();
+
+    if (isYouTubeUrl(url)) {
+      try {
+        return await resolveYouTube(url, (m) => log(m));
+      } catch (e) {
+        const err = e as Error;
+        req.log.warn({ err: err.message }, 'youtube resolve failed');
+        return reply.code(e instanceof YouTubeError ? e.status : 502).send({ error: err.message, attempts: [{ resolver: 'ytdlp', ok: false, error: err.message, elapsedMs: Date.now() - t0 }], elapsedMs: Date.now() - t0 });
+      }
+    }
 
     if (!isTikTokUrl(url)) {
       // Plain MP4 (or any media URL): pass through, probe CORS server-side, offer the proxy if allowlisted.
@@ -210,12 +256,21 @@ export async function buildServer() {
   // ---- feed (TikTok-style stream): explore needs no login; foryou needs the browser session.
   app.post<{ Body: FeedRequest }>('/api/feed', resolveLimit, async (req, reply) => {
     const b = req.body || ({} as FeedRequest);
+    const platform = platformOf(b.platform);
     const source = b.source === 'foryou' ? 'foryou' : 'explore';
     const count = Math.max(1, Math.min(30, Number(b.count) || 12));
     const t0 = Date.now();
-    const log = (msg: string) => app.log.info({ source }, msg);
-    const warn = (err: string, msg: string) => app.log.warn({ source, err }, msg);
+    const log = (msg: string) => app.log.info({ platform, source }, msg);
+    const warn = (err: string, msg: string) => app.log.warn({ platform, source, err }, msg);
     try {
+      if (platform === 'youtube') {
+        if (source !== 'explore') throw new FeedError('No YouTube session: sign-in is coming later. Explore and search work as a guest.', 'youtube_guest_only', 401);
+        const cat = youTubeCategory(b.category);
+        const r = await youtubeReservoir(cat.id, log).take(count);
+        const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0 };
+        log(`youtube explore ${cat.tag}: ${r.items.length} served ${r.fromStock ? 'from stock' : 'after a fill'}, ${r.ready} ready, ${resp.elapsedMs} ms`);
+        return resp;
+      }
       if (source === 'explore') {
         const category = b.category !== undefined && Number.isInteger(Number(b.category)) ? Number(b.category) : undefined;
         const norm = normalizeExploreOptions({ category, count });
@@ -231,7 +286,7 @@ export async function buildServer() {
     } catch (e) {
       const err = e as Error;
       req.log.warn({ source, err: err.message }, 'feed request failed');
-      const status = err instanceof FeedError ? err.status : 502;
+      const status = err instanceof FeedError ? err.status : err instanceof YouTubeError ? err.status : 502;
       return reply.code(status).send({ error: err.message, source, elapsedMs: Date.now() - t0 });
     }
   });
@@ -241,8 +296,9 @@ export async function buildServer() {
   const socialFail = (reply: import('fastify').FastifyReply, e: unknown, t0: number) => {
     const err = e as Error;
     app.log.warn({ err: err.message }, 'social request failed');
-    return reply.code(e instanceof SocialError ? e.status : 502).send({ error: err.message, elapsedMs: Date.now() - t0 });
+    return reply.code(e instanceof SocialError || e instanceof YouTubeError ? e.status : 502).send({ error: err.message, elapsedMs: Date.now() - t0 });
   };
+  const youtubeLog = (m: string) => app.log.info({ what: 'youtube' }, m);
   const handle = (user: unknown): string => {
     const u = String(user || '')
       .trim()
@@ -256,6 +312,7 @@ export async function buildServer() {
       const q = String(req.body?.q || '').trim().slice(0, 100);
       if (!q) throw new SocialError('Type something to search for', 400);
       const offset = Math.max(0, Math.min(500, Number(req.body?.offset) || 0));
+      if (platformOf(req.body?.platform) === 'youtube') return await searchYouTube(q, offset, youtubeLog);
       return await searchTikTok(q, offset, socialLog('search'));
     } catch (e) {
       return socialFail(reply, e, t0);
@@ -267,6 +324,11 @@ export async function buildServer() {
       const user = handle(req.body?.user);
       const offset = Math.max(0, Math.min(2000, Number(req.body?.offset) || 0));
       const count = Math.max(1, Math.min(60, Number(req.body?.count) || 24));
+      if (platformOf(req.body?.platform) === 'youtube') {
+        const r = await channelVideos(user, offset, count, youtubeLog);
+        const resp: ProfileResponse = { user: { uniqueId: user, nickname: r.items[0]?.author.nickname }, items: r.items, offset, hasMore: r.hasMore, warnings: [], elapsedMs: Date.now() - t0 };
+        return resp;
+      }
       return await fetchProfile(user, offset, count, socialLog('profile'));
     } catch (e) {
       return socialFail(reply, e, t0);
@@ -319,7 +381,7 @@ export async function buildServer() {
     }
   });
 
-  app.get('/api/session', async (): Promise<SessionStatus> => sessionProbe());
+  app.get<{ Querystring: { platform?: string } }>('/api/session', async (req): Promise<SessionStatus> => (platformOf(req.query.platform) === 'youtube' ? youtubeSession() : sessionProbe()));
   // The last sign-in log lines (what the server did on TikTok's page), for diagnosing without a shell.
   app.get('/api/session/log', async () => sessionLog());
   app.post<{ Body: SessionLoginRequest }>('/api/session/login', resolveLimit, async (req, reply) => {
@@ -344,13 +406,14 @@ export async function buildServer() {
 
   registerProxyRoutes(app);
 
-  app.get('/api/stats', async () => ({ mediaRecords: mediaCount(), exploreStock: exploreStock(), forYouStock: forYouStock(), workPage: workState(), uptimeSec: Math.round(process.uptime()) }));
+  app.get('/api/stats', async () => ({ mediaRecords: mediaCount(), exploreStock: exploreStock(), youtubeStock: youtubeStock(), forYouStock: forYouStock(), workPage: workState(), uptimeSec: Math.round(process.uptime()) }));
 
   if (config.serveClient) {
     const dist = findUp(path.join('client', 'dist')) || findUp(path.join('client', 'dist'), process.cwd()) || path.resolve('client', 'dist');
     if (fs.existsSync(dist)) {
       const fastifyStatic = (await import('@fastify/static')).default;
-      await app.register(fastifyStatic, { root: dist, prefix: '/' });
+      // The launcher (home.html) is the landing page; the lab player stays at /index.html.
+      await app.register(fastifyStatic, { root: dist, prefix: '/', index: ['home.html'] });
       app.log.info({ dist }, 'serving built client');
     } else {
       app.log.warn({ dist }, 'SERVE_CLIENT is set but client/dist does not exist (run npm run build)');

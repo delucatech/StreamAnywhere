@@ -12,6 +12,7 @@ import { buildServer } from '../index';
 import { hostAllowed, ipIsPrivate, assertSafeUpstream } from '../ssrf';
 import { parseTikTokUrl } from '../tiktok';
 import { itemToFeedItem } from '../feed';
+import { entryToFeedItem, isYouTubeUrl, pickAudio, youTubeVideoId } from '../youtube';
 import { Reservoir, expiredSoon } from '../reservoir';
 import type { FeedItem } from '../../../shared/types';
 import type { FeedResponse } from '../../../shared/types';
@@ -104,6 +105,39 @@ async function offline(): Promise<void> {
 
   console.log('\n== 4. feed reservoir (offline)');
   await reservoirChecks();
+
+  console.log('\n== 5. YouTube (offline)');
+  check('youtube urls recognised', isYouTubeUrl('https://www.youtube.com/watch?v=dQw4w9WgXcQ') && isYouTubeUrl('https://youtu.be/dQw4w9WgXcQ') && isYouTubeUrl('https://m.youtube.com/shorts/4wVIjM5Jczs') && !isYouTubeUrl('https://www.tiktok.com/@x/video/1'));
+  check('video id from watch / shorts / youtu.be / embed', youTubeVideoId('https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=1') === 'dQw4w9WgXcQ' && youTubeVideoId('https://www.youtube.com/shorts/4wVIjM5Jczs') === '4wVIjM5Jczs' && youTubeVideoId('https://youtu.be/dQw4w9WgXcQ?si=x') === 'dQw4w9WgXcQ' && youTubeVideoId('https://www.youtube.com/embed/dQw4w9WgXcQ') === 'dQw4w9WgXcQ');
+  check('no id for a channel or playlist url', youTubeVideoId('https://www.youtube.com/@MrBeast/shorts') === undefined && youTubeVideoId('https://www.youtube.com/playlist?list=PL123') === undefined);
+  const flat = entryToFeedItem({
+    id: 'rFZHOHl-L8A',
+    title: 'lofi hip hop radio',
+    url: 'https://www.youtube.com/watch?v=rFZHOHl-L8A',
+    channel: 'Lofi Girl',
+    channel_id: 'UCSJ4gkVC6NrvII8umztf0Ow',
+    uploader_url: 'https://www.youtube.com/@LofiGirl',
+    view_count: 14533130,
+    duration: 3882,
+    thumbnails: [
+      { url: 'https://i.ytimg.com/vi/x/hq720.jpg?a', width: 360, height: 202 },
+      { url: 'https://i.ytimg.com/vi/x/hq720.jpg?b', width: 720, height: 404 },
+    ],
+  });
+  check('flat search entry -> feed item', Boolean(flat) && flat!.canonicalUrl === 'https://www.youtube.com/watch?v=rFZHOHl-L8A' && flat!.author.uniqueId === 'LofiGirl' && flat!.author.nickname === 'Lofi Girl' && flat!.stats.plays === 14533130 && flat!.duration === 3882 && flat!.formats.length === 0, flat);
+  check('largest thumbnail chosen', flat?.cover === 'https://i.ytimg.com/vi/x/hq720.jpg?b', flat?.cover);
+  const short = entryToFeedItem({ id: '4wVIjM5Jczs', title: 'cat', url: 'https://www.youtube.com/shorts/4wVIjM5Jczs', view_count: 3600000, thumbnails: [{ url: 'p', width: 405, height: 720 }, { url: 'l', width: 1280, height: 720 }] });
+  check('thin shorts entry kept (author unknown), portrait thumbnail preferred', Boolean(short) && short!.author.uniqueId === undefined && short!.cover === 'p', short);
+  check('live and invalid entries skipped', entryToFeedItem({ id: 'rFZHOHl-L8A', live_status: 'is_live' }) === undefined && entryToFeedItem({ id: 'nope' }) === undefined);
+  const audio = pickAudio([
+    { format_id: '139-20', url: 'u', vcodec: 'none', acodec: 'mp4a.40.5', protocol: 'https', abr: 49, format_note: 'English (US) original (default), low' },
+    { format_id: '140-3', url: 'u', vcodec: 'none', acodec: 'mp4a.40.2', protocol: 'https', abr: 129.7, format_note: 'Spanish (US), medium' },
+    { format_id: '140-20', url: 'u', vcodec: 'none', acodec: 'mp4a.40.2', protocol: 'https', abr: 129.7, format_note: 'English (US) original (default), medium' },
+    { format_id: '140-20-drc', url: 'u', vcodec: 'none', acodec: 'mp4a.40.2', protocol: 'https', abr: 129.7, format_note: 'English (US) original (default), medium, DRC' },
+    { format_id: '251', url: 'u', vcodec: 'none', acodec: 'opus', protocol: 'https', abr: 140 },
+  ]);
+  check('audio: original language at 128 kbps, no DRC, never opus', audio?.format_id === '140-20', audio?.format_id);
+  check('audio: plain 140 wins over 139', pickAudio([{ format_id: '139', url: 'u', vcodec: 'none', acodec: 'mp4a.40.5', protocol: 'https', abr: 49 }, { format_id: '140', url: 'u', vcodec: 'none', acodec: 'mp4a.40.2', protocol: 'https', abr: 129 }])?.format_id === '140');
 }
 
 /** A fake item: one format whose play URL expires at `expiresAt` (unix seconds; undefined = unknown). */

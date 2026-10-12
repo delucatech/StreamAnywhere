@@ -64,6 +64,16 @@ fi
 for c in git node chromium caddy; do command -v "$c" >/dev/null || { echo "$c is missing and apt could not install it"; exit 1; }; done
 echo "node $(node -v), $(chromium --version 2>/dev/null | head -1), caddy $(caddy version | cut -d' ' -f1)"
 
+echo "== 2b. yt-dlp (YouTube search / formats; the zipapp needs only python3)"
+# The release binary updates itself (-U); YouTube changes often, so it is refreshed on every deploy.
+if ! command -v python3 >/dev/null; then apt-get install -y -qq python3 >/dev/null || echo "WARN: python3 install failed"; fi
+if [ -x /usr/local/bin/yt-dlp ]; then
+  /usr/local/bin/yt-dlp -U >/dev/null 2>&1 || echo "WARN: yt-dlp self-update failed (keeping $(/usr/local/bin/yt-dlp --version 2>/dev/null))"
+else
+  curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && chmod 755 /usr/local/bin/yt-dlp || echo "WARN: yt-dlp download failed (YouTube will not work)"
+fi
+echo "yt-dlp $(/usr/local/bin/yt-dlp --version 2>/dev/null || echo missing)"
+
 echo "== 3. app"
 id -u "$APP_USER" >/dev/null 2>&1 || useradd --system --create-home --home-dir /var/lib/streamanywhere --shell /usr/sbin/nologin "$APP_USER"
 # The checkout is chowned to the service user below; git (running as root here) refuses to touch a
@@ -106,6 +116,7 @@ SERVE_CLIENT=true
 CLIENT_ORIGINS=https://${PUBLIC_HOST},https://delucatech.com,https://www.delucatech.com,https://delucatech.github.io${CLIENT_ORIGINS:+,${CLIENT_ORIGINS}}
 BROWSER_PATH=/usr/bin/chromium
 TIKTOK_PROFILE_DIR=/var/lib/streamanywhere/tiktok-profile
+YTDLP_PATH=/usr/local/bin/yt-dlp
 LOG_LEVEL=info
 EOF
 chmod 640 /etc/streamanywhere.env; chown root:"$APP_USER" /etc/streamanywhere.env
@@ -148,7 +159,8 @@ systemctl reload caddy || systemctl restart caddy
 sleep 3
 echo "== health: $(curl -fsS http://127.0.0.1:8787/api/health | head -c 120)"
 echo
-echo "Done. Open https://$PUBLIC_HOST/feed.html"
-echo "  - 'Sign in' -> 'Sign in with QR code' and scan it with the TikTok app."
+echo "Done. Open https://$PUBLIC_HOST/ (the launcher: TikTok, YouTube, Lab)"
+echo "  - TikTok: 'Sign in' -> 'Sign in with QR code' and scan it with the TikTok app."
+echo "  - YouTube: guest mode (Shorts by hashtag + search); sign-in comes later."
 echo "  - Logs: journalctl -u streamanywhere -f"
 echo "  - The GCP firewall must allow tcp:80 and tcp:443 (the console's 'Allow HTTPS traffic' checkbox)."
