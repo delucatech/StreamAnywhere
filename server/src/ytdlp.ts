@@ -1,16 +1,23 @@
 /**
- * yt-dlp fallback resolver. yt-dlp (2026.08.19 verified) returns cookie-bound
- * v16/v19-webapp-prime.<region>.tiktok.com URLs plus the cookies/Referer it used. Those
- * URLs can only be fetched with the same cookies, so they are exposed through the proxy only.
- * yt-dlp does not surface the cookie-free /aweme/v1/play redirect, so the native resolver is
- * preferred when it works.
+ * yt-dlp: the TikTok fallback resolver and everything YouTube (search, listings, formats).
+ *
+ * Two ways to run it:
+ *  - warm daemons (scripts/ytdlp-daemon.py): a Python process that imports yt_dlp once and answers
+ *    extraction requests as JSON lines. Importing yt_dlp costs ~11 s of CPU on the free e2-micro
+ *    VM (1 s on a PC), so the CLI-per-request way made every YouTube call 25-120 s there.
+ *  - the CLI, when no Python that can import yt_dlp is found (and for the TikTok fallback).
+ *
+ * TikTok: yt-dlp (2026.08.19 verified) returns cookie-bound v16/v19-webapp-prime.<region>.tiktok.com
+ * URLs plus the cookies/Referer it used. Those URLs can only be fetched with the same cookies, so
+ * they are exposed through the proxy only; the native resolver is preferred when it works.
  */
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as readline from 'node:readline';
 import type { MediaFormat, ResolveResponse } from '../../shared/types';
-import { config } from './config';
+import { config, findUp } from './config';
 import { defaultExpiry, registerMedia } from './mediaStore';
 
 interface Candidate {
@@ -113,10 +120,240 @@ export async function ytdlp(args: string[], timeoutMs = 90_000): Promise<string>
   }
 }
 
+// ---------------------------------------------------------------- warm daemons
+
+/** One extraction: what `yt-dlp -j` / `--flat-playlist -J --playlist-items` would print, parsed. */
+export interface InfoRequest {
+  url: string;
+  /** --flat-playlist (listings: search, hashtag, channel) */
+  flat?: boolean;
+  /** --playlist-items, e.g. "1-30" */
+  playlistItems?: string;
+  /** --no-playlist (a single video) */
+  noplaylist?: boolean;
+}
+
+const DAEMONS = Math.max(1, Number(process.env.YTDLP_DAEMONS) || 2);
+const DAEMON_SCRIPT = findUp(path.join('server', 'scripts', 'ytdlp-daemon.py')) || findUp(path.join('server', 'scripts', 'ytdlp-daemon.py'), process.cwd());
+
+interface Pending {
+  id: number;
+  resolve: (info: any) => void;
+  reject: (e: Error) => void;
+  timer: NodeJS.Timeout;
+}
+
+/** A Python process with yt_dlp imported; handles one request at a time. */
+class Daemon {
+  proc?: ChildProcess;
+  pending?: Pending;
+  version = '';
+  /** Resolves true when the process answered its hello line */
+  readonly ready: Promise<boolean>;
+  private nextId = 1;
+  private dead = false;
+
+  constructor(private readonly python: { cmd: string; args: string[] }, private readonly onLog: (m: string) => void) {
+    this.ready = this.start();
+  }
+
+  get busy(): boolean {
+    return Boolean(this.pending);
+  }
+  get alive(): boolean {
+    return Boolean(this.proc) && !this.dead;
+  }
+
+  private start(): Promise<boolean> {
+    return new Promise((resolve) => {
+      let proc: ChildProcess;
+      try {
+        proc = spawn(this.python.cmd, [...this.python.args, DAEMON_SCRIPT!], {
+          windowsHide: true,
+          stdio: ['pipe', 'pipe', 'pipe'],
+          env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1', YTDLP_PATH: config.ytdlpPath },
+        });
+      } catch (e) {
+        this.onLog(`daemon spawn failed: ${(e as Error).message}`);
+        resolve(false);
+        return;
+      }
+      this.proc = proc;
+      let hello = false;
+      let stderr = '';
+      proc.stderr?.on('data', (d) => (stderr = (stderr + d).slice(-2000)));
+      proc.on('error', (e) => {
+        this.onLog(`daemon error: ${e.message}`);
+        this.die(new Error(`yt-dlp daemon: ${e.message}`));
+        resolve(false);
+      });
+      proc.on('close', (code) => {
+        this.die(new Error(`yt-dlp daemon exited (${code}): ${stderr.trim().split(/\r?\n/).pop() || ''}`));
+        resolve(false);
+      });
+      const rl = readline.createInterface({ input: proc.stdout! });
+      rl.on('line', (line) => {
+        let msg: { id: number; ok: boolean; info?: unknown; error?: string; version?: string };
+        try {
+          msg = JSON.parse(line);
+        } catch {
+          return;
+        }
+        if (!hello) {
+          hello = true;
+          if (msg.ok) {
+            this.version = msg.version || '';
+            this.onLog(`daemon ready (${this.python.cmd}, yt-dlp ${this.version})`);
+            resolve(true);
+          } else {
+            this.onLog(`daemon could not start: ${msg.error}`);
+            this.kill();
+            resolve(false);
+          }
+          return;
+        }
+        const p = this.pending;
+        if (!p || p.id !== msg.id) return;
+        clearTimeout(p.timer);
+        this.pending = undefined;
+        if (msg.ok) p.resolve(msg.info);
+        else p.reject(new Error(`yt-dlp failed: ${msg.error || 'unknown error'}`));
+      });
+    });
+  }
+
+  request(req: InfoRequest, timeoutMs: number): Promise<any> {
+    return new Promise((resolve, reject) => {
+      if (!this.proc || this.dead) return reject(new Error('yt-dlp daemon is not running'));
+      const id = this.nextId++;
+      const timer = setTimeout(() => {
+        // A stuck extraction takes the process with it; the pool starts a fresh one next time.
+        this.onLog(`daemon request ${id} timed out after ${timeoutMs} ms; restarting the daemon`);
+        this.die(new Error(`yt-dlp timed out after ${Math.round(timeoutMs / 1000)} s`));
+      }, timeoutMs);
+      this.pending = { id, resolve, reject, timer };
+      const body: Record<string, unknown> = { id, url: req.url, flat: Boolean(req.flat), noplaylist: Boolean(req.noplaylist) };
+      if (req.playlistItems) body.playlist_items = req.playlistItems;
+      this.proc.stdin!.write(JSON.stringify(body) + '\n');
+    });
+  }
+
+  private die(err: Error): void {
+    if (this.dead) return;
+    this.dead = true;
+    const p = this.pending;
+    this.pending = undefined;
+    if (p) {
+      clearTimeout(p.timer);
+      p.reject(err);
+    }
+    this.kill();
+  }
+
+  kill(): void {
+    try {
+      this.proc?.kill();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+/** Interpreters that may import yt_dlp, in order; YTDLP_PYTHON first. */
+function pythonCandidates(): { cmd: string; args: string[] }[] {
+  const list: { cmd: string; args: string[] }[] = [];
+  if (process.env.YTDLP_PYTHON) list.push({ cmd: process.env.YTDLP_PYTHON, args: [] });
+  if (process.platform !== 'win32') list.push({ cmd: '/opt/ytdlp/bin/python3', args: [] });
+  list.push({ cmd: 'python3', args: [] }, { cmd: 'python', args: [] });
+  if (process.platform === 'win32') list.push({ cmd: 'py', args: ['-3'] });
+  return list;
+}
+
+const pool: Daemon[] = [];
+let daemonPython: { cmd: string; args: string[] } | null | undefined;
+let daemonProbe: Promise<void> | undefined;
+const waiters: (() => void)[] = [];
+let daemonLog: (m: string) => void = () => undefined;
+export const setYtDlpLogger = (log: (m: string) => void): void => {
+  daemonLog = log;
+};
+
+/** Finds (once) a Python that can run the daemon; null when none can. */
+async function probeDaemon(): Promise<void> {
+  if (daemonPython !== undefined) return;
+  if (!daemonProbe) {
+    daemonProbe = (async () => {
+      if (!DAEMON_SCRIPT || /^(0|false|no)$/i.test(process.env.YTDLP_DAEMON || '')) {
+        daemonPython = null;
+        return;
+      }
+      for (const py of pythonCandidates()) {
+        const d = new Daemon(py, daemonLog);
+        if (await d.ready) {
+          daemonPython = py;
+          pool.push(d);
+          return;
+        }
+      }
+      daemonLog('no Python can import yt_dlp; falling back to the yt-dlp command line per request');
+      daemonPython = null;
+    })();
+  }
+  await daemonProbe;
+}
+
+async function acquire(): Promise<Daemon> {
+  for (;;) {
+    for (let i = pool.length - 1; i >= 0; i--) if (!pool[i].alive) pool.splice(i, 1);
+    const free = pool.find((d) => !d.busy);
+    if (free) return free;
+    if (pool.length < DAEMONS) {
+      const d = new Daemon(daemonPython!, daemonLog);
+      pool.push(d);
+      if (await d.ready) return d;
+      continue;
+    }
+    await new Promise<void>((r) => waiters.push(r));
+  }
+}
+
+export const daemonStatus = (): { enabled: boolean; python?: string; running: number; busy: number; version?: string } => ({
+  enabled: Boolean(daemonPython),
+  python: daemonPython?.cmd,
+  running: pool.filter((d) => d.alive).length,
+  busy: pool.filter((d) => d.busy).length,
+  version: pool[0]?.version,
+});
+
+/**
+ * One extraction as parsed JSON, through a warm daemon when there is one, else the CLI.
+ * Daemon requests are serialised per process (DAEMONS of them, default 2).
+ */
+export async function ytdlpInfo(req: InfoRequest, timeoutMs = 150_000): Promise<any> {
+  await probeDaemon();
+  if (daemonPython) {
+    const d = await acquire();
+    try {
+      return await d.request(req, timeoutMs);
+    } finally {
+      waiters.shift()?.();
+    }
+  }
+  const args = req.flat ? ['--flat-playlist', '-J'] : ['-j'];
+  if (req.noplaylist) args.push('--no-playlist');
+  if (req.playlistItems) args.push('--playlist-items', req.playlistItems);
+  args.push(req.url);
+  const out = await ytdlp(args, timeoutMs);
+  return JSON.parse(out.trim().split(/\r?\n/).pop()!);
+}
+
+export function shutdownYtDlp(): void {
+  for (const d of pool) d.kill();
+}
+
 export async function resolveWithYtDlp(inputUrl: string): Promise<ResolveResponse> {
   const t0 = Date.now();
-  const stdout = await ytdlp(['-j', '--no-playlist', inputUrl]);
-  const info = JSON.parse(stdout.trim().split(/\r?\n/).pop()!);
+  const info = await ytdlpInfo({ url: inputUrl, noplaylist: true }, 90_000);
   const warnings: string[] = ['yt-dlp URLs are cookie-bound and only usable through the proxy'];
   const formats: MediaFormat[] = [];
   const seen = new Set<string>();

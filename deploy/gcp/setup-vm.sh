@@ -64,15 +64,26 @@ fi
 for c in git node chromium caddy; do command -v "$c" >/dev/null || { echo "$c is missing and apt could not install it"; exit 1; }; done
 echo "node $(node -v), $(chromium --version 2>/dev/null | head -1), caddy $(caddy version | cut -d' ' -f1)"
 
-echo "== 2b. yt-dlp (YouTube search / formats; the zipapp needs only python3)"
-# The release binary updates itself (-U); YouTube changes often, so it is refreshed on every deploy.
-if ! command -v python3 >/dev/null; then apt-get install -y -qq python3 >/dev/null || echo "WARN: python3 install failed"; fi
-if [ -x /usr/local/bin/yt-dlp ]; then
-  /usr/local/bin/yt-dlp -U >/dev/null 2>&1 || echo "WARN: yt-dlp self-update failed (keeping $(/usr/local/bin/yt-dlp --version 2>/dev/null))"
-else
-  curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && chmod 755 /usr/local/bin/yt-dlp || echo "WARN: yt-dlp download failed (YouTube will not work)"
+echo "== 2b. yt-dlp (YouTube search / formats)"
+# A venv with the pip package: Python caches its bytecode, so importing yt_dlp costs ~2 s instead of
+# the ~11 s a zipapp costs on this VM (recompiled on every run). The server keeps Python processes
+# with yt_dlp imported (server/scripts/ytdlp-daemon.py) and only pays that once. YouTube changes
+# often, so the package is upgraded on every deploy; the zipapp stays as a fallback.
+if ! command -v python3 >/dev/null || ! python3 -c 'import venv, ensurepip' 2>/dev/null; then
+  apt-get install -y -qq python3 python3-venv >/dev/null || echo "WARN: python3-venv install failed"
 fi
-echo "yt-dlp $(/usr/local/bin/yt-dlp --version 2>/dev/null || echo missing)"
+if [ ! -x /opt/ytdlp/bin/python3 ]; then python3 -m venv /opt/ytdlp || echo "WARN: venv creation failed"; fi
+if [ -x /opt/ytdlp/bin/python3 ]; then
+  /opt/ytdlp/bin/pip install -q -U yt-dlp >/dev/null 2>&1 || echo "WARN: pip install yt-dlp failed (keeping $(/opt/ytdlp/bin/yt-dlp --version 2>/dev/null || echo nothing))"
+  echo "yt-dlp (venv) $(/opt/ytdlp/bin/yt-dlp --version 2>/dev/null || echo missing)"
+fi
+if [ -x /usr/local/bin/yt-dlp ]; then
+  /usr/local/bin/yt-dlp -U >/dev/null 2>&1 || true
+else
+  curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && chmod 755 /usr/local/bin/yt-dlp || echo "WARN: yt-dlp zipapp download failed"
+fi
+if [ -x /opt/ytdlp/bin/yt-dlp ]; then YTDLP_BIN=/opt/ytdlp/bin/yt-dlp; YTDLP_PY=/opt/ytdlp/bin/python3; else YTDLP_BIN=/usr/local/bin/yt-dlp; YTDLP_PY=python3; fi
+echo "yt-dlp: $YTDLP_BIN ($($YTDLP_BIN --version 2>/dev/null || echo missing)), daemon python: $YTDLP_PY"
 
 echo "== 3. app"
 id -u "$APP_USER" >/dev/null 2>&1 || useradd --system --create-home --home-dir /var/lib/streamanywhere --shell /usr/sbin/nologin "$APP_USER"
@@ -116,7 +127,8 @@ SERVE_CLIENT=true
 CLIENT_ORIGINS=https://${PUBLIC_HOST},https://delucatech.com,https://www.delucatech.com,https://delucatech.github.io${CLIENT_ORIGINS:+,${CLIENT_ORIGINS}}
 BROWSER_PATH=/usr/bin/chromium
 TIKTOK_PROFILE_DIR=/var/lib/streamanywhere/tiktok-profile
-YTDLP_PATH=/usr/local/bin/yt-dlp
+YTDLP_PATH=$YTDLP_BIN
+YTDLP_PYTHON=$YTDLP_PY
 LOG_LEVEL=info
 EOF
 chmod 640 /etc/streamanywhere.env; chown root:"$APP_USER" /etc/streamanywhere.env

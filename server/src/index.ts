@@ -9,7 +9,8 @@ import { registerAuth } from './auth';
 import { config, findUp } from './config';
 import { registerProxyRoutes } from './proxy';
 import { isTikTokUrl, probeUrl, resolveTikTokNative, TikTokError } from './tiktok';
-import { detectYtDlp, resolveWithYtDlp } from './ytdlp';
+import { daemonStatus, detectYtDlp, resolveWithYtDlp, setYtDlpLogger, shutdownYtDlp } from './ytdlp';
+import { logStream, recentLog } from './logbuf';
 import { defaultExpiry, mediaCount, registerMedia } from './mediaStore';
 import { hostAllowed } from './ssrf';
 import { EXPLORE_DEFAULT_CATEGORY, FeedError, fetchExploreFeed, normalizeExploreOptions, type ExploreResult } from './feed';
@@ -116,7 +117,8 @@ const youtubeSession = (): SessionStatus => ({
 
 export async function buildServer() {
   const app = Fastify({
-    logger: { level: config.logLevel },
+    // stdout (journald) plus the in-memory tail served by /api/log
+    logger: { level: config.logLevel, stream: logStream },
     bodyLimit: 64 * 1024,
     disableRequestLogging: config.logLevel !== 'debug',
     // Behind Caddy (reverse_proxy from 127.0.0.1) every request would otherwise count as coming from
@@ -141,11 +143,13 @@ export async function buildServer() {
 
   // Site password: everything below (pages, API, media) needs the login cookie.
   registerAuth(app);
+  setYtDlpLogger((m) => app.log.info({ what: 'yt-dlp' }, m));
 
   app.get('/api/health', async (): Promise<HealthResponse> => ({
     ok: true,
     node: process.version,
     ytdlp: await detectYtDlp(),
+    ytdlpDaemon: daemonStatus(),
     resolver: config.resolver,
     proxyAllowedHosts: config.proxyAllowedHosts,
     uptimeSec: Math.round(process.uptime()),
@@ -246,11 +250,20 @@ export async function buildServer() {
 
   app.post<{ Body: ReportRequest }>('/api/report', async (req) => {
     const b = req.body || ({} as ReportRequest);
-    req.log.info(
-      { connection: b.connection, renderer: b.renderer, ok: b.ok, mediaId: b.mediaId, url: b.url?.slice(0, 120), detail: b.detail?.slice(0, 300) },
-      b.ok ? `client played media via ${b.connection}` : `client playback via ${b.connection} failed`,
-    );
+    const fields = { client: true, kind: b.kind, platform: b.platform, connection: b.connection, renderer: b.renderer, ok: b.ok, mediaId: b.mediaId, url: b.url?.slice(0, 120), detail: b.detail?.slice(0, 500), page: b.page?.slice(0, 120), ua: b.ua?.slice(0, 160) };
+    if (b.kind) {
+      // The feed page reporting what went wrong on the viewer's device (see feed.ts reportProblem)
+      if (b.ok) req.log.info(fields, `client: ${b.kind}`);
+      else req.log.warn(fields, `client problem: ${b.kind}`);
+    } else req.log.info(fields, b.ok ? `client played media via ${b.connection}` : `client playback via ${b.connection} failed`);
     return { ok: true };
+  });
+
+  // The last log lines as text (newest last): ?n=300 lines, ?level=warn for problems only.
+  app.get<{ Querystring: { n?: string; level?: string } }>('/api/log', async (req, reply) => {
+    const n = Math.max(1, Math.min(800, Number(req.query.n) || 300));
+    const level = /^(warn|error)$/i.test(req.query.level || '') ? 40 : /^debug$/i.test(req.query.level || '') ? 20 : 30;
+    return reply.type('text/plain; charset=utf-8').header('cache-control', 'no-store').send(recentLog(n, level) + '\n');
   });
 
   // ---- feed (TikTok-style stream): explore needs no login; foryou needs the browser session.
@@ -432,6 +445,7 @@ if (require.main === module) {
       for (const sig of ['SIGTERM', 'SIGINT'] as const) {
         process.once(sig, () => {
           app.log.info({ sig }, 'shutting down');
+          shutdownYtDlp();
           void Promise.race([shutdownBrowsers(), new Promise((r) => setTimeout(r, 8000))]).finally(() => process.exit(0));
         });
       }

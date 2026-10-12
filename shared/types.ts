@@ -114,12 +114,19 @@ export interface ReportRequest {
   renderer: string;
   ok: boolean;
   detail?: string;
+  /** Feed-page problem reports: what went wrong ('feed batch', 'resolve', 'player', 'page error'), where, on what */
+  kind?: string;
+  platform?: Platform;
+  page?: string;
+  ua?: string;
 }
 
 export interface HealthResponse {
   ok: true;
   node: string;
   ytdlp: { available: boolean; version?: string; command?: string; error?: string };
+  /** The warm yt-dlp Python processes (see server/scripts/ytdlp-daemon.py) */
+  ytdlpDaemon?: { enabled: boolean; python?: string; running: number; busy: number; version?: string };
   resolver: string;
   proxyAllowedHosts: string[];
   uptimeSec: number;

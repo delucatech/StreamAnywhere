@@ -179,6 +179,16 @@ function toast(msg: string, isError = false, ms = 3500): void {
 }
 const fmtCount = (n?: number): string => (n === undefined ? '' : n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : String(n));
 const errMsg = (e: unknown): string => (e instanceof ApiError ? `${e.message} (HTTP ${e.status})` : (e as Error)?.message || String(e));
+/** Tells the server what went wrong on this device (it lands in /api/log, tagged client) - at most one report every 2 s per kind. */
+const reportedAt = new Map<string, number>();
+function reportProblem(kind: string, detail: string, extra: { url?: string; mediaId?: string; connection?: 'direct' | 'proxy' } = {}): void {
+  const now = Date.now();
+  if (now - (reportedAt.get(kind) || 0) < 2000) return;
+  reportedAt.set(kind, now);
+  void api.report({ kind, platform: P.id, ok: false, detail: detail.slice(0, 500), connection: extra.connection || 'proxy', renderer: playerMode.mode, url: extra.url, mediaId: extra.mediaId, page: location.pathname + location.search, ua: navigator.userAgent });
+}
+window.addEventListener('error', (e) => reportProblem('page error', `${e.message} @ ${e.filename}:${e.lineno}`));
+window.addEventListener('unhandledrejection', (e) => reportProblem('unhandled rejection', errMsg(e.reason)));
 const esc = (s: string): string => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 
 /** Prefer H.264 (the formats are already sorted that way), then anything with a direct or proxy URL. */
@@ -889,6 +899,7 @@ async function loadMore(): Promise<number> {
     state.emptyBatches++;
     const msg = errMsg(e);
     console.warn('[feed] batch failed:', msg);
+    reportProblem('feed batch', `${sourceLabel()}: ${msg}`);
     if (state.emptyBatches === 1 || state.emptyBatches % 4 === 0) toast(`Feed: ${msg} – retrying`, true, 5000);
     if (!state.entries.length && state.emptyBatches >= 3) showEmpty(`Feed failed: ${msg}`);
     if (prefs.source === 'foryou' && /not signed in|session/i.test(msg)) {
@@ -1141,6 +1152,7 @@ function onPlayerError(entry: Entry, e: Error): void {
   entry.failed = true;
   entry.err.textContent = `This video could not be loaded (${detail}).`;
   entry.err.classList.remove('hidden');
+  reportProblem('player', `${entry.item.id}: ${detail}`, { url: entry.src?.url, connection: entry.src?.kind });
   if (activeEntry() === entry && prefs.autoscroll) window.setTimeout(() => activeEntry() === entry && goTo(state.active + 1), 1500);
 }
 
@@ -1178,6 +1190,7 @@ function ensureFormats(entry: Entry): Promise<boolean> {
         entry.failed = true;
         entry.err.textContent = `This video could not be resolved (${errMsg(e)})`;
         entry.err.classList.remove('hidden');
+        reportProblem('resolve', `${entry.item.id}: ${errMsg(e)}`, { url: entry.item.canonicalUrl });
         if (activeEntry() === entry && prefs.autoscroll) window.setTimeout(() => activeEntry() === entry && goTo(state.active + 1), 1500);
         return false;
       });

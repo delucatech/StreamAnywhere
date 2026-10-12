@@ -15,7 +15,11 @@
 import type { FeedItem, MediaFormat, ResolveResponse, SearchResponse, YouTubeCategory } from '../../shared/types';
 import { YOUTUBE_CATEGORIES } from '../../shared/types';
 import { defaultExpiry, registerMedia } from './mediaStore';
-import { ytdlp } from './ytdlp';
+import { ytdlpInfo } from './ytdlp';
+
+/** The e2-micro needs 10-20 s of CPU per extraction; the limits leave room for a busy moment. */
+const LIST_TIMEOUT_MS = 150_000;
+const RESOLVE_TIMEOUT_MS = 180_000;
 
 export class YouTubeError extends Error {
   constructor(message: string, public readonly status = 502) {
@@ -102,8 +106,7 @@ const PAGE = 20;
 async function listFlat(target: (n: number) => string, offset: number, count: number, log: (m: string) => void): Promise<{ items: FeedItem[]; hasMore: boolean }> {
   const want = offset + count;
   const t0 = Date.now();
-  const out = await ytdlp(['--flat-playlist', '-J', '--playlist-items', `${offset + 1}-${want}`, target(want)], 60_000);
-  const json = JSON.parse(out.trim().split(/\r?\n/).pop()!);
+  const json = await ytdlpInfo({ url: target(want), flat: true, playlistItems: `${offset + 1}-${want}` }, LIST_TIMEOUT_MS);
   const entries: any[] = Array.isArray(json?.entries) ? json.entries : [];
   const items: FeedItem[] = [];
   for (const e of entries) {
@@ -176,16 +179,15 @@ export async function resolveYouTube(inputUrl: string, log: (m: string) => void)
 
 async function resolveUncached(id: string, inputUrl: string, log: (m: string) => void): Promise<ResolveResponse> {
   const t0 = Date.now();
-  let out: string;
+  let info: any;
   try {
-    out = await ytdlp(['-j', '--no-playlist', `https://www.youtube.com/watch?v=${id}`], 90_000);
+    info = await ytdlpInfo({ url: `https://www.youtube.com/watch?v=${id}`, noplaylist: true }, RESOLVE_TIMEOUT_MS);
   } catch (e) {
     const msg = (e as Error).message;
     if (/private|unavailable|not available|removed|does not exist|age/i.test(msg)) throw new YouTubeError(msg, 404);
     if (/sign in|bot|captcha/i.test(msg)) throw new YouTubeError(`YouTube refused the request from this server: ${msg}`, 503);
     throw new YouTubeError(msg);
   }
-  const info = JSON.parse(out.trim().split(/\r?\n/).pop()!);
   const all: any[] = Array.isArray(info.formats) ? info.formats : [];
   const warnings: string[] = [];
   const videoOnly = all.filter((f) => f.url && /^avc1/.test(f.vcodec || '') && (f.acodec === 'none' || !f.acodec) && f.protocol === 'https' && (f.height || 0) <= MAX_HEIGHT);
