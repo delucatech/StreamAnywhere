@@ -64,6 +64,14 @@ fi
 for c in git node chromium caddy; do command -v "$c" >/dev/null || { echo "$c is missing and apt could not install it"; exit 1; }; done
 echo "node $(node -v), $(chromium --version 2>/dev/null | head -1), caddy $(caddy version | cut -d' ' -f1)"
 
+echo "== 2a. no Ops Agent"
+# Google's monitoring agent (otelopscol + fluent-bit) used ~80 MB of the 1 GB and a share of the
+# CPU; the owner chose to drop it on 2026-10-12. Removed here too in case a policy reinstalls it.
+if dpkg -s google-cloud-ops-agent >/dev/null 2>&1; then
+  systemctl disable --now google-cloud-ops-agent google-cloud-ops-agent-fluent-bit google-cloud-ops-agent-opentelemetry-collector >/dev/null 2>&1 || true
+  apt-get remove -y -qq google-cloud-ops-agent >/dev/null 2>&1 && echo "ops agent removed" || echo "WARN: ops agent removal failed"
+fi
+
 echo "== 2b. yt-dlp (YouTube search / formats)"
 # A venv with the pip package: Python caches its bytecode, so importing yt_dlp costs ~2 s instead of
 # the ~11 s a zipapp costs on this VM (recompiled on every run). The server keeps Python processes
