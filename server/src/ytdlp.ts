@@ -351,6 +351,11 @@ export function shutdownYtDlp(): void {
   for (const d of pool) d.kill();
 }
 
+/** Starts the first daemon now (the import takes ~20 s on the VM; better at boot than on the first request). */
+export function warmYtDlp(): void {
+  void probeDaemon().catch(() => undefined);
+}
+
 export async function resolveWithYtDlp(inputUrl: string): Promise<ResolveResponse> {
   const t0 = Date.now();
   const info = await ytdlpInfo({ url: inputUrl, noplaylist: true }, 90_000);

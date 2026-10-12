@@ -9,7 +9,7 @@ import { registerAuth } from './auth';
 import { config, findUp } from './config';
 import { registerProxyRoutes } from './proxy';
 import { isTikTokUrl, probeUrl, resolveTikTokNative, TikTokError } from './tiktok';
-import { daemonStatus, detectYtDlp, resolveWithYtDlp, setYtDlpLogger, shutdownYtDlp } from './ytdlp';
+import { daemonStatus, detectYtDlp, resolveWithYtDlp, setYtDlpLogger, shutdownYtDlp, warmYtDlp } from './ytdlp';
 import { logStream, recentLog } from './logbuf';
 import { defaultExpiry, mediaCount, registerMedia } from './mediaStore';
 import { hostAllowed } from './ssrf';
@@ -440,6 +440,7 @@ if (require.main === module) {
     .then(async (app) => {
       const addr = await app.listen({ port: config.port, host: config.host });
       console.log(`StreamAnywhere resolver/proxy listening on ${addr}`);
+      warmYtDlp();
       // systemd stop/restart: close the headless browsers first, otherwise the stop waits for the
       // 90 s SIGTERM timeout and Chromium gets SIGKILLed (leaving stale profile locks behind).
       for (const sig of ['SIGTERM', 'SIGINT'] as const) {
