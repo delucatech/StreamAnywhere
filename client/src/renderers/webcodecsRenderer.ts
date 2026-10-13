@@ -492,6 +492,7 @@ export class WebCodecsRenderer implements Renderer {
     if (this.audio) {
       this.st.extra['Audio context'] = this.audio.contextState;
       this.st.extra['Audio chunks'] = `${this.audio.scheduledChunks} scheduled, ${this.audio.droppedChunks} dropped${this.audio.lastError ? ', err: ' + this.audio.lastError : ''}`;
+      this.st.extra['Audio starts at'] = this.audio.firstScheduledUs < 0 ? 'not yet' : `${(this.audio.firstScheduledUs / 1e6).toFixed(3)}s`;
     }
     this.st.extra['Queued samples'] = `${this.videoSamples.length} video / ${this.audioSamples.length} audio`;
     return this.st;

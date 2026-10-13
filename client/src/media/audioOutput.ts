@@ -59,6 +59,8 @@ export class AudioSink implements PlaybackClock {
   scheduledUntilUs = 0;
   scheduledChunks = 0;
   droppedChunks = 0;
+  /** Media time (us) of the earliest chunk that was actually scheduled since the last start()/reset(); -1 = none yet */
+  firstScheduledUs = -1;
   lastError = '';
 
   constructor() {
@@ -82,9 +84,13 @@ export class AudioSink implements PlaybackClock {
   /**
    * Starts the clock at mediaUs. Resolves false when the AudioContext could not be resumed within
    * the timeout (Chrome's autoplay policy keeps contexts created without a user gesture suspended).
+   *
+   * Chunks decoded before this call (held in `pending`) are kept and scheduled against the new
+   * base: the renderer pre-decodes a few seconds of sound before the clock starts, and dropping
+   * them here used to leave the first seconds of every video (and every seek) silent.
    */
   async start(mediaUs: number, resumeTimeoutMs = 400): Promise<boolean> {
-    this.stopAll();
+    this.stopScheduled();
     this.baseMediaUs = mediaUs;
     if (this.ctx.state !== 'running') {
       const resumed = await Promise.race([
@@ -153,6 +159,7 @@ export class AudioSink implements PlaybackClock {
       }
       this.sources.add(src);
       this.scheduledChunks++;
+      if (this.firstScheduledUs < 0 || data.timestamp < this.firstScheduledUs) this.firstScheduledUs = data.timestamp;
       this.scheduledUntilUs = Math.max(this.scheduledUntilUs, data.timestamp + (data.duration || 0));
     } catch (e) {
       this.lastError = (e as Error).message;
@@ -162,8 +169,8 @@ export class AudioSink implements PlaybackClock {
     }
   }
 
-  /** Stop every scheduled buffer (seek / stop). */
-  stopAll(): void {
+  /** Stop every buffer that is playing or scheduled; chunks still waiting in `pending` are kept. */
+  private stopScheduled(): void {
     for (const s of this.sources) {
       try {
         s.onended = null;
@@ -173,9 +180,15 @@ export class AudioSink implements PlaybackClock {
       }
     }
     this.sources.clear();
+    this.scheduledUntilUs = 0;
+    this.firstScheduledUs = -1;
+  }
+
+  /** Stop every scheduled buffer and discard undecoded-ahead chunks (seek / stop). */
+  stopAll(): void {
+    this.stopScheduled();
     for (const d of this.pending) d.close();
     this.pending = [];
-    this.scheduledUntilUs = 0;
   }
 
   reset(): void {
