@@ -854,7 +854,12 @@ export async function checkInstagramAccount(cookies?: ParsedCookie[]): Promise<I
         await p.goto(`${ORIGIN}/robots.txt`, { waitUntil: 'domcontentloaded', timeout: 40_000 });
       }
       const r = (await p.evaluate(ACCOUNT_JS)) as { status: number; text: string };
-      const acc = accountFromAnswer(r.status, r.text);
+      let acc = accountFromAnswer(r.status, r.text);
+      if (!acc.ok) {
+        // The API call was refused (429 from a datacenter address): ask through a page instead.
+        note(`account check: API answered ${r.status}; trying the settings page`);
+        acc = await accountFromSettingsPage(p, cookies);
+      }
       note(`account check: status ${r.status} -> ${acc.ok ? (acc.loggedIn ? 'signed in as @' + acc.username : 'signed out') : acc.error}`);
       if (cookies && acc.ok && !acc.loggedIn) {
         const cdp = await p.createCDPSession();
@@ -863,6 +868,33 @@ export async function checkInstagramAccount(cookies?: ParsedCookie[]): Promise<I
       }
       return acc;
     });
+  } catch (e) {
+    return { ok: false, loggedIn: false, error: (e as Error).message };
+  }
+}
+
+/** The settings page needs a sign-in: it stays put when signed in and is sent to the login page when not. */
+async function accountFromSettingsPage(p: Page, cookies?: ParsedCookie[]): Promise<InstagramAccount> {
+  try {
+    await p.goto(`${ORIGIN}/accounts/edit/`, { waitUntil: 'domcontentloaded', timeout: 40_000 });
+    let st = { path: '', url: '', user: '' };
+    for (let i = 0; i < 20; i++) {
+      st = (await p.evaluate(String.raw`({ path: location.pathname, url: location.href, user: (document.querySelector('input[name="username"]') || {}).value || '' })`)) as typeof st;
+      if (/^\/accounts\/login/.test(st.path) || (/^\/accounts\/edit/.test(st.path) && st.user)) break;
+      await sleep(500);
+    }
+    await p.goto(`${ORIGIN}/robots.txt`, { waitUntil: 'domcontentloaded' }).catch(() => undefined);
+    note(`settings page: ${st.path || '?'}${/is_from_rle/.test(st.url) ? ' (rate-limit redirect)' : ''}`);
+    if (/^\/accounts\/login/.test(st.path)) {
+      // The same redirect is how Instagram limits a busy address: that says nothing about the cookies.
+      if (/is_from_rle/.test(st.url)) return { ok: false, loggedIn: false, error: "Instagram is limiting this server's address (rate-limit redirect)" };
+      return { ok: true, loggedIn: false, error: 'the settings page sent the cookies to the login page' };
+    }
+    if (/^\/accounts\/edit/.test(st.path)) {
+      const id = (cookies || cookieSource?.() || []).find((c) => c.name === 'ds_user_id')?.value;
+      return { ok: true, loggedIn: true, username: st.user || (id ? `user${id}` : 'instagram') };
+    }
+    return { ok: false, loggedIn: false, error: `unexpected settings page ${st.path || '(none)'}` };
   } catch (e) {
     return { ok: false, loggedIn: false, error: (e as Error).message };
   }
