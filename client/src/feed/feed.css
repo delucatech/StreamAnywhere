@@ -402,20 +402,24 @@ button {
 .nav.active {
   color: #fff;
 }
-.nav.plus {
+.nav.app-icon {
   align-content: center;
 }
-.plus-box {
-  width: 44px;
-  height: 30px;
+/* the launcher icon of the app in use (a small copy of its home-screen tile) */
+.app-tile {
+  width: 38px;
+  height: 38px;
   border-radius: 9px;
-  background: #fff;
-  color: #000;
-  font-size: 22px;
-  font-weight: 700;
-  line-height: 30px;
-  text-align: center;
-  box-shadow: -3px 0 0 var(--accent-2), 3px 0 0 var(--accent);
+  display: grid;
+  place-items: center;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18), 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+.nav.app-icon:active .app-tile {
+  transform: scale(0.92);
+}
+.app-tile svg {
+  width: 64%;
+  height: 64%;
 }
 
 /* full window (W / Esc): only the video */

@@ -66,7 +66,8 @@ const el = {
   actFull: $<HTMLButtonElement>('actFull'),
   navHome: $<HTMLButtonElement>('navHome'),
   navFriends: $<HTMLButtonElement>('navFriends'),
-  navPlus: $<HTMLButtonElement>('navPlus'),
+  navApp: $<HTMLButtonElement>('navApp'),
+  navAppTile: $('navAppTile'),
   navInbox: $<HTMLButtonElement>('navInbox'),
   navProfile: $<HTMLButtonElement>('navProfile'),
   navProfileLabel: $('navProfileLabel'),
@@ -328,7 +329,13 @@ el.navHome.addEventListener('click', () => {
   else pressed(el.navHome, () => reload());
 });
 el.navFriends.addEventListener('click', () => toast('Friends is coming later'));
-el.navPlus.addEventListener('click', () => toast('Upload is coming later'));
+// The middle of the bottom bar shows the icon of the app in use (so it is clear which one this is);
+// tapping it goes back to the launcher like the top-left home link.
+el.navAppTile.style.background = P.tile;
+el.navAppTile.innerHTML = P.icon;
+el.navApp.title = `${P.name}: home screen (all apps)`;
+el.navApp.setAttribute('aria-label', `${P.name}: home screen`);
+el.navApp.addEventListener('click', () => el.homeLink.click());
 el.navInbox.addEventListener('click', () => (P.social ? pressed(el.navInbox, () => openInbox()) : toast(`Messages are not available for ${P.name}`)));
 el.actAuthor.addEventListener('click', () => {
   const cur = activeEntry();
