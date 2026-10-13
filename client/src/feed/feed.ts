@@ -133,12 +133,14 @@ let playerModeAnnounced = false;
 const PREFS_KEY = P.id === 'tiktok' ? 'streamanywhere.feed' : `streamanywhere.feed.${P.id}`;
 interface Prefs {
   source: FeedSource;
+  /** 'user' when the source is a tab the viewer tapped; 'auto' when the sign-in state chose it */
+  pick: 'auto' | 'user';
   category: number;
   autoscroll: boolean;
   muted: boolean;
 }
 function loadPrefs(): Prefs {
-  const def: Prefs = { source: 'explore', category: P.defaultCategory, autoscroll: true, muted: false };
+  const def: Prefs = { source: 'explore', pick: 'auto', category: P.defaultCategory, autoscroll: true, muted: false };
   try {
     return { ...def, ...(JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') as Partial<Prefs>) };
   } catch {
@@ -242,6 +244,7 @@ async function setSource(src: FeedSource, announce = true): Promise<void> {
   }
   if (prefs.source === src && state.mode.kind === 'source') return;
   prefs.source = src;
+  prefs.pick = 'user';
   state.mode = { kind: 'source' };
   savePrefs();
   renderSourceUi();
@@ -684,6 +687,11 @@ let sessionPollFailures = 0;
 const SESSION_POLL_GIVE_UP = 90; // ~3 minutes of 2 s polls
 /** The saved preference was For You but the server was still checking the profile at boot: switch when it says signed in */
 let restoreForYou = false;
+/** The boot sequence decides the source itself once the session check has settled */
+let booting = true;
+
+/** A signed-in account watches its own feed unless the viewer tapped Explore while signed in. */
+const wantsForYou = (): boolean => prefs.pick !== 'user' || prefs.source === 'foryou';
 
 async function refreshSession(announce = false): Promise<SessionStatus | undefined> {
   try {
@@ -697,10 +705,15 @@ async function refreshSession(announce = false): Promise<SessionStatus | undefin
     if (state.session.state === 'logged_in' && (prev === 'login_pending' || (restoreForYou && prevProbing))) {
       restoreForYou = false;
       onSignedIn();
-    } else if (restoreForYou && !state.session.probing) {
-      // The profile check finished without a session: Explore stays, and the preference follows.
+    } else if (!booting && state.session.state === 'logged_in' && prev !== 'logged_in' && prefs.source !== 'foryou' && wantsForYou() && state.mode.kind === 'source') {
+      // The server reports the account after being unreachable (a restart, a deploy): its feed, as
+      // after a sign-in. Explore stays only when the viewer chose it while signed in.
       restoreForYou = false;
-      savePrefs();
+      onSignedIn();
+    } else if (restoreForYou && !state.session.probing) {
+      // The profile check finished without a session: Explore for this visit; the saved preference
+      // is kept so the next visit with a signed-in server goes back to the account's feed.
+      restoreForYou = false;
       if (state.session.supported) toast(`Sign in (Profile) to see your ${P.tabs.foryou} feed; showing ${P.tabs.explore} meanwhile.`, false, 5000);
     }
     return state.session;
@@ -775,6 +788,7 @@ function onSignedIn(): void {
   closeSessionPanel();
   toast(`Signed in as @${state.session?.username || '?'} – loading your ${P.tabs.foryou} feed`);
   prefs.source = 'foryou';
+  prefs.pick = 'auto';
   savePrefs();
   renderSourceUi();
   void reload();
@@ -812,6 +826,7 @@ async function signOut(cancelOnly = false): Promise<void> {
     renderSession();
     if (prefs.source === 'foryou') {
       prefs.source = 'explore';
+      prefs.pick = 'auto';
       savePrefs();
       renderSourceUi();
       void reload();
@@ -1640,9 +1655,13 @@ document.addEventListener('visibilitychange', syncOverlayPause);
 // ---------- boot ----------
 // The feed must not wait for the session check (it may launch a browser on the server): start with
 // Explore right away, and switch to For You as soon as the server confirms a signed-in profile.
+// A signed-in account gets For You even when the saved source is Explore, unless the viewer tapped
+// Explore while signed in (pick 'user'): an earlier visit that found the server restarting must not
+// pin the account to the guest feed.
 void (async () => {
-  const wanted = prefs.source;
-  if (wanted === 'foryou') {
+  const wanted: FeedSource = wantsForYou() ? 'foryou' : 'explore';
+  const savedForYou = prefs.source === 'foryou';
+  if (savedForYou) {
     prefs.source = 'explore';
     renderSourceUi();
   }
@@ -1674,6 +1693,7 @@ void (async () => {
       await refreshSession();
     }
   }
+  booting = false;
   if (wanted === 'foryou') {
     if (state.session?.state === 'logged_in') {
       prefs.source = 'foryou';
@@ -1688,9 +1708,10 @@ void (async () => {
       // over when the server reports the sign-in, or settles on Explore when it reports none.
       restoreForYou = true;
       pollSession();
-    } else {
-      savePrefs();
-      if (state.session?.supported) toast(`Sign in (Profile) to see your ${P.tabs.foryou} feed; showing ${P.tabs.explore} meanwhile.`, false, 5000);
+    } else if (savedForYou && state.session?.supported) {
+      // No session on the server: Explore for this visit. The saved preference is not touched, so a
+      // server that is restarting (unreachable right now) cannot pin the account to Explore.
+      toast(`Sign in (Profile) to see your ${P.tabs.foryou} feed; showing ${P.tabs.explore} meanwhile.`, false, 5000);
     }
   }
 })();
