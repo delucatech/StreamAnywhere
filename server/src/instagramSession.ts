@@ -9,7 +9,7 @@
  *  - mode 'cookies': the text of a cookies.txt (Netscape format; a cookie extension's JSON export and
  *    a raw `Cookie:` header are accepted too). Only instagram.com cookies are kept and `sessionid` must
  *    be among them. They are loaded into the headless browser and checked with Instagram at once
- *    (`/api/v1/accounts/current_user/`), which also names the account.
+ *    (`/api/v1/accounts/edit/web_form_data/`), which also names the account.
  *  - mode 'window': a visible Chrome/Edge window on the server machine (a desktop, not a VM) on
  *    Instagram's login page with its own profile; once instagram.com holds a `sessionid` the window's
  *    cookies are exported to the same file and the window closes.
@@ -21,13 +21,16 @@
  * presents that identity. The paste request's own User-Agent is taken for it (the person pastes from
  * the browser that exported), the sign-in window's own for the window mode.
  *
- * The check: the account API (`current_user`) names the account outright, but Instagram refuses that
- * call from a datacenter address (429 at once, seen from the GCP VM), so the settings page is tried
+ * The check: the account API (the settings form's data) names the account outright, but Instagram may
+ * refuse that call from a datacenter address (429, seen from the GCP VM), so the settings page is tried
  * next (only a signed-in account stays on it). When neither can say - the address is rate-limited -
  * cookies with the shape of a session (`sessionid` = `<account id>:<token>...`) are kept as a
  * provisional sign-in (`verified: false`) and the first Reels page settles it: it confirms the sign-in
  * (instagram.ts calls `confirmed`) or goes to the login page, after which a conclusive "signed out"
- * deletes the cookies. GET /api/session/log?platform=instagram shows each step.
+ * deletes the cookies. The same goes for a server restart whose check gets no answer (the 1 GB VM can
+ * time out on the settings page): the account Instagram last confirmed for these cookies, kept in the
+ * `.meta.json`, is used until the Reels page or a later check says otherwise.
+ * GET /api/session/log?platform=instagram shows each step.
  */
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -169,13 +172,43 @@ export function savedInstagramCookies(): ParsedCookie[] | undefined {
   }
 }
 
+interface Meta {
+  userAgent?: string;
+  savedAt?: string;
+  /** The account Instagram last confirmed for the saved cookies, and its id (to match the cookies). */
+  verifiedAs?: string;
+  verifiedId?: string;
+  verifiedAt?: string;
+}
+function readMeta(): Meta {
+  try {
+    const m = JSON.parse(fs.readFileSync(META_FILE, 'utf8'));
+    return m && typeof m === 'object' ? m : {};
+  } catch {
+    return {};
+  }
+}
+
 /** The User-Agent of the browser the saved cookies came from (undefined for a file saved without one). */
 export function savedUserAgent(): string | undefined {
+  return cleanUserAgent(readMeta().userAgent);
+}
+
+/** Notes in the meta file that Instagram confirmed the saved cookies as `username` (survives a restart). */
+function rememberVerified(username: string | undefined): void {
+  if (!username || !fileExists()) return;
+  const id = cookiesLookSignedIn(savedInstagramCookies() || []).userId;
   try {
-    return cleanUserAgent(JSON.parse(fs.readFileSync(META_FILE, 'utf8'))?.userAgent);
+    fs.writeFileSync(META_FILE, JSON.stringify({ ...readMeta(), verifiedAs: username, verifiedId: id, verifiedAt: new Date().toISOString() }), { mode: 0o600 });
   } catch {
-    return undefined;
+    /* only a convenience for the next restart */
   }
+}
+
+/** The account Instagram confirmed earlier for the cookies of account `userId`, if any. */
+function earlierVerified(userId: string | undefined): string | undefined {
+  const m = readMeta();
+  return m.verifiedAs && /^[\w.]{1,40}$/.test(m.verifiedAs) && (!m.verifiedId || m.verifiedId === userId) ? m.verifiedAs : undefined;
 }
 
 export const instagramSignedIn = (): boolean => s.state === 'logged_in';
@@ -187,6 +220,7 @@ function confirmSignedIn(username?: string): void {
   if (username && (placeholder || !s.verified)) s.username = username;
   if (!s.verified) log(`Instagram served the Reels page for the saved cookies: signed in as @${s.username} (confirmed)`);
   s.verified = true;
+  if (!/^user\d+$/.test(s.username || '')) rememberVerified(s.username);
   s.trouble = undefined;
   s.checkedAt = Date.now();
 }
@@ -225,6 +259,7 @@ function markLoggedIn(acc: InstagramAccount, how: string, verified = true): void
   s.checkedAt = Date.now();
   probed = true;
   clearRetry();
+  if (verified && acc.username) rememberVerified(acc.username);
   log(`signed in as @${s.username} (${how})`);
 }
 
@@ -269,9 +304,11 @@ export async function verifySavedInstagram(force = false): Promise<InstagramAcco
       return acc;
     }
     const look = cookiesLookSignedIn(cookies);
-    if (acc.limited && look.ok) {
-      // Instagram would not say (it limits this server's address): use the cookies and let the Reels page decide.
-      markLoggedIn({ ok: true, loggedIn: true, username: placeholderName(look.userId) }, `saved cookies, not confirmed: ${acc.error}`, false);
+    const earlier = look.ok ? earlierVerified(look.userId) : undefined;
+    if (look.ok && !acc.checkpoint && !acc.uaMismatch) {
+      // Instagram would not say (it limits this server's address, or the check timed out on the busy VM):
+      // use the cookies - under the name Instagram confirmed for them before, if it did - and let the Reels page decide.
+      markLoggedIn({ ok: true, loggedIn: true, username: earlier || placeholderName(look.userId) }, `saved cookies, not confirmed now${earlier ? ' (confirmed earlier)' : ''}: ${acc.error}`, false);
       return acc;
     }
     // Not usable as they are: say why. What a retry cannot change (a checkpoint, the wrong browser

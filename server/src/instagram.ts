@@ -1024,7 +1024,9 @@ export interface InstagramAccount {
 const ACCOUNT_JS = String.raw`(async () => {
   const csrf = (document.cookie.match(/(?:^|; )csrftoken=([^;]+)/) || [])[1] || '';
   const h = { 'x-ig-app-id': '${APP_ID}', 'x-requested-with': 'XMLHttpRequest', 'x-csrftoken': csrf, 'x-asbd-id': '129477' };
-  const r = await fetch('/api/v1/accounts/current_user/?edit=true', { credentials: 'include', headers: h });
+  // current_user answers with the web app's HTML since 2026-10 (also in a real signed-in Chrome); the
+  // settings form's data names the account (form_data.username), checked in a real browser 2026-10-13.
+  const r = await fetch('/api/v1/accounts/edit/web_form_data/', { credentials: 'include', headers: h });
   const t = await r.text();
   return { status: r.status, text: t.slice(0, 20000) };
 })()`;
@@ -1052,11 +1054,11 @@ export function accountFromAnswer(status: number, text: string): InstagramAccoun
   } catch {
     /* not JSON */
   }
-  const u = json?.user;
+  const u = json?.user || json?.form_data;
   const msg = typeof json?.message === 'string' ? json.message : '';
   const hint = bodyHint(msg || text);
   const said = `Instagram answered ${status}${hint ? ' "' + hint + '"' : ''}`;
-  if (status === 200 && u && typeof u.username === 'string') return { ok: true, loggedIn: true, username: u.username, name: u.full_name || undefined, avatar: u.profile_pic_url || undefined };
+  if (status === 200 && u && typeof u.username === 'string') return { ok: true, loggedIn: true, username: u.username, name: u.full_name || u.first_name || undefined, avatar: u.profile_pic_url || undefined };
   if (/checkpoint_required|challenge_required/i.test(msg)) return { ok: false, loggedIn: false, checkpoint: true, error: said };
   if (/useragent mismatch/i.test(hint)) return { ok: false, loggedIn: false, uaMismatch: true, error: `${said} (the cookies were made by another browser identity than the one this server presents)` };
   if (status === 429 || /please wait a few minutes/i.test(hint)) return { ok: false, loggedIn: false, limited: true, error: said };

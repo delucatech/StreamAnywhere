@@ -204,6 +204,10 @@ async function offline(): Promise<void> {
   check('categories: All plus 10 with accounts, no duplicates inside one', INSTAGRAM_CATEGORIES[0].id === 0 && INSTAGRAM_CATEGORIES.length === 11 && INSTAGRAM_CATEGORIES.slice(1).every((c) => c.accounts.length >= 4 && new Set(c.accounts).size === c.accounts.length));
   const acct = accountFromAnswer(200, JSON.stringify({ user: { username: 'mario', full_name: 'Mario D', profile_pic_url: 'p' }, status: 'ok' }));
   check('account answer: signed in', acct.ok && acct.loggedIn && acct.username === 'mario' && acct.name === 'Mario D', acct);
+  const form = accountFromAnswer(200, JSON.stringify({ form_data: { username: 'mario', first_name: 'Mario D', email: 'x' }, status: 'ok' }));
+  check('account answer: settings form data names the account', form.ok && form.loggedIn && form.username === 'mario' && form.name === 'Mario D', form);
+  const shell = accountFromAnswer(200, '<!DOCTYPE html><html class="_9dls"><head><style>:root{--fds-black:#000}</style></head><body>Instagram</body></html>');
+  check('account answer: the web app page is no verdict', !shell.ok && !shell.limited, shell);
   const gone = accountFromAnswer(401, JSON.stringify({ message: 'login_required', require_login: true, status: 'fail' }));
   check('account answer: signed out', gone.ok && !gone.loggedIn, gone);
   check('account answer: a 429 is not an answer', !accountFromAnswer(429, 'slow down').ok);
