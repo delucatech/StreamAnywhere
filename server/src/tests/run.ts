@@ -198,6 +198,11 @@ async function offline(): Promise<void> {
   const codes = new Set<string>();
   collectCodes({ data: { edges: [{ node: { media: { code: 'AbCdEfGh1', video_versions: [{ url: 'u' }], user: { code: 'NotAPost12' } } } }, { node: { media: { code: 'PhotoPost1', media_type: 1 } } }, { node: { media: { code: 'ClipPost_2', product_type: 'clips' } } }] } }, codes);
   check('codes of video posts in a graphql tree (photos and users skipped)', [...codes].sort().join() === 'AbCdEfGh1,ClipPost_2', [...codes]);
+  // The Reels page's own JSON script (shape seen in a real browser 2026-10-13): the list sits ~16 levels down.
+  const preloaded = { require: [['ScheduledServerJS', 'handle', null, [{ __bbox: { require: [['RelayPrefetchedStreamCache', 'next', [], ['adp_PolarisClipsTabDesktopContainerQueryRelayPreloader_x', { __bbox: { complete: true, result: { data: { xdt_api__v1__clips__home__connection_v2: { edges: [{ node: { media: { __typename: 'XDTMediaDict', code: 'DeRGrknyuZv', video_versions: [{}] } } }, { node: { media: { code: 'DeapidhN3hr', media_type: 2 } } }] } } } } }]]] } }]]] };
+  const deep = new Set<string>();
+  collectCodes(preloaded, deep, 0, 40);
+  check("codes in the Reels page's preloaded JSON (deep tree)", [...deep].sort().join() === 'DeRGrknyuZv,DeapidhN3hr', [...deep]);
   const it = embedToFeedItem({ code: 'DecPSQfoaRe', videoUrl: 'https://scontent-hou1-1.cdninstagram.com/o1/v/t2/f2/m86/x.mp4?oe=6AD04B1B', width: 1080, height: 1920, duration: 30.03, views: 30472, likes: 6830, comments: 60, caption: 'hello', cover: 'https://scontent/c.jpg', music: 'Original audio · natgeo', owner: { id: '787132', username: 'natgeo', fullName: 'National Geographic', avatar: 'https://scontent/a.jpg' } });
   const f0 = it.formats[0];
   check('embed -> feed item: author, stats, direct + proxy url', it.id === 'DecPSQfoaRe' && it.author.uniqueId === 'natgeo' && it.stats.likes === 6830 && it.stats.plays === 30472 && f0.codec === 'h264' && f0.directUrl!.endsWith('oe=6AD04B1B') && /^\/api\/media\//.test(f0.proxyUrl || '') && f0.expiresAt === 0x6ad04b1b && !f0.audioProxyUrl, it);

@@ -65,6 +65,10 @@ const IDLE_CLOSE_MS = 5 * 60 * 1000;
 const REELS_READY_MS = 100_000;
 /** ...then paged with the keyboard for at most this long. */
 const REELS_PAGING_MS = 45_000;
+/** A For You fill stops paging once it has this many reels (the next fill brings more while they play). */
+const REELS_FIRST_BATCH = 8;
+/** Runs in the Reels page: the text of its JSON scripts that carry the reels list. */
+const PRELOADED_REELS_JS = String.raw`[...document.querySelectorAll('script[type="application/json"]')].map((s) => s.textContent || '').filter((t) => t.includes('xdt_api__v1__clips__home__connection_v2'))`;
 
 export class InstagramError extends Error {
   constructor(message: string, public readonly status = 502, public readonly code = 'instagram_error') {
@@ -122,15 +126,15 @@ export function parseProfileMeta(handle: string, desc: string, ogTitle: string, 
 }
 
 /** Post codes in any JSON tree from Instagram's GraphQL/REST answers: objects that look like a video post. */
-export function collectCodes(node: unknown, out: Set<string>, depth = 0): void {
-  if (depth > 14 || !node || typeof node !== 'object') return;
+export function collectCodes(node: unknown, out: Set<string>, depth = 0, max = 14): void {
+  if (depth > max || !node || typeof node !== 'object') return;
   if (Array.isArray(node)) {
-    for (const x of node) collectCodes(x, out, depth + 1);
+    for (const x of node) collectCodes(x, out, depth + 1, max);
     return;
   }
   const o = node as Record<string, unknown>;
   if (typeof o.code === 'string' && CODE.test(o.code) && (o.video_versions || o.product_type === 'clips' || o.media_type === 2 || o.clips_metadata)) out.add(o.code);
-  for (const k of Object.keys(o)) collectCodes(o[k], out, depth + 1);
+  for (const k of Object.keys(o)) collectCodes(o[k], out, depth + 1, max);
 }
 
 /** `oe=` (hex unix seconds) of an Instagram CDN URL */
@@ -304,8 +308,33 @@ let browser: Browser | undefined;
 let launching: Promise<Browser> | undefined;
 let page: Page | undefined;
 let idleTimer: NodeJS.Timeout | undefined;
-let chain: Promise<void> = Promise.resolve();
 let jobRunning = false;
+/**
+ * Who waits for the browser, highest priority first (FIFO within one priority). Background stock
+ * fills (Explore profile pages, 20-70 s each on the VM) are PRI_BACKGROUND; what a viewer is waiting
+ * for goes ahead of them: their For You feed (2026-10-13 it waited 80 s behind Explore fills, and its
+ * video lookups another 20 s), a search, a sign-in check.
+ */
+const waiters: { pri: number; go: () => void }[] = [];
+export const PRI_BACKGROUND = 0;
+const PRI_VIEWER = 1;
+const PRI_FEED = 2;
+const PRI_ACCOUNT = 3;
+async function acquire(pri: number): Promise<void> {
+  if (!jobRunning) {
+    jobRunning = true;
+    return;
+  }
+  await new Promise<void>((go) => {
+    const at = waiters.findIndex((w) => w.pri < pri);
+    waiters.splice(at < 0 ? waiters.length : at, 0, { pri, go });
+  });
+}
+function releaseJob(): void {
+  const next = waiters.shift();
+  if (next) next.go();
+  else jobRunning = false;
+}
 const recent: string[] = [];
 let logger: ((m: string) => void) | undefined;
 const note = (m: string): void => {
@@ -394,21 +423,16 @@ async function workPage(): Promise<Page> {
   return p;
 }
 
-/** One browser job at a time (the work page is navigated); closes the browser when idle. */
-async function withPage<T>(fn: (p: Page) => Promise<T>): Promise<T> {
-  const prev = chain;
-  let release!: () => void;
-  chain = new Promise<void>((r) => (release = r));
-  if (jobRunning) progress("Waiting for the server's Instagram browser to finish another job…");
-  await prev;
-  jobRunning = true;
+/** One browser job at a time (the work page is navigated), by priority; closes the browser when idle. */
+async function withPage<T>(fn: (p: Page) => Promise<T>, pri = PRI_BACKGROUND): Promise<T> {
+  if (jobRunning && pri > PRI_BACKGROUND) progress("Waiting for the server's Instagram browser to finish another job…");
+  await acquire(pri);
   if (idleTimer) clearTimeout(idleTimer);
   try {
     return await fn(await workPage());
   } finally {
-    jobRunning = false;
-    clearProgress('instagram');
-    release();
+    if (pri > PRI_BACKGROUND) clearProgress('instagram');
+    releaseJob();
     idleTimer = setTimeout(() => void closeBrowser('idle'), IDLE_CLOSE_MS);
     idleTimer.unref?.();
   }
@@ -426,15 +450,12 @@ async function closeBrowser(why: string): Promise<void> {
 
 /** Drops the browser so the next job starts one with the current saved cookies (after a sign-in or sign-out). */
 export async function resetInstagramBrowser(deleteProfile = false): Promise<void> {
-  const prev = chain;
-  let release!: () => void;
-  chain = new Promise<void>((r) => (release = r));
-  await prev;
+  await acquire(PRI_ACCOUNT);
   try {
     await closeBrowser('reset');
     if (deleteProfile) fs.rmSync(PROFILE_DIR, { recursive: true, force: true });
   } finally {
-    release();
+    releaseJob();
   }
 }
 
@@ -527,7 +548,7 @@ interface CacheEntry {
 const embedCache = new Map<string, CacheEntry>();
 
 /** Resolves post codes to their embed data, in order; entries that are not videos or are gone are left out. */
-export async function embedMany(codes: string[], log: (m: string) => void): Promise<Map<string, CacheEntry>> {
+export async function embedMany(codes: string[], log: (m: string) => void, pri = PRI_BACKGROUND): Promise<Map<string, CacheEntry>> {
   const result = new Map<string, CacheEntry>();
   const todo: string[] = [];
   const now = Date.now();
@@ -539,8 +560,8 @@ export async function embedMany(codes: string[], log: (m: string) => void): Prom
   for (let i = 0; i < todo.length; i += EMBED_BATCH) {
     const part = todo.slice(i, i + EMBED_BATCH);
     const t0 = Date.now();
-    progress(`Looking up the video files: ${i} of ${todo.length} done…`);
-    const answers = (await withPage((p) => p.evaluate(EMBED_JS(part, 8)))) as EmbedAnswer[];
+    if (pri > PRI_BACKGROUND) progress(`Looking up the video files: ${i} of ${todo.length} done…`);
+    const answers = (await withPage((p) => p.evaluate(EMBED_JS(part, 8)), pri)) as EmbedAnswer[];
     let ok = 0;
     for (const a of answers) {
       if (!a) continue;
@@ -599,8 +620,8 @@ export function embedToFeedItem(m: EmbedMedia): FeedItem {
   };
 }
 
-async function itemsFor(codes: string[], log: (m: string) => void): Promise<FeedItem[]> {
-  const got = await embedMany(codes, log);
+async function itemsFor(codes: string[], log: (m: string) => void, pri = PRI_BACKGROUND): Promise<FeedItem[]> {
+  const got = await embedMany(codes, log, pri);
   const items: FeedItem[] = [];
   for (const c of codes) {
     const m = got.get(c)?.media;
@@ -615,7 +636,7 @@ export async function resolveInstagram(inputUrl: string, log: (m: string) => voi
   const t0 = Date.now();
   const code = instagramCode(inputUrl);
   if (!code) throw new InstagramError('That is not an Instagram post or reel URL', 400, 'bad_url');
-  const entry = (await embedMany([code], log)).get(code);
+  const entry = (await embedMany([code], log, PRI_VIEWER)).get(code);
   if (!entry?.media) {
     const why = entry?.why === 'not_video' ? 'That post is not a video' : entry?.why === 'gone' ? 'That post does not exist (any more)' : 'Instagram would not show that post to a signed-out visitor (private account, removed, or rate limited)';
     throw new InstagramError(why, entry?.why === 'unavailable' ? 502 : 404, 'instagram_unavailable');
@@ -853,8 +874,14 @@ export async function forYouInstagram(want: number, log: (m: string) => void): P
   requireSignedIn();
   throwIfLimited('the Reels page');
   // TikTok's browser may have come back since this browser started: the Reels page needs the memory.
-  if (await parkHeadlessBrowser().catch(() => false)) note("TikTok's idle browser was closed to free memory");
+  // (Closed while this job waits for its turn: closing a browser takes a while on the VM too.)
+  const parked = parkHeadlessBrowser()
+    .then((done) => done && note("TikTok's idle browser was closed to free memory"))
+    .catch(() => undefined);
+  // A first batch as soon as there are a few: each fill reloads the page, and the viewer is waiting.
+  const target = Math.min(want, REELS_FIRST_BATCH);
   const { codes, viewer } = await withPage(async (p) => {
+    await parked;
     const found = new Set<string>();
     const onResponse = (res: import('puppeteer-core').HTTPResponse): void => {
       const u = res.url();
@@ -889,16 +916,27 @@ export async function forYouInstagram(want: number, log: (m: string) => void): P
       throwIfRefused(status, 'the Reels page');
       throwIfSentAway(p.url(), 'the Reels page');
       // Ready when the viewer shows its first reel.
-      while (!reelHere() && found.size < want && Date.now() - t0 < REELS_READY_MS) {
+      while (!reelHere() && found.size < target && Date.now() - t0 < REELS_READY_MS) {
         progress(`Instagram's Reels page is still loading (${secs()} s; this small server is slow)…`);
         await sleep(1000);
         throwIfSentAway(p.url(), 'the Reels page');
+      }
+      // The page arrives with its first reels in its own JSON (xdt_api__v1__clips__home__connection_v2,
+      // seen in a real browser 2026-10-13); later ones come 5 at a time from /graphql/query while paging.
+      const preloaded = (await p.evaluate(PRELOADED_REELS_JS).catch(() => [])) as string[];
+      for (const t of preloaded) {
+        try {
+          // The list sits ~16 levels down (ScheduledServerJS > RelayPrefetchedStreamCache > __bbox > result > data).
+          collectCodes(JSON.parse(t), found, 0, 40);
+        } catch {
+          /* not JSON */
+        }
       }
       log(`instagram foryou: Reels page ${reelHere() ? 'showing its first reel' : 'not showing a reel yet'} after ${secs()} s, ${found.size} codes from its data`);
       const t1 = Date.now();
       let last = '';
       let still = 0;
-      for (let step = 0; step < 30 && found.size < want && Date.now() - t1 < REELS_PAGING_MS; step++) {
+      for (let step = 0; step < 30 && found.size < target && Date.now() - t1 < REELS_PAGING_MS; step++) {
         const here = reelHere();
         if (here) found.add(here);
         progress(`Reading your Reels: ${found.size} found so far…`);
@@ -920,12 +958,12 @@ export async function forYouInstagram(want: number, log: (m: string) => void): P
       p.off('response', onResponse);
       await p.goto(`${ORIGIN}/robots.txt`, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => undefined);
     }
-  });
+  }, PRI_FEED);
   log(`instagram foryou: ${codes.length} reel codes captured${viewer ? ' for @' + viewer : ''}`);
   if (!codes.length) return { items: [], warnings: ['Instagram returned no Reels this time'] };
   hooks?.confirmed?.(viewer || undefined);
   try {
-    return { items: await itemsFor(codes, log), warnings: [] };
+    return { items: await itemsFor(codes, log, PRI_FEED), warnings: [] };
   } finally {
     clearProgress('instagram');
   }
@@ -952,14 +990,14 @@ export async function searchInstagram(q: string, offset: number, log: (m: string
   let items: FeedItem[] = [];
   const code = instagramCode(q);
   if (code) {
-    items = await itemsFor([code], log);
+    items = await itemsFor([code], log, PRI_VIEWER);
     if (!items.length) warnings.push('That post is not a video Instagram shows to a signed-out visitor');
     return { q, items, users, hasMore: false, offset, warnings, elapsedMs: Date.now() - t0 };
   }
   if (offset > 0) return { q, items: [], users: [], hasMore: false, offset, warnings, elapsedMs: Date.now() - t0 };
   if (signedIn()) {
     try {
-      const r = (await withPage((p) => p.evaluate(SEARCH_JS(q)))) as { status: number; text: string };
+      const r = (await withPage((p) => p.evaluate(SEARCH_JS(q)), PRI_VIEWER)) as { status: number; text: string };
       const json = r.status === 200 ? JSON.parse(r.text) : undefined;
       users = (Array.isArray(json?.users) ? json.users : [])
         .map((x: any) => x?.user)
@@ -1130,7 +1168,7 @@ export async function checkInstagramAccount(cookies?: ParsedCookie[], userAgent?
         }
       }
       return acc;
-    });
+    }, PRI_ACCOUNT);
   } catch (e) {
     return { ok: false, loggedIn: false, error: (e as Error).message };
   }
