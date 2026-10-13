@@ -176,6 +176,15 @@ function startProbe(): void {
     .finally(() => (probe = undefined));
 }
 
+/** True when the server holds a working Instagram sign-in; waits for the check of a saved file after a start. */
+export async function ensureInstagramSession(): Promise<boolean> {
+  if (s.state === 'none' && fileExists() && !probed) {
+    if (!probe) startProbe();
+    await probe?.catch(() => undefined);
+  }
+  return s.state === 'logged_in';
+}
+
 export async function instagramSessionStatus(): Promise<SessionStatus> {
   const sup = sessionSupported();
   if (!sup.ok) return { platform: 'instagram', supported: false, state: 'unsupported', error: sup.reason, message: 'Instagram runs in a browser on the server: it needs Chrome or Edge there (set BROWSER_PATH).' };

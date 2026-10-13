@@ -381,11 +381,9 @@ export const YOUTUBE_CATEGORIES: YouTubeCategory[] = [
 ];
 
 /**
- * Instagram guest "Explore": Instagram shows a signed-out visitor no global feed (the Explore page,
- * hashtag pages, search and its REST API all demand a login), but a public account's profile lists
- * its 12 latest Reels and every post has a guest-readable embed page. So each category is a list of
- * big public accounts whose latest Reels the server rotates through (accounts verified 2026-10-13
- * to list 8+ Reels to a guest). id 0 = All rotates through every category.
+ * Instagram "Reels" tab (the platform needs a sign-in): Instagram has no global feed to list, so each
+ * category is a list of big public accounts whose latest Reels the server rotates through (accounts
+ * verified 2026-10-13 to list 8+ Reels). id 0 = All rotates through every category.
  */
 export interface InstagramCategory {
   id: number;

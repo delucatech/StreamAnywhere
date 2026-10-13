@@ -33,8 +33,7 @@ Windows 10 (see **Test results** for exactly what was measured):
 | **YouTube sign-in**: paste/upload the cookies of a signed-in browser (or a sign-in window on the server machine); **For You** = the account's recommendations | **Working mechanism** (built 2026-10-13; verified signed-out: cookie parsing, YouTube's account check, rejection paths. The signed-in feed itself awaits a real account) – see **YouTube** |
 | **Launcher** (`home.html`, the landing page): iPad-style icons that open each platform like an app | **Working** |
 | **YouTube, guest mode**: Shorts by hashtag, search, channels; picture + sound as two files played in sync | **Working** (Node server with yt-dlp) – see **YouTube** |
-| **Instagram, guest mode** (built 2026-10-13): Reels from a rotation of big public accounts, `@handle` / link search, profiles; one muxed MP4 per Reel | **Working** (Node server + Chrome/Edge; Instagram rate-limits profile pages per IP, see **Instagram**) |
-| **Instagram sign-in**: paste/upload the cookies of a signed-in browser (or a sign-in window on the server machine); **For You** = the account's Reels page, real search | **Working mechanism, unverified signed in** (cookie parsing, rejection of bad cookies and the guest paths are verified; the signed-in feed awaits a real account) – see **Instagram** |
+| **Instagram** (built 2026-10-13): **requires a sign-in** (Instagram serves nobody who is signed out): paste/upload the cookies of a signed-in browser (or a sign-in window on the server machine). **Reels** = the latest Reels of a rotation of big public accounts, **For You** = the account's Reels page, `@handle`/link/account search, profiles; one muxed MP4 per Reel | **Working mechanism, unverified signed in** (cookie parsing, rejection of bad cookies, the account rotation, embed resolving and playback are verified signed out; the signed-in feed awaits a real account) – see **Instagram** |
 
 ## Repository layout
 
@@ -338,15 +337,16 @@ refused (age gate, private video, bot check). `/api/session/log?platform=youtube
 
 ## Instagram
 
-Same idea as the other two platforms, but Instagram gives a signed-out visitor much less. Measured
-2026-10-13 from the dev machine:
+Same idea as the other two platforms, but Instagram **requires a sign-in**: the feed page opens the
+sign-in panel instead of a feed, and the server answers every Instagram request with 401 until the
+saved cookies check out. Why there is no guest mode, measured 2026-10-13 from the dev machine:
 
 - **Every Instagram API refuses guests** (`/api/v1/...`, `web_profile_info`, tags, search, clips all
   answer 401 `require_login`, also when called from inside a real instagram.com page) and yt-dlp's
   Instagram extractors are marked broken. The Explore page, `/reels/` and hashtag pages redirect to
   the login page. What a guest *can* see: a public profile page (`/<handle>/reels/` renders its 12
   latest Reels, no paging) and the **embed page of any post** (`/p/<code>/embed/captioned/`).
-- **Explore (Reels tab)** is therefore a rotation over big public accounts: each chip is a list of
+- **Reels tab** is a rotation over big public accounts (Instagram has no global feed to list): each chip is a list of
   accounts (`INSTAGRAM_CATEGORIES` in `shared/types.ts`, all verified to list 8+ Reels to a guest),
   "All" alternates between the categories, and the Reels of the next few accounts are interleaved so
   the stream never shows a dozen from one account in a row.
@@ -361,14 +361,14 @@ Same idea as the other two platforms, but Instagram gives a signed-out visitor m
   account every 6 hours, at most 40 profile loads an hour, 3 s between loads, a back-off of 10 min
   (doubling to 1 h) after a redirect, and stale listings are served rather than an error. While
   profiles are blocked, only accounts already in the catalog feed the stream. Signing in avoids the
-  limit (it counts per account then). `/api/stats` shows `instagram.blockedForSec` and the catalog size.
-- **Search** has no guest API: type an `@handle` (or profile link) for the account and its Reels, or
-  paste a post/reel link. Signed in, the account search (`/web/search/topsearch/`) finds accounts.
-  **Profile** = the account's Reels (12 as a guest; a signed-in account keeps paging on scroll).
+  limit (it counts per account then). The signed-in session is used for the profile pages too. `/api/stats` shows `instagram.blockedForSec` and the catalog size.
+- **Search**: the account search (`/web/search/topsearch/`) finds accounts; an `@handle` (or profile
+  link) opens the account and its Reels, a pasted post/reel link plays it. **Profile** = the
+  account's Reels (a signed-in account keeps paging on scroll; a guest would get 12).
 - All of it runs in **one headless Chrome/Edge page** (`src/instagram.ts`, its own profile), one job at
   a time, closed after 5 idle minutes (the 1 GB VM needs the memory); no yt-dlp involved.
 
-### Instagram sign-in (For You)
+### Instagram sign-in
 
 Instagram has no QR/TV-code login and challenges scripted password logins, so - like YouTube - the
 sign-in is **the cookies of a browser that is signed in** (paste / choose `cookies.txt`, or a sign-in

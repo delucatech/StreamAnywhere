@@ -19,7 +19,7 @@ import { Reservoir, type ReservoirStats } from './reservoir';
 import { conversation, fetchProfile, followUser, inbox, inboxDebug, searchTikTok, sendMessage, SocialError } from './social';
 import { channelVideos, exploreYouTube, isYouTubeUrl, recommendedYouTube, resolveYouTube, searchYouTube, youTubeCategory, YouTubeError } from './youtube';
 import { exploreInstagram, forYouInstagram, instagramCategory, instagramStats, InstagramError, isInstagramUrl, profileInstagram, resolveInstagram, searchInstagram, setInstagramLogger, shutdownInstagram } from './instagram';
-import { instagramCancelLogin, instagramLogout, instagramSessionLog, instagramSessionLost, instagramSessionStatus, instagramSignedIn, instagramStartLogin, InstagramSessionError, setInstagramSessionLogger, shutdownInstagramSession } from './instagramSession';
+import { instagramCancelLogin, instagramLogout, instagramSessionLog, ensureInstagramSession, instagramSessionLost, instagramSessionStatus, instagramSignedIn, instagramStartLogin, InstagramSessionError, setInstagramSessionLogger, shutdownInstagramSession } from './instagramSession';
 import { setYouTubeSessionLogger, shutdownYouTubeSession, youtubeCancelLogin, youtubeCookieFile, youtubeLogout, youtubeSessionLog, youtubeSessionLost, youtubeSessionStatus, youtubeStartLogin, YouTubeSessionError } from './youtubeSession';
 
 /** After the browser path rescued an explore request, prefer it for a while (datacenter IPs). */
@@ -137,8 +137,8 @@ function youtubeForYouReservoir(log: (m: string) => void): Reservoir {
 }
 
 /**
- * Instagram guest Explore stock per category: the latest Reels of a rotation of big public accounts
- * (instagram.ts explains why: a signed-out visitor has no global feed). Fills are slow-ish (a profile
+ * Instagram "Reels" stock per category (signed-in only): the latest Reels of a rotation of big public
+ * accounts (instagram.ts explains why there is no global feed to list). Fills are slow-ish (a profile
  * page load each, paced by the module) so the stock is deep and refilled early.
  */
 const instagramReservoirs = new Map<number, Reservoir>();
@@ -236,6 +236,7 @@ export async function buildServer() {
 
     if (isInstagramUrl(url)) {
       try {
+        await ensureInstagramSession();
         return await resolveInstagram(url, (m) => log(m));
       } catch (e) {
         const err = e as Error;
@@ -348,8 +349,9 @@ export async function buildServer() {
     const warn = (err: string, msg: string) => app.log.warn({ platform, source, err }, msg);
     try {
       if (platform === 'instagram') {
+        await ensureInstagramSession();
+        if (!instagramSignedIn()) throw new FeedError('Instagram needs a sign-in: open Profile and sign in with the cookies of a signed-in browser.', 'instagram_not_signed_in', 401);
         if (source === 'foryou') {
-          if (!instagramSignedIn()) throw new FeedError('Not signed in to Instagram: sign in from Profile to see your For You feed.', 'instagram_not_signed_in', 401);
           const r = await instagramForYouReservoir(log).take(count);
           const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0 };
           log(`instagram foryou: ${r.items.length} served ${r.fromStock ? 'from stock' : 'after a fill'}, ${r.ready} ready, ${resp.elapsedMs} ms`);
@@ -418,7 +420,10 @@ export async function buildServer() {
       if (!q) throw new SocialError('Type something to search for', 400);
       const offset = Math.max(0, Math.min(500, Number(req.body?.offset) || 0));
       if (platformOf(req.body?.platform) === 'youtube') return await searchYouTube(q, offset, youtubeLog);
-      if (platformOf(req.body?.platform) === 'instagram') return await searchInstagram(q, offset, instagramLog);
+      if (platformOf(req.body?.platform) === 'instagram') {
+        await ensureInstagramSession();
+        return await searchInstagram(q, offset, instagramLog);
+      }
       return await searchTikTok(q, offset, socialLog('search'));
     } catch (e) {
       return socialFail(reply, e, t0);
@@ -430,7 +435,10 @@ export async function buildServer() {
       const user = handle(req.body?.user);
       const offset = Math.max(0, Math.min(2000, Number(req.body?.offset) || 0));
       const count = Math.max(1, Math.min(60, Number(req.body?.count) || 24));
-      if (platformOf(req.body?.platform) === 'instagram') return await profileInstagram(user, offset, count, instagramLog);
+      if (platformOf(req.body?.platform) === 'instagram') {
+        await ensureInstagramSession();
+        return await profileInstagram(user, offset, count, instagramLog);
+      }
       if (platformOf(req.body?.platform) === 'youtube') {
         const r = await channelVideos(user, offset, count, youtubeLog);
         const resp: ProfileResponse = { user: { uniqueId: user, nickname: r.items[0]?.author.nickname }, items: r.items, offset, hasMore: r.hasMore, warnings: [], elapsedMs: Date.now() - t0 };

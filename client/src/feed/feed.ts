@@ -243,7 +243,7 @@ function renderSourceUi(): void {
   for (const c of el.chips.querySelectorAll<HTMLButtonElement>('.chip')) c.classList.toggle('active', Number(c.dataset.id) === prefs.category);
 }
 async function setSource(src: FeedSource, announce = true): Promise<void> {
-  if (src === 'foryou' && state.session?.state !== 'logged_in') {
+  if ((src === 'foryou' || P.loginRequired) && state.session?.state !== 'logged_in') {
     // Keep Explore until a session exists; the panel switches once signed in.
     await openSessionPanel();
     return;
@@ -745,7 +745,8 @@ async function refreshSession(announce = false): Promise<SessionStatus | undefin
       // The profile check finished without a session: Explore for this visit; the saved preference
       // is kept so the next visit with a signed-in server goes back to the account's feed.
       restoreForYou = false;
-      if (state.session.supported) toast(`Sign in (Profile) to see your ${P.tabs.foryou} feed; showing ${P.tabs.explore} meanwhile.`, false, 5000);
+      if (P.loginRequired) void openSessionPanel();
+      else if (state.session.supported) toast(`Sign in (Profile) to see your ${P.tabs.foryou} feed; showing ${P.tabs.explore} meanwhile.`, false, 5000);
     }
     return state.session;
   } catch (e) {
@@ -855,7 +856,7 @@ async function signOut(cancelOnly = false): Promise<void> {
   try {
     state.session = await api.sessionLogout(P.id);
     renderSession();
-    if (prefs.source === 'foryou') {
+    if (prefs.source === 'foryou' || P.loginRequired) {
       prefs.source = 'explore';
       prefs.pick = 'auto';
       savePrefs();
@@ -1024,7 +1025,7 @@ async function loadMore(): Promise<number> {
     reportProblem('feed batch', `${sourceLabel()}: ${msg}`);
     if (state.emptyBatches === 1 || state.emptyBatches % 4 === 0) toast(`Feed: ${msg} – retrying`, true, 5000);
     if (!state.entries.length && state.emptyBatches >= 3) showEmpty(`Feed failed: ${msg}`);
-    if (prefs.source === 'foryou' && /not signed in|session|sign in/i.test(msg)) {
+    if ((prefs.source === 'foryou' || P.loginRequired) && /not signed in|session|sign in|needs a sign-in/i.test(msg)) {
       // The TikTok session is gone: retrying every 20 s would only reopen this panel again and again.
       // Stop the loop (signing in or switching the source calls reload(), which starts it afresh).
       state.exhausted = true;
@@ -1710,7 +1711,8 @@ void (async () => {
     prefs.source = 'explore';
     renderSourceUi();
   }
-  const feedReady = loadMore();
+  // A platform that serves nobody signed out has nothing to load until the account is known.
+  const feedReady: Promise<unknown> = P.loginRequired ? Promise.resolve() : loadMore();
   let resuming = false;
   try {
     resuming = localStorage.getItem(SIGNIN_KEY) === '1';
@@ -1739,7 +1741,20 @@ void (async () => {
     }
   }
   booting = false;
-  if (wanted === 'foryou') {
+  if (P.loginRequired) {
+    if (state.session?.state === 'logged_in') {
+      prefs.source = wanted;
+      savePrefs();
+      renderSourceUi();
+      toast(`Signed in as @${state.session.username || '?'} – loading your ${wanted === 'foryou' ? P.tabs.foryou : P.tabs.explore} feed`);
+      void reload();
+    } else if (state.session?.probing) {
+      restoreForYou = true;
+      pollSession();
+    } else if (state.session?.state !== 'login_pending') {
+      void openSessionPanel();
+    }
+  } else if (wanted === 'foryou') {
     if (state.session?.state === 'logged_in') {
       prefs.source = 'foryou';
       savePrefs();

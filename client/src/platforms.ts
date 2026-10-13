@@ -34,6 +34,8 @@ export interface PlatformDef {
   signIn: 'qr' | 'cookies';
   /** What the sign-in panel says before a sign-in */
   signInHint: string;
+  /** The platform serves nobody who is signed out (Instagram): the feed waits for a sign-in */
+  loginRequired: boolean;
   /** Cookie sign-in: the site whose cookies are exported, whose sign-in page the server window opens, and the placeholder of the search box */
   cookieSite: string;
   signInWindowOwner: string;
@@ -56,6 +58,7 @@ export const PLATFORMS: PlatformDef[] = [
     social: true,
     signIn: 'qr',
     signInHint: '"Sign in with QR code" shows TikTok\'s login QR here; scan it with the TikTok app on your phone.',
+    loginRequired: false,
     cookieSite: 'tiktok.com',
     signInWindowOwner: 'TikTok',
     searchPlaceholder: 'Search videos and accounts',
@@ -75,6 +78,7 @@ export const PLATFORMS: PlatformDef[] = [
     social: false,
     signIn: 'cookies',
     signInHint: 'Sign in with the cookies of a browser that is signed in to YouTube: paste a cookies.txt export below (or choose the file). The server checks them with YouTube and keeps only the youtube.com ones.',
+    loginRequired: false,
     cookieSite: 'youtube.com',
     signInWindowOwner: 'Google',
     searchPlaceholder: 'Search YouTube',
@@ -93,7 +97,8 @@ export const PLATFORMS: PlatformDef[] = [
     tabs: { explore: 'Reels', foryou: 'For You' },
     social: false,
     signIn: 'cookies',
-    signInHint: 'Instagram shows a signed-out visitor no feed of its own, so Reels rotates through big public accounts. Sign in with the cookies of a browser that is signed in to Instagram (paste a cookies.txt export below, or choose the file) to get your own For You feed and real search.',
+    signInHint: 'Instagram does not show anything to visitors who are signed out, so it needs a sign-in: use the cookies of a browser that is signed in to Instagram (paste a cookies.txt export below, or choose the file). The server checks them with Instagram and keeps only the instagram.com ones.',
+    loginRequired: true,
     cookieSite: 'instagram.com',
     signInWindowOwner: 'Instagram',
     searchPlaceholder: 'Search an @account or paste a link',

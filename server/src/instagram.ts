@@ -18,6 +18,10 @@
  *    working. Hence the account catalog below (one listing per account every few hours, kept on
  *    disk), a pause between loads and an hourly budget.
  *
+ * Instagram is therefore sign-in only here: every public function below refuses (401) without the
+ * saved sign-in of instagramSession.ts. The guest findings above explain why, and the paths that
+ * were measured as a guest (profile anchors, embed pages) are the ones the signed-in code reuses.
+ *
  * Signed in (cookies of a signed-in browser, see instagramSession.ts) the profile pages page on
  * scroll, `topsearch` finds accounts, and the Reels page (`/reels/`) is the account's own feed: its
  * GraphQL answers are captured while scrolling and only the post CODES are taken from them; the
@@ -157,6 +161,11 @@ export function setSessionHooks(h: { cookies: () => ParsedCookie[] | undefined; 
   signedInFn = h.signedIn;
 }
 const signedIn = (): boolean => Boolean(signedInFn?.());
+
+/** Instagram does not serve guests at all (its pages and APIs ask for a login): everything here needs the saved sign-in. */
+function requireSignedIn(): void {
+  if (!signedIn()) throw new InstagramError('Instagram needs a sign-in: open Profile and sign in with the cookies of a signed-in browser.', 401, 'instagram_not_signed_in');
+}
 
 // ---------------------------------------------------------------- the browser
 
@@ -458,6 +467,7 @@ async function itemsFor(codes: string[], log: (m: string) => void): Promise<Feed
 
 /** POST /api/resolve for an Instagram post/reel URL */
 export async function resolveInstagram(inputUrl: string, log: (m: string) => void): Promise<ResolveResponse> {
+  requireSignedIn();
   const t0 = Date.now();
   const code = instagramCode(inputUrl);
   if (!code) throw new InstagramError('That is not an Instagram post or reel URL', 400, 'bad_url');
@@ -652,6 +662,7 @@ function accountOrder(catId: number): string[] {
  * (so the feed never shows a dozen from one account in a row) and resolved through the embed pages.
  */
 export async function exploreInstagram(catId: number, want: number, log: (m: string) => void): Promise<{ items: FeedItem[]; warnings: string[] }> {
+  requireSignedIn();
   const order = accountOrder(catId);
   const warnings: string[] = [];
   const lists: string[][] = [];
@@ -695,7 +706,7 @@ export async function exploreInstagram(catId: number, want: number, log: (m: str
  * receives while it is paged with the keyboard, plus the URL it settles on after each step.
  */
 export async function forYouInstagram(want: number, log: (m: string) => void): Promise<{ items: FeedItem[]; warnings: string[] }> {
-  if (!signedIn()) throw new InstagramError('Not signed in to Instagram: sign in from Profile to see your For You feed.', 401, 'instagram_not_signed_in');
+  requireSignedIn();
   const codes = await withPage(async (p) => {
     const found = new Set<string>();
     const onResponse = (res: import('puppeteer-core').HTTPResponse): void => {
@@ -735,6 +746,7 @@ export async function forYouInstagram(want: number, log: (m: string) => void): P
 const SEARCH_JS = (q: string): string => String.raw`fetch('/web/search/topsearch/?context=blended&include_reel=true&query=' + encodeURIComponent(${JSON.stringify(q)}), { credentials: 'include', headers: { 'x-ig-app-id': '${APP_ID}', 'x-requested-with': 'XMLHttpRequest' } }).then(async (r) => ({ status: r.status, text: await r.text() }))`;
 
 export async function searchInstagram(q: string, offset: number, log: (m: string) => void): Promise<SearchResponse> {
+  requireSignedIn();
   const t0 = Date.now();
   const warnings: string[] = [];
   let users: UserSummary[] = [];
@@ -776,6 +788,7 @@ export async function searchInstagram(q: string, offset: number, log: (m: string
 }
 
 export async function profileInstagram(handle: string, offset: number, count: number, log: (m: string) => void): Promise<ProfileResponse> {
+  requireSignedIn();
   const t0 = Date.now();
   const acc = await accountReels(handle, offset + count, log);
   const slice = acc.codes.slice(offset, offset + count);
