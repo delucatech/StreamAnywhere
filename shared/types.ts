@@ -198,6 +198,15 @@ export interface FeedResponse {
   elapsedMs: number;
 }
 
+/** GET /api/feed/progress?platform=: the step a slow fill is on (no text when nothing is running). */
+export interface FeedProgress {
+  platform: Platform;
+  /** e.g. "Starting Instagram's browser on the server…" */
+  text?: string;
+  /** How long the job has been on this step */
+  forMs?: number;
+}
+
 // ---------------------------------------------------------------- search / profiles / follow / messages
 // All served by the headless browser on the server (server/src/social.ts). Search and profiles work
 // without a sign-in (TikTok's guest view); follow and messages need the signed-in session.

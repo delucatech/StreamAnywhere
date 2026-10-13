@@ -1,4 +1,4 @@
-import type { ConversationResponse, FeedRequest, FeedResponse, FollowRequest, FollowResponse, HealthResponse, InboxResponse, LoginMode, Platform, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SendMessageResponse, ServerProbe, SessionInputRequest, SessionStatus } from '../../shared/types';
+import type { ConversationResponse, FeedProgress, FeedRequest, FeedResponse, FollowRequest, FollowResponse, HealthResponse, InboxResponse, LoginMode, Platform, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SendMessageResponse, ServerProbe, SessionInputRequest, SessionStatus } from '../../shared/types';
 
 /**
  * API base URL. Empty = same origin (dev server proxy or SERVE_CLIENT deployments). When the
@@ -80,6 +80,15 @@ export const api = {
   probe: (url: string): Promise<ServerProbe> => post('/api/probe', { url, origin: location.origin }),
   report: (req: ReportRequest): Promise<void> => post('/api/report', req).then(() => undefined, () => undefined),
   feed: (req: FeedRequest): Promise<FeedResponse> => post('/api/feed', req),
+  /** The step a slow feed fill is on (shown on the loading screen); no text when nothing runs or on any failure. */
+  feedProgress: async (platform: Platform): Promise<FeedProgress> => {
+    try {
+      const res = await fetch(apiUrl(`/api/feed/progress?platform=${platform}`), { mode: 'cors', credentials: 'same-origin', cache: 'no-store' });
+      return res.ok ? await res.json() : { platform };
+    } catch {
+      return { platform };
+    }
+  },
   session: async (platform: Platform = 'tiktok', recheck = false): Promise<SessionStatus> => {
     const res = await fetch(apiUrl(`/api/session?platform=${platform}${recheck ? '&recheck=1' : ''}`), { mode: 'cors', credentials: 'same-origin' });
     toLoginOn401(res);

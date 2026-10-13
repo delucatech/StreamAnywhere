@@ -895,26 +895,45 @@ function showLoading(title: string, detail: string, centered: boolean): void {
 }
 function hideLoading(): void {
   clearInterval(loadingTicker);
+  loadingTicker = 0; // a late progress answer must not show the indicator again
   el.loading.classList.add('hidden');
 }
 /** Shows what the page is waiting for, updating the detail line as the wait grows. */
 function startLoadingStatus(): void {
   clearInterval(loadingTicker);
   const t0 = Date.now();
+  const ticker = window.setInterval(() => render(), 1000);
+  loadingTicker = ticker;
+  // The server's own account of a slow fill (browser starting, page loading, …), asked every 2 s.
+  let serverStep = '';
+  let asking = false;
+  const askServer = async (): Promise<void> => {
+    if (asking || state.mode.kind !== 'source') return;
+    asking = true;
+    const r = await api.feedProgress(P.id);
+    asking = false;
+    if (loadingTicker !== ticker) return;
+    serverStep = r.text || '';
+    render();
+  };
   const waiting = () => state.entries.length === 0 || state.wantNext || state.active >= state.entries.length - 1;
-  const render = () => {
+  function render(): void {
     const sec = Math.round((Date.now() - t0) / 1000);
     const first = state.entries.length === 0;
     let title = first ? `Loading ${sourceLabel()}…` : 'Loading more videos…';
     let detail = 'Asking the server for the next videos';
     if (sec >= 5) detail = `The server is fetching from ${P.name}…`;
-    if (sec >= 12) detail = prefs.source === 'foryou' ? `Reading your feed from the signed-in ${P.name} session\n(a fresh browser start can take up to a minute)` : `${P.name} is slow to answer; the server is retrying…`;
-    if (sec >= 40) detail += `\n${sec} s so far – still trying`;
+    if (sec >= 12) detail = prefs.source === 'foryou' ? `Reading your feed from the signed-in ${P.name} session
+(a fresh browser start can take up to a minute)` : `${P.name} is slow to answer; the server is retrying…`;
+    if (serverStep) detail = serverStep;
+    if (sec >= 2 && sec % 2 === 0) void askServer();
+    if (sec >= 40 || serverStep) detail += `
+${sec} s so far – still working`;
     if (state.emptyBatches > 0 && first) title = `Still loading ${sourceLabel()}…`;
     showLoading(title, detail, waiting());
-  };
+  }
   render();
-  loadingTicker = window.setInterval(render, 1000);
+  void askServer();
 }
 function showRetryStatus(delayMs: number): void {
   clearInterval(loadingTicker);

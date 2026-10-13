@@ -16,6 +16,7 @@ import { hostAllowed } from './ssrf';
 import { EXPLORE_DEFAULT_CATEGORY, FeedError, fetchExploreFeed, normalizeExploreOptions, type ExploreResult } from './feed';
 import { cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouStock, logout, rememberLog, workState, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
 import { Reservoir, type ReservoirStats } from './reservoir';
+import { getProgress } from './progress';
 import { conversation, fetchProfile, followUser, inbox, inboxDebug, searchTikTok, sendMessage, SocialError } from './social';
 import { channelVideos, exploreYouTube, isYouTubeUrl, recommendedYouTube, resolveYouTube, searchYouTube, youTubeCategory, YouTubeError } from './youtube';
 import { exploreInstagram, forYouInstagram, instagramCategory, instagramStats, InstagramError, isInstagramUrl, pauseInstagramPages, profileInstagram, resolveInstagram, searchInstagram, setInstagramLogger, shutdownInstagram } from './instagram';
@@ -179,7 +180,9 @@ function instagramForYouReservoir(log: (m: string) => void): Reservoir {
         }
         return res;
       },
-      { log, batch: 20, target: 30, low: 15, gapMs: 3000, waitMs: 60_000 },
+      // A fill from cold on the 1 GB VM (browser start, slow Reels page, video lookups) can take two
+      // minutes; the viewer is shown each step meanwhile (/api/feed/progress), so the request waits it out.
+      { log, batch: 20, target: 30, low: 15, gapMs: 3000, waitMs: 170_000 },
     );
   }
   return instagramForYou;
@@ -348,6 +351,12 @@ export async function buildServer() {
     const n = Math.max(1, Math.min(800, Number(req.query.n) || 300));
     const level = /^(warn|error)$/i.test(req.query.level || '') ? 40 : /^debug$/i.test(req.query.level || '') ? 20 : 30;
     return reply.type('text/plain; charset=utf-8').header('cache-control', 'no-store').send(recentLog(n, level) + '\n');
+  });
+
+  // What a slow fill is doing right now, for the viewer's loading screen (polled while a feed request runs).
+  app.get<{ Querystring: { platform?: string } }>('/api/feed/progress', async (req, reply) => {
+    reply.header('cache-control', 'no-store');
+    return getProgress(platformOf(req.query.platform));
   });
 
   // ---- feed (TikTok-style stream): explore needs no login; foryou needs the browser session.

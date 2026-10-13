@@ -35,7 +35,8 @@ import type { FeedItem, MediaFormat, ProfileResponse, ResolveResponse, SearchRes
 import { INSTAGRAM_CATEGORIES } from '../../shared/types';
 import { config } from './config';
 import { defaultExpiry, registerMedia } from './mediaStore';
-import { sessionSupported } from './session';
+import { clearProgress, setProgress } from './progress';
+import { parkHeadlessBrowser, sessionSupported } from './session';
 import type { ParsedCookie } from './youtubeSession';
 
 type Browser = import('puppeteer-core').Browser;
@@ -57,6 +58,13 @@ const EMBED_TTL_MS = 30 * 60 * 1000;
 const EMBED_BATCH = 24;
 /** The browser is closed after this long without work (a 1 GB VM needs the memory back). */
 const IDLE_CLOSE_MS = 5 * 60 * 1000;
+/**
+ * The Reels page on the 1 GB VM: DOMContentLoaded alone took over 40 s there (2026-10-13), and the
+ * viewer then needs a while longer to pick its first reel. Waited for this long in all...
+ */
+const REELS_READY_MS = 100_000;
+/** ...then paged with the keyboard for at most this long. */
+const REELS_PAGING_MS = 45_000;
 
 export class InstagramError extends Error {
   constructor(message: string, public readonly status = 502, public readonly code = 'instagram_error') {
@@ -297,6 +305,7 @@ let launching: Promise<Browser> | undefined;
 let page: Page | undefined;
 let idleTimer: NodeJS.Timeout | undefined;
 let chain: Promise<void> = Promise.resolve();
+let jobRunning = false;
 const recent: string[] = [];
 let logger: ((m: string) => void) | undefined;
 const note = (m: string): void => {
@@ -308,6 +317,8 @@ export const setInstagramLogger = (l: (m: string) => void): void => {
   logger = l;
 };
 export const instagramLog = (): { lines: string[] } => ({ lines: recent.slice() });
+/** The step shown on the viewer's loading screen (see progress.ts). */
+const progress = (text: string): void => setProgress('instagram', text);
 
 async function launchBrowser(): Promise<Browser> {
   const sup = sessionSupported();
@@ -326,6 +337,9 @@ async function getBrowser(): Promise<Browser> {
   if (launching) return launching;
   launching = (async () => {
     try {
+      // Two Chromiums do not fit the 1 GB VM side by side (the Reels page timed out while TikTok's ran).
+      if (await parkHeadlessBrowser().catch(() => false)) note("TikTok's idle browser was closed to free memory");
+      progress("Starting Instagram's browser on the server (up to a minute on this small server)…");
       note('launching headless browser');
       let b: Browser;
       try {
@@ -374,6 +388,7 @@ async function workPage(): Promise<Page> {
   const saved = cookieSource();
   if (saved?.length) await p.setCookie(...cookieParams(saved));
   page = p;
+  progress('Opening instagram.com with your sign-in…');
   await p.goto(`${ORIGIN}/robots.txt`, { waitUntil: 'domcontentloaded', timeout: 40_000 });
   note(`work page opened${saved?.length ? ' with the saved sign-in' : ''}`);
   return p;
@@ -384,11 +399,15 @@ async function withPage<T>(fn: (p: Page) => Promise<T>): Promise<T> {
   const prev = chain;
   let release!: () => void;
   chain = new Promise<void>((r) => (release = r));
+  if (jobRunning) progress("Waiting for the server's Instagram browser to finish another job…");
   await prev;
+  jobRunning = true;
   if (idleTimer) clearTimeout(idleTimer);
   try {
     return await fn(await workPage());
   } finally {
+    jobRunning = false;
+    clearProgress('instagram');
     release();
     idleTimer = setTimeout(() => void closeBrowser('idle'), IDLE_CLOSE_MS);
     idleTimer.unref?.();
@@ -520,6 +539,7 @@ export async function embedMany(codes: string[], log: (m: string) => void): Prom
   for (let i = 0; i < todo.length; i += EMBED_BATCH) {
     const part = todo.slice(i, i + EMBED_BATCH);
     const t0 = Date.now();
+    progress(`Looking up the video files: ${i} of ${todo.length} done…`);
     const answers = (await withPage((p) => p.evaluate(EMBED_JS(part, 8)))) as EmbedAnswer[];
     let ok = 0;
     for (const a of answers) {
@@ -832,6 +852,8 @@ export async function exploreInstagram(catId: number, want: number, log: (m: str
 export async function forYouInstagram(want: number, log: (m: string) => void): Promise<{ items: FeedItem[]; warnings: string[] }> {
   requireSignedIn();
   throwIfLimited('the Reels page');
+  // TikTok's browser may have come back since this browser started: the Reels page needs the memory.
+  if (await parkHeadlessBrowser().catch(() => false)) note("TikTok's idle browser was closed to free memory");
   const { codes, viewer } = await withPage(async (p) => {
     const found = new Set<string>();
     const onResponse = (res: import('puppeteer-core').HTTPResponse): void => {
@@ -844,31 +866,78 @@ export async function forYouInstagram(want: number, log: (m: string) => void): P
         })
         .catch(() => undefined);
     };
+    // The viewer moves the address to /reels/<code>/ for the reel it shows (checked in a real browser).
+    const reelHere = (): string | undefined => {
+      const here = /\/reels\/([\w-]{5,20})/.exec(safePath(p.url()))?.[1];
+      return here && CODE.test(here) ? here : undefined;
+    };
     p.on('response', onResponse);
+    const t0 = Date.now();
+    const secs = (): number => Math.round((Date.now() - t0) / 1000);
     try {
-      const nav = await p.goto(`${ORIGIN}/reels/`, { waitUntil: 'domcontentloaded', timeout: 40_000 });
-      throwIfRefused(nav?.status() ?? 0, 'the Reels page');
-      const t0 = Date.now();
-      for (let step = 0; step < 14 && found.size < want && Date.now() - t0 < 25_000; step++) {
-        await sleep(1200);
-        const here = /\/reels\/([\w-]{5,20})/.exec(new URL(p.url()).pathname)?.[1];
-        if (here && CODE.test(here)) found.add(here);
-        throwIfSentAway(p.url(), 'the Reels page');
-        await p.keyboard.press('ArrowDown');
+      progress('Opening your Reels page on instagram.com…');
+      let status = 0;
+      try {
+        const nav = await p.goto(`${ORIGIN}/reels/`, { waitUntil: 'domcontentloaded', timeout: REELS_READY_MS - 10_000 });
+        status = nav?.status() ?? 0;
+      } catch (e) {
+        // On the starved VM DOMContentLoaded can come late although the page is there and already asks
+        // for its reels: go on when the browser is on the Reels page (or was sent away - checked below).
+        if (!/timeout/i.test((e as Error).message) || !(/^\/reels\//.test(safePath(p.url())) || sentAway(p.url()))) throw e;
+        log(`instagram foryou: the Reels page is still loading after ${secs()} s; reading it anyway`);
       }
+      throwIfRefused(status, 'the Reels page');
       throwIfSentAway(p.url(), 'the Reels page');
+      // Ready when the viewer shows its first reel.
+      while (!reelHere() && found.size < want && Date.now() - t0 < REELS_READY_MS) {
+        progress(`Instagram's Reels page is still loading (${secs()} s; this small server is slow)…`);
+        await sleep(1000);
+        throwIfSentAway(p.url(), 'the Reels page');
+      }
+      log(`instagram foryou: Reels page ${reelHere() ? 'showing its first reel' : 'not showing a reel yet'} after ${secs()} s, ${found.size} codes from its data`);
+      const t1 = Date.now();
+      let last = '';
+      let still = 0;
+      for (let step = 0; step < 30 && found.size < want && Date.now() - t1 < REELS_PAGING_MS; step++) {
+        const here = reelHere();
+        if (here) found.add(here);
+        progress(`Reading your Reels: ${found.size} found so far…`);
+        // The same reel five steps running: the page stopped answering the keyboard (or has no more).
+        if (here === last && ++still >= 5) break;
+        if (here !== last) still = 0;
+        last = here || last;
+        await p.keyboard.press('ArrowDown').catch(() => undefined);
+        await sleep(1500);
+        throwIfSentAway(p.url(), 'the Reels page');
+      }
+      const here = reelHere();
+      if (here) found.add(here);
       // Only a signed-in account gets the Reels page: name it, for a sign-in Instagram would not confirm.
       const viewer = found.size ? await viewerName(p) : '';
+      log(`instagram foryou: ${found.size} reel codes after ${secs()} s`);
       return { codes: [...found], viewer };
     } finally {
       p.off('response', onResponse);
-      await p.goto(`${ORIGIN}/robots.txt`, { waitUntil: 'domcontentloaded' }).catch(() => undefined);
+      await p.goto(`${ORIGIN}/robots.txt`, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => undefined);
     }
   });
   log(`instagram foryou: ${codes.length} reel codes captured${viewer ? ' for @' + viewer : ''}`);
   if (!codes.length) return { items: [], warnings: ['Instagram returned no Reels this time'] };
   hooks?.confirmed?.(viewer || undefined);
-  return { items: await itemsFor(codes, log), warnings: [] };
+  try {
+    return { items: await itemsFor(codes, log), warnings: [] };
+  } finally {
+    clearProgress('instagram');
+  }
+}
+
+/** The path of a URL, '' for none. */
+function safePath(url: string): string {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return '';
+  }
 }
 
 // ---------------------------------------------------------------- search and profiles

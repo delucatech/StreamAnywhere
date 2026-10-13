@@ -1776,6 +1776,20 @@ async function closeHeadless(): Promise<void> {
   if (b) await b.close().catch(() => undefined);
 }
 
+/**
+ * Closes the headless TikTok browser while nothing uses it, so another platform's browser (Instagram's)
+ * has the memory of the 1 GB VM to itself; the next TikTok request starts it again (the profile and the
+ * captured For You items stay). Returns false and leaves it running while it is in use: a job on the
+ * work page, a pending QR sign-in, or a For You feed someone watched within the last minute.
+ */
+export async function parkHeadlessBrowser(log?: (m: string) => void): Promise<boolean> {
+  if (!s.headless || headlessLaunch || feedPageOpening) return false;
+  if (s.qrPage || work.busy || work.waiting || (forYouPump && Date.now() - forYouAskedAt < 60_000)) return false;
+  await closeHeadless();
+  (log || feedLog)?.('headless browser closed to free memory for another platform (it restarts on the next TikTok request)');
+  return true;
+}
+
 /** After a sign-in: drop guest items and make the feed page reload as the signed-in account. */
 async function resetFeedPage(): Promise<void> {
   s.pending = [];
