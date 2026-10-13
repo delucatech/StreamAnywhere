@@ -12,6 +12,11 @@
  *              from the page's embedded JSON (`__UNIVERSAL_DATA_FOR_REHYDRATION__`, scope
  *              `webapp.user-detail`; the page makes no user/detail request for them), read the
  *              post/item_list answers as they happen, scroll for more (cursor-based, hasMore).
+ *              2026-10-13: TikTok answers the page's OWN post/item_list with an EMPTY 200 body for
+ *              a new device / datacenter IP (the VM, and a guest desktop browser), so the page shows
+ *              no videos at all; yt-dlp's listing of /@handle (--flat-playlist) still works and
+ *              serves the videos whenever the page captured none (no play URLs: the viewer resolves
+ *              each video through POST /api/resolve when it comes up, like search results).
  *              Guest search answers carry most videos without play URLs: those items are kept
  *              with no formats and the viewer resolves them through POST /api/resolve.
  *  - follow:   the profile page has a real `[data-e2e="follow-button"]` ("Follow" / "Following" /
@@ -25,6 +30,7 @@ import type { Page } from 'puppeteer-core';
 import type { ChatMessage, Conversation, ConversationResponse, FeedItem, FollowResponse, FollowState, InboxResponse, ProfileResponse, SearchResponse, SendMessageResponse, UserSummary } from '../../shared/types';
 import { itemToFeedItem } from './feed';
 import { isLoggedIn, pageCookieHeader, resetWorkPage, withWorkPage } from './session';
+import { ytdlpInfo } from './ytdlp';
 
 const TT = 'https://www.tiktok.com';
 const MESSAGES_URL = `${TT}/messages?lang=en`;
@@ -257,8 +263,44 @@ interface ProfileState {
   hasMore: boolean;
   cookieHeader: string;
   notFound?: string;
+  /** The page delivered no videos; the listing comes from yt-dlp (kept for the "more" calls) */
+  viaYtDlp?: boolean;
 }
 let profile: ProfileState | undefined;
+
+/** A flat yt-dlp entry of an account page as a feed item (no play URLs yet). */
+function ytEntryToFeedItem(e: any, user: string): FeedItem | undefined {
+  const id = typeof e?.id === 'string' && /^\d{5,}$/.test(e.id) ? e.id : undefined;
+  if (!id) return undefined;
+  const handle = typeof e.uploader === 'string' && e.uploader ? e.uploader : user;
+  const thumbs: any[] = Array.isArray(e.thumbnails) ? e.thumbnails : [];
+  const cover = (thumbs.find((t) => t?.id === 'cover') || thumbs[0])?.url;
+  return {
+    id,
+    canonicalUrl: `${TT}/@${handle}/video/${id}`,
+    author: { id: typeof e.uploader_id === 'string' ? e.uploader_id : undefined, uniqueId: handle, nickname: typeof e.channel === 'string' ? e.channel : undefined },
+    desc: (typeof e.description === 'string' && e.description) || (typeof e.title === 'string' && e.title) || undefined,
+    createTime: num(e.timestamp),
+    duration: num(e.duration),
+    cover: typeof cover === 'string' ? cover : undefined,
+    stats: { plays: num(e.view_count), likes: num(e.like_count), comments: num(e.comment_count), shares: num(e.repost_count) },
+    formats: [],
+  };
+}
+
+/** yt-dlp walks the account's videos from the start up to offset + count (a page costs ~4 s). */
+async function listWithYtDlp(user: string, offset: number, count: number, log: (m: string) => void): Promise<{ items: FeedItem[]; hasMore: boolean }> {
+  const t0 = Date.now();
+  const json = await ytdlpInfo({ url: `${TT}/@${encodeURIComponent(user)}`, flat: true, playlistItems: `${offset + 1}-${offset + count}` }, 90_000);
+  const entries: any[] = Array.isArray(json?.entries) ? json.entries : [];
+  const items: FeedItem[] = [];
+  for (const e of entries) {
+    const it = ytEntryToFeedItem(e, user);
+    if (it && !items.some((x) => x.id === it.id)) items.push(it);
+  }
+  log(`profile @${user}: yt-dlp listed ${items.length} videos [${offset + 1}-${offset + count}], ${Date.now() - t0} ms`);
+  return { items, hasMore: entries.length >= count };
+}
 
 const sameUser = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
 const onProfilePage = (page: Page, user: string): boolean => page.url().toLowerCase().startsWith(`${TT}/@${user.toLowerCase()}`);
@@ -324,7 +366,23 @@ export async function fetchProfile(user: string, offset: number, count: number, 
   return withWorkPage(log, async (page) => {
     installCapture(page);
     const p = await openProfile(page, user, log);
-    const deadline = Date.now() + 20_000;
+    // yt-dlp runs beside the page once the page is known (or looks about) to deliver no videos; not
+    // sooner, since the VM has one core and the page itself delivers them when TikTok allows.
+    let ytResult: { items: FeedItem[]; hasMore: boolean } | undefined;
+    let ytPromise: Promise<typeof ytResult> | undefined;
+    const startYtDlp = (): Promise<typeof ytResult> => {
+      if (!ytPromise)
+        ytPromise = listWithYtDlp(user, offset, count, log).then(
+          (r) => (ytResult = r),
+          (e) => {
+            log(`profile @${user}: yt-dlp listing failed (${(e as Error).message})`);
+            return undefined;
+          },
+        );
+      return ytPromise;
+    };
+    if (p.viaYtDlp) void startYtDlp();
+    const deadline = Date.now() + (p.viaYtDlp ? 0 : 20_000);
     const detailsUntil = Date.now() + 15_000;
     while (!p.info && !p.notFound && Date.now() < detailsUntil) {
       absorbProfile(p);
@@ -355,12 +413,30 @@ export async function fetchProfile(user: string, offset: number, count: number, 
         warnings.push('TikTok stopped loading more videos of this account');
         break;
       }
+      // The page's list answers are empty (see the header): yt-dlp beside the wait, and stop
+      // waiting once it has the videos.
+      if (!p.items.length && nudges >= 3) void startYtDlp();
+      if (!p.items.length && ytResult?.items.length) break;
     }
     absorbProfile(p);
+    let items = p.items.slice(offset, offset + count);
+    let hasMore = p.hasMore && (stale < 8 || p.items.length > offset + count);
+    let served = `${p.items.length} captured`;
+    if (!items.length && (!p.items.length || p.viaYtDlp)) {
+      // Nothing from the page at all (not just its end): yt-dlp's listing, awaited when still running.
+      const yt = await startYtDlp();
+      if (yt?.items.length) {
+        if (!p.viaYtDlp) log(`profile @${user}: the page delivered no videos; serving yt-dlp's listing`);
+        p.viaYtDlp = true;
+        items = yt.items;
+        hasMore = yt.hasMore;
+        served = 'yt-dlp';
+      } else if (yt) hasMore = false; // yt-dlp walked the account to its end
+    }
     if (!p.info) {
       const txt = String(await page.evaluate('document.body.innerText').catch(() => ''));
-      if (/couldn.t find this account|this account is private|no content/i.test(txt) && !p.items.length) throw new SocialError(`@${user}: ${/private/i.test(txt) ? 'this account is private' : 'TikTok could not find this account'}`, 404);
-      const a = p.items[0]?.author;
+      if (/couldn.t find this account|this account is private|no content/i.test(txt) && !items.length) throw new SocialError(`@${user}: ${/private/i.test(txt) ? 'this account is private' : 'TikTok could not find this account'}`, 404);
+      const a = (p.items[0] || items[0])?.author;
       if (a?.uniqueId) {
         p.info = { id: a.id, uniqueId: a.uniqueId, nickname: a.nickname, avatar: a.avatar, followState: 'unknown' };
         warnings.push('TikTok did not deliver the profile details; showing what the videos carry');
@@ -368,9 +444,9 @@ export async function fetchProfile(user: string, offset: number, count: number, 
     }
     const btn = stateFromButton((await page.evaluate(READ_FOLLOW_BUTTON).catch(() => null)) as string | null);
     if (btn && isLoggedIn()) p.info.followState = btn;
-    const items = p.items.slice(offset, offset + count);
-    log(`profile @${user}: ${items.length} videos served (offset ${offset}, ${p.items.length} captured, more: ${p.hasMore})`);
-    return { user: p.info, items, offset, hasMore: p.hasMore && (stale < 8 || p.items.length > offset + count), warnings, elapsedMs: Date.now() - t0 };
+    if (p.viaYtDlp) for (const it of items) if (!it.author.avatar && sameUser(it.author.uniqueId || '', p.info.uniqueId)) it.author.avatar = p.info.avatar;
+    log(`profile @${user}: ${items.length} videos served (offset ${offset}, ${served}, more: ${hasMore})`);
+    return { user: p.info, items, offset, hasMore, warnings, elapsedMs: Date.now() - t0 };
   }, `profile @${user}`);
 }
 

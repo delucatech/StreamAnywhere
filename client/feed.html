@@ -27,6 +27,7 @@
       <div class="chips hidden" id="chips" aria-label="Explore categories"></div>
       <!-- what is playing when it is not a source: a search or an account's videos -->
       <div class="context hidden" id="context">
+        <button id="contextBack" class="context-close" type="button" aria-label="Back to the list">←</button>
         <span id="contextLabel"></span>
         <button id="contextClose" class="context-close" type="button" aria-label="Back to the feed">✕</button>
       </div>
@@ -158,8 +159,6 @@
           <div class="panel-actions">
             <button id="profileFollow" class="btn primary" type="button">Follow</button>
             <button id="profileMessage" class="btn" type="button">Message</button>
-            <button id="profilePlay" class="btn" type="button">Play videos</button>
-            <a id="profileLink" class="btn ghost" target="_blank" rel="noopener">Open account page</a>
           </div>
           <div id="profileVideos" class="video-grid"></div>
           <div class="panel-foot"><button id="profileMore" class="btn hidden" type="button">More videos</button></div>
@@ -187,7 +186,7 @@
       </div>
       <div id="start" class="start">
         <button id="startBtn" class="start-btn" type="button">Tap to start</button>
-        <p class="start-hint">Swipe or drag up/down for the next video · tap to pause · F for fullscreen</p>
+        <p class="start-hint">Swipe or drag up/down for the next video · tap to pause · swipe right to go back · F for fullscreen</p>
       </div>
 
       <div id="toast" class="toast hidden"></div>

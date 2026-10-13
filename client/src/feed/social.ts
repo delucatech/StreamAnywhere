@@ -25,9 +25,6 @@ export interface SocialHost {
   platform: PlatformDef;
 }
 
-/** The public page of an account on the platform */
-const accountUrl = (p: PlatformDef, handle: string): string => (p.id === 'youtube' ? `https://www.youtube.com/@${encodeURIComponent(handle)}` : `https://www.tiktok.com/@${handle}`);
-
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const e = document.getElementById(id);
   if (!e) throw new Error(`missing #${id}`);
@@ -57,8 +54,6 @@ const el = {
   profileBio: $('profileBio'),
   profileFollow: $<HTMLButtonElement>('profileFollow'),
   profileMessage: $<HTMLButtonElement>('profileMessage'),
-  profilePlay: $<HTMLButtonElement>('profilePlay'),
-  profileLink: $<HTMLAnchorElement>('profileLink'),
   profileVideos: $('profileVideos'),
   profileMore: $<HTMLButtonElement>('profileMore'),
   inbox: $('inbox'),
@@ -175,6 +170,12 @@ export function openSearch(): void {
   el.searchInput.select();
 }
 
+/** Back from a playing list to the panel it was tapped in (the results / the account stay as they were). */
+export function reopenPlayList(list: PlayList): void {
+  if (list.kind === 'profile') void openProfile(list.user);
+  else show(el.search); // no focus: that would raise the keyboard on a phone
+}
+
 async function runSearch(q: string, more: boolean): Promise<void> {
   if (search.busy) return;
   search.busy = true;
@@ -255,7 +256,6 @@ function renderProfileHead(): void {
     el.profileStats.appendChild(s);
   }
   el.profileBio.textContent = u.signature || '';
-  el.profileLink.href = accountUrl(host.platform, u.uniqueId);
   const followed = u.followState === 'following' || u.followState === 'friends' || u.followState === 'requested';
   el.profileFollow.textContent = followLabel(u.followState);
   el.profileFollow.classList.toggle('primary', !followed);
@@ -318,11 +318,6 @@ async function loadProfile(more: boolean): Promise<void> {
 
 el.profileClose.addEventListener('click', () => hide(el.profile));
 el.profileMore.addEventListener('click', () => pressed(el.profileMore, () => loadProfile(true), { label: 'Loading' }));
-el.profilePlay.addEventListener('click', () => {
-  if (!profile.items.length) return host.toast('No videos loaded yet');
-  closeAllPanels();
-  host.play({ kind: 'profile', user: profile.user, items: profile.items.slice(), offset: profile.offset, hasMore: profile.hasMore }, 0);
-});
 el.profileFollow.addEventListener('click', () => {
   const u = profile.info;
   if (!u) return;
@@ -521,7 +516,6 @@ export function initSocial(h: SocialHost): void {
   host = h;
   const p = h.platform;
   el.searchInput.placeholder = p.social ? 'Search videos and accounts' : `Search ${p.name}`;
-  el.profileLink.textContent = `Open on ${p.name}`;
   // Follow and messages exist on TikTok only; the other platforms show the account's videos.
   el.profileFollow.classList.toggle('hidden', !p.social);
   el.profileMessage.classList.toggle('hidden', !p.social);

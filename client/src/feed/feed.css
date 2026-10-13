@@ -877,6 +877,7 @@ button {
   text-overflow: ellipsis;
   white-space: nowrap;
   backdrop-filter: blur(6px);
+  cursor: pointer;
 }
 .context-close {
   border: 1px solid rgba(255, 255, 255, 0.25);

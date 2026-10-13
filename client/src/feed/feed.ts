@@ -28,7 +28,7 @@ import { api, ApiError, apiUrl } from '../api';
 import { pressed } from '../busy';
 import { currentPlatform, rememberApp } from '../platforms';
 import { FeedPlayer, feedPlayerMode } from './player';
-import { closeTopPanel, initSocial, openInbox, openProfile, openSearch, panelOpen, type PlayList } from './social';
+import { closeTopPanel, initSocial, openInbox, openProfile, openSearch, panelOpen, reopenPlayList, type PlayList } from './social';
 
 /** The platform this page plays (feed.html?platform=…, set by the launcher); it colours and labels the page. */
 const P = currentPlatform();
@@ -52,6 +52,7 @@ const el = {
   chips: $('chips'),
   context: $('context'),
   contextLabel: $('contextLabel'),
+  contextBack: $<HTMLButtonElement>('contextBack'),
   contextClose: $<HTMLButtonElement>('contextClose'),
   searchBtn: $<HTMLButtonElement>('searchBtn'),
   actAuthor: $<HTMLButtonElement>('actAuthor'),
@@ -234,6 +235,9 @@ function renderSourceUi(): void {
   el.context.classList.toggle('hidden', !listMode);
   if (state.mode.kind === 'search') el.contextLabel.textContent = `Search: ${state.mode.q}`;
   else if (state.mode.kind === 'profile') el.contextLabel.textContent = `@${state.mode.user}`;
+  const back = state.mode.kind === 'profile' ? `Back to @${state.mode.user}` : 'Back to the search results';
+  el.contextBack.title = back;
+  el.contextBack.setAttribute('aria-label', back);
   for (const c of el.chips.querySelectorAll<HTMLButtonElement>('.chip')) c.classList.toggle('active', Number(c.dataset.id) === prefs.category);
 }
 async function setSource(src: FeedSource, announce = true): Promise<void> {
@@ -256,8 +260,26 @@ function playList(list: PlayList, startIndex: number): void {
   state.mode = list;
   renderSourceUi();
   toast(list.kind === 'search' ? `Search: ${list.q}` : `Videos of @${list.user}`);
+  // One history entry per list, so the browser's Back (the car's, the phone's) returns to the panel.
+  if (!history.state?.saList) history.pushState({ saList: true }, '');
   void reload(list.items, startIndex);
 }
+/**
+ * Back from a playing list to the panel it came from: the ← button, a swipe / drag to the right,
+ * Escape / Backspace, and the browser's Back. The list keeps playing (paused) behind the panel.
+ */
+function backToPanel(): void {
+  if (state.mode.kind === 'source') return;
+  if (history.state?.saList) history.back(); // popstate reopens the panel
+  else reopenPlayList(state.mode);
+}
+window.addEventListener('popstate', () => {
+  if (state.mode.kind === 'source') return;
+  if (panelOpen()) closeTopPanel();
+  else reopenPlayList(state.mode);
+});
+el.contextBack.addEventListener('click', backToPanel);
+el.contextLabel.addEventListener('click', backToPanel);
 el.contextClose.addEventListener('click', () => {
   if (state.mode.kind === 'source') return;
   state.mode = { kind: 'source' };
@@ -1483,6 +1505,10 @@ document.addEventListener('keydown', (e) => {
     case 'Escape':
       if (el.app.classList.contains('fullwindow')) toggleBars();
       if (!el.session.classList.contains('hidden') && el.sessionClose.classList.contains('hidden') === false) closeSessionPanel();
+      else backToPanel();
+      break;
+    case 'Backspace':
+      backToPanel();
       break;
     case 'd':
     case 'D':
@@ -1544,6 +1570,8 @@ el.feed.addEventListener(
     const dy = touchStartY - e.changedTouches[0].clientY;
     const dx = touchStartX - e.changedTouches[0].clientX;
     const dt = Date.now() - touchStartAt;
+    // A swipe to the right (like the back gesture of a phone) returns to the list's panel.
+    if (dx <= -60 && Math.abs(dx) > Math.abs(dy) * 1.5 && dt <= 1200) return backToPanel();
     if (Math.abs(dy) < 30 || Math.abs(dy) < Math.abs(dx) || dt > 1200) return;
     if (!state.started) start();
     const target = Math.max(0, Math.min(state.entries.length - 1, touchStartIdx + (dy > 0 ? 1 : -1)));
@@ -1569,6 +1597,7 @@ el.feed.addEventListener(
 
 // ---------- mouse: press, drag up/down, release = next/previous video ----------
 let dragStartY = 0;
+let dragStartX = 0;
 let dragStartIdx = 0;
 let dragging = false;
 el.feed.addEventListener('mousedown', (e) => {
@@ -1576,6 +1605,7 @@ el.feed.addEventListener('mousedown', (e) => {
   if ((e.target as HTMLElement).closest('a, button')) return;
   dragging = true;
   dragStartY = e.clientY;
+  dragStartX = e.clientX;
   dragStartIdx = Math.round(el.feed.scrollTop / Math.max(1, el.feed.clientHeight));
   userScrollAt = Date.now();
   el.feed.classList.add('dragging');
@@ -1583,13 +1613,19 @@ el.feed.addEventListener('mousedown', (e) => {
 window.addEventListener('mousemove', (e) => {
   if (!dragging) return;
   userScrollAt = Date.now();
-  if (Math.abs(e.clientY - dragStartY) > 6) e.preventDefault();
+  if (Math.abs(e.clientY - dragStartY) > 6 || Math.abs(e.clientX - dragStartX) > 6) e.preventDefault();
 });
 window.addEventListener('mouseup', (e) => {
   if (!dragging) return;
   dragging = false;
   el.feed.classList.remove('dragging');
   const dy = dragStartY - e.clientY;
+  const dx = e.clientX - dragStartX;
+  if (dx >= 80 && dx > Math.abs(dy) * 1.5) {
+    // Dragged to the right (a mouse "swipe back"): back to the list's panel.
+    suppressClickUntil = Date.now() + 400;
+    return backToPanel();
+  }
   if (Math.abs(dy) < 40) return; // a click, handled by the video's click listener
   suppressClickUntil = Date.now() + 400;
   if (!state.started) start();
