@@ -93,9 +93,29 @@
               </div>
             </div>
           </div>
+          <!-- Cookie sign-in (YouTube): the cookies of a browser that is signed in, pasted or picked as a file. -->
+          <form id="sessionCookies" class="session-cookies hidden" autocomplete="off" novalidate>
+            <label class="session-label" for="sessionCookiesText">Cookies of a browser that is signed in to YouTube</label>
+            <textarea id="sessionCookiesText" rows="5" spellcheck="false" autocapitalize="off" placeholder="Paste the contents of cookies.txt here (Netscape format, as cookie export extensions save it) – or choose the file"></textarea>
+            <div class="session-input">
+              <input id="sessionCookiesFile" type="file" accept=".txt,.json,text/plain,application/json" class="hidden" />
+              <button id="sessionCookiesPick" class="btn" type="button">Choose cookies.txt…</button>
+              <button id="sessionCookiesSend" class="btn primary" type="submit">Sign in with these cookies</button>
+            </div>
+            <div id="sessionCookiesResult" class="session-code-result hidden" aria-live="polite"></div>
+            <details class="session-help">
+              <summary>How to get the cookies</summary>
+              <ol>
+                <li>On a computer, open a <b>private / incognito window</b> and sign in at <b>youtube.com</b>.</li>
+                <li>Export the cookies with a cookie export extension (for example “Get cookies.txt LOCALLY” for Chrome/Edge, “cookies.txt” for Firefox) while on youtube.com, as a <b>cookies.txt</b> file.</li>
+                <li><b>Close the private window</b> (so the browser does not rotate the cookies behind this server's back), then paste the file's text here or choose the file.</li>
+              </ol>
+              <p>The server keeps the youtube.com / google.com cookies in a private file and uses them for your feed; nothing else is read. "Sign out" deletes the file. YouTube may sign the server out after a while – then paste a fresh export.</p>
+            </details>
+          </form>
           <div class="session-actions">
             <button id="sessionLogin" class="btn primary" type="button">Sign in with QR code</button>
-            <button id="sessionLoginWindow" class="btn" type="button" title="Opens TikTok's login page in a visible browser window on the machine that runs the server">Open sign-in window on server</button>
+            <button id="sessionLoginWindow" class="btn" type="button" title="Opens the sign-in page in a visible browser window on the machine that runs the server">Open sign-in window on server</button>
             <button id="sessionRefresh" class="btn" type="button">Check again</button>
             <button id="sessionRestart" class="btn hidden" type="button" title="Cancel this attempt and load a fresh QR code">Start over</button>
             <button id="sessionCancel" class="btn" type="button">Cancel sign-in</button>

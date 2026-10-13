@@ -131,6 +131,8 @@ export interface InfoRequest {
   playlistItems?: string;
   /** --no-playlist (a single video) */
   noplaylist?: boolean;
+  /** --cookies: a Netscape cookies.txt (the YouTube sign-in); yt-dlp writes rotated cookies back to it */
+  cookieFile?: string;
 }
 
 const DAEMONS = Math.max(1, Number(process.env.YTDLP_DAEMONS) || 2);
@@ -234,6 +236,7 @@ class Daemon {
       this.pending = { id, resolve, reject, timer };
       const body: Record<string, unknown> = { id, url: req.url, flat: Boolean(req.flat), noplaylist: Boolean(req.noplaylist) };
       if (req.playlistItems) body.playlist_items = req.playlistItems;
+      if (req.cookieFile) body.cookiefile = req.cookieFile;
       this.proc.stdin!.write(JSON.stringify(body) + '\n');
     });
   }
@@ -342,6 +345,7 @@ export async function ytdlpInfo(req: InfoRequest, timeoutMs = 150_000): Promise<
   const args = req.flat ? ['--flat-playlist', '-J'] : ['-j'];
   if (req.noplaylist) args.push('--no-playlist');
   if (req.playlistItems) args.push('--playlist-items', req.playlistItems);
+  if (req.cookieFile) args.push('--cookies', req.cookieFile);
   args.push(req.url);
   const out = await ytdlp(args, timeoutMs);
   return JSON.parse(out.trim().split(/\r?\n/).pop()!);

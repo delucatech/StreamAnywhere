@@ -7,6 +7,7 @@ Importing yt_dlp costs ~1 s on a PC and ~11 s of CPU on the free e2-micro VM (me
 every YouTube call 25-120 s there. This process pays that once.
 
 Request:  {"id": 1, "url": "...", "flat": true, "playlist_items": "1-30", "noplaylist": false,
+           "cookiefile": "/path/to/cookies.txt",
            "extractor_args": {"youtube": {"player_client": ["..."]}}}
 Response: {"id": 1, "ok": true, "info": {...}}  or  {"id": 1, "ok": false, "error": "..."}
 
@@ -80,6 +81,9 @@ def main():
             opts["playlist_items"] = str(req["playlist_items"])
         if req.get("extractor_args"):
             opts["extractor_args"] = req["extractor_args"]
+        if req.get("cookiefile"):
+            # The YouTube sign-in. yt-dlp saves the (possibly rotated) jar back to the file on close.
+            opts["cookiefile"] = str(req["cookiefile"])
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(req["url"], download=False)

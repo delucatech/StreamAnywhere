@@ -13,6 +13,7 @@ import { hostAllowed, ipIsPrivate, assertSafeUpstream } from '../ssrf';
 import { parseTikTokUrl } from '../tiktok';
 import { itemToFeedItem } from '../feed';
 import { entryToFeedItem, isYouTubeUrl, pickAudio, youTubeVideoId } from '../youtube';
+import { accountFromMenu, parseCookiesText, sapisidHash, toNetscape, YouTubeSessionError } from '../youtubeSession';
 import { Reservoir, expiredSoon } from '../reservoir';
 import type { FeedItem } from '../../../shared/types';
 import type { FeedResponse } from '../../../shared/types';
@@ -138,6 +139,50 @@ async function offline(): Promise<void> {
   ]);
   check('audio: original language at 128 kbps, no DRC, never opus', audio?.format_id === '140-20', audio?.format_id);
   check('audio: plain 140 wins over 139', pickAudio([{ format_id: '139', url: 'u', vcodec: 'none', acodec: 'mp4a.40.5', protocol: 'https', abr: 49 }, { format_id: '140', url: 'u', vcodec: 'none', acodec: 'mp4a.40.2', protocol: 'https', abr: 129 }])?.format_id === '140');
+
+  console.log('\n== 6. YouTube sign-in: cookie text (offline)');
+  const netscape = [
+    '# Netscape HTTP Cookie File',
+    '.youtube.com\tTRUE\t/\tTRUE\t1790000000\tSAPISID\tabc/def',
+    '#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t1790000000\tSID\tsid-value',
+    '.youtube.com\tTRUE\t/\tFALSE\t0\tPREF\ttz=UTC',
+    '.example.com\tTRUE\t/\tFALSE\t0\tother\tx',
+    '.google.com\tTRUE\t/\tTRUE\t1790000000\tHSID\thsid',
+  ].join('\n');
+  const parsed = parseCookiesText(netscape);
+  check('netscape: youtube/google kept, other sites dropped, HttpOnly marked', parsed.cookies.length === 4 && parsed.cookies.find((c) => c.name === 'SID')?.httpOnly === true && parsed.cookies.find((c) => c.name === 'SAPISID')?.value === 'abc/def' && parsed.warnings.length === 1, parsed);
+  const back = toNetscape(parsed.cookies);
+  check('round trip keeps the HttpOnly prefix and session cookies', back.includes('#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t1790000000\tSID\tsid-value') && back.includes('\t0\tPREF\ttz=UTC') && parseCookiesText(back).cookies.length === 4);
+  const json = JSON.stringify([
+    { domain: '.youtube.com', name: '__Secure-3PAPISID', value: 'v', path: '/', secure: true, httpOnly: false, expirationDate: 1790000000.5 },
+    { domain: '.youtube.com', name: 'LOGIN_INFO', value: 'l', path: '/', secure: true, httpOnly: true, session: true },
+  ]);
+  const fromJson = parseCookiesText(json);
+  check('json export of a cookie extension', fromJson.cookies.length === 2 && fromJson.cookies[0].expires === 1790000000 && fromJson.cookies[1].httpOnly && fromJson.cookies[1].expires === 0, fromJson);
+  const header = parseCookiesText('Cookie: SID=a; SAPISID=b; __Secure-3PAPISID=b; PREF=f6=8');
+  check('cookie header line', header.cookies.length === 4 && header.cookies.every((c) => c.domain === '.youtube.com') && header.cookies.find((c) => c.name === 'PREF')?.value === 'f6=8');
+  const googleOnly = parseCookiesText('.google.com\tTRUE\t/\tTRUE\t0\tSAPISID\tg\n.google.com\tTRUE\t/\tTRUE\t0\tSID\ts\n.google.com\tTRUE\t/\tTRUE\t0\tNID\tn');
+  check('google.com-only export: account cookies copied to youtube.com', googleOnly.cookies.filter((c) => c.domain === '.youtube.com').map((c) => c.name).sort().join() === 'SAPISID,SID' && googleOnly.warnings.length === 1, googleOnly);
+  for (const [label, text, status] of [
+    ['empty text', '   ', 400],
+    ['no cookies at all', 'hello world', 400],
+    ['no sign-in cookie', '.youtube.com\tTRUE\t/\tFALSE\t0\tPREF\tx', 400],
+  ] as const) {
+    let got = 0;
+    try {
+      parseCookiesText(text);
+    } catch (e) {
+      got = e instanceof YouTubeSessionError ? e.status : -1;
+    }
+    check(`rejects ${label}`, got === status, got);
+  }
+  const hash = sapisidHash('abc', 1700000000000);
+  check('SAPISIDHASH format', /^SAPISIDHASH 1700000000_[0-9a-f]{40}$/.test(hash), hash);
+  const menuIn = { responseContext: { mainAppWebResponseContext: { loggedOut: false } }, actions: [{ openPopupAction: { popup: { multiPageMenuRenderer: { header: { activeAccountHeaderRenderer: { accountName: { simpleText: 'Mario' }, channelHandle: { simpleText: '@mario' }, accountPhoto: { thumbnails: [{ url: 's' }, { url: 'l' }] } } } } } } }] };
+  const acc = accountFromMenu(menuIn);
+  check('account menu: name, handle, largest avatar', acc.loggedIn && acc.name === 'Mario' && acc.handle === 'mario' && acc.avatar === 'l', acc);
+  const out = accountFromMenu({ responseContext: { mainAppWebResponseContext: { loggedOut: true } }, actions: [] });
+  check('account menu: signed out', out.ok && !out.loggedIn, out);
 }
 
 /** A fake item: one format whose play URL expires at `expiresAt` (unix seconds; undefined = unknown). */

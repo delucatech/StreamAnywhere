@@ -4,7 +4,7 @@ import rateLimit from '@fastify/rate-limit';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { EXPLORE_CATEGORIES, YOUTUBE_CATEGORIES, platformOf } from '../../shared/types';
-import type { ConversationRequest, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ProbeRequest, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SendMessageRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
+import type { ConversationRequest, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ProbeRequest, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SendMessageRequest, SessionActionRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
 import { registerAuth } from './auth';
 import { config, findUp } from './config';
 import { registerProxyRoutes } from './proxy';
@@ -17,7 +17,8 @@ import { EXPLORE_DEFAULT_CATEGORY, FeedError, fetchExploreFeed, normalizeExplore
 import { cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouStock, logout, rememberLog, workState, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
 import { Reservoir, type ReservoirStats } from './reservoir';
 import { conversation, fetchProfile, followUser, inbox, inboxDebug, searchTikTok, sendMessage, SocialError } from './social';
-import { channelVideos, exploreYouTube, isYouTubeUrl, resolveYouTube, searchYouTube, youTubeCategory, YouTubeError } from './youtube';
+import { channelVideos, exploreYouTube, isYouTubeUrl, recommendedYouTube, resolveYouTube, searchYouTube, youTubeCategory, YouTubeError } from './youtube';
+import { setYouTubeSessionLogger, shutdownYouTubeSession, youtubeCancelLogin, youtubeCookieFile, youtubeLogout, youtubeSessionLog, youtubeSessionLost, youtubeSessionStatus, youtubeStartLogin, YouTubeSessionError } from './youtubeSession';
 
 /** After the browser path rescued an explore request, prefer it for a while (datacenter IPs). */
 let exploreViaBrowserUntil = 0;
@@ -106,14 +107,32 @@ function youtubeReservoir(categoryId: number, log: (m: string) => void): Reservo
 }
 export const youtubeStock = (): Record<string, ReservoirStats> => Object.fromEntries([...youtubeReservoirs].map(([k, v]) => [String(k), v.stats]));
 
-/** The guest-only YouTube sign-in status (sign-in is a later step; Explore and search work as a guest). */
-const youtubeSession = (): SessionStatus => ({
-  platform: 'youtube',
-  supported: false,
-  state: 'unsupported',
-  message: 'YouTube sign-in is coming later. Explore and search work without an account.',
-  error: 'YouTube sign-in is not available yet: this version is guest mode (Explore and search).',
-});
+/**
+ * The signed-in account's YouTube feed (youtube.com/feed/recommended through the saved cookies),
+ * stocked like the others. Each fill walks a different "load more" page of the home feed (YouTube
+ * re-samples the recommendations on every load, so the pages differ between fills as well).
+ */
+let youtubeForYou: Reservoir | undefined;
+function youtubeForYouReservoir(log: (m: string) => void): Reservoir {
+  if (!youtubeForYou) {
+    youtubeForYou = new Reservoir(
+      'youtube foryou',
+      async ({ count, index }) => {
+        const file = youtubeCookieFile();
+        if (!file) throw new FeedError('Not signed in to YouTube: sign in from Profile to see your For You feed.', 'youtube_not_signed_in', 401);
+        const res = await recommendedYouTube((index % 3) * count, count, file, log);
+        if (!res.items.length) {
+          // A signed-out visitor gets an empty recommended feed, not an error: ask YouTube who we are.
+          const lost = await youtubeSessionLost();
+          if (lost) throw new FeedError(`Not signed in to YouTube any more: ${lost}`, 'youtube_not_signed_in', 401);
+        }
+        return { items: res.items, warnings: res.items.length ? [] : ['YouTube returned no recommendations this time'] };
+      },
+      { log, batch: 30, target: 45, low: 25, gapMs: 1500 },
+    );
+  }
+  return youtubeForYou;
+}
 
 export async function buildServer() {
   const app = Fastify({
@@ -144,6 +163,7 @@ export async function buildServer() {
   // Site password: everything below (pages, API, media) needs the login cookie.
   registerAuth(app);
   setYtDlpLogger((m) => app.log.info({ what: 'yt-dlp' }, m));
+  setYouTubeSessionLogger((m) => app.log.info({ what: 'youtube-session' }, m));
 
   app.get('/api/health', async (): Promise<HealthResponse> => ({
     ok: true,
@@ -165,7 +185,7 @@ export async function buildServer() {
 
     if (isYouTubeUrl(url)) {
       try {
-        return await resolveYouTube(url, (m) => log(m));
+        return await resolveYouTube(url, (m) => log(m), youtubeCookieFile());
       } catch (e) {
         const err = e as Error;
         req.log.warn({ err: err.message }, 'youtube resolve failed');
@@ -277,7 +297,13 @@ export async function buildServer() {
     const warn = (err: string, msg: string) => app.log.warn({ platform, source, err }, msg);
     try {
       if (platform === 'youtube') {
-        if (source !== 'explore') throw new FeedError('No YouTube session: sign-in is coming later. Explore and search work as a guest.', 'youtube_guest_only', 401);
+        if (source === 'foryou') {
+          if (!youtubeCookieFile()) throw new FeedError('Not signed in to YouTube: sign in from Profile to see your For You feed.', 'youtube_not_signed_in', 401);
+          const r = await youtubeForYouReservoir(log).take(count);
+          const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0 };
+          log(`youtube foryou: ${r.items.length} served ${r.fromStock ? 'from stock' : 'after a fill'}, ${r.ready} ready, ${resp.elapsedMs} ms`);
+          return resp;
+        }
         const cat = youTubeCategory(b.category);
         const r = await youtubeReservoir(cat.id, log).take(count);
         const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0 };
@@ -394,20 +420,34 @@ export async function buildServer() {
     }
   });
 
-  app.get<{ Querystring: { platform?: string } }>('/api/session', async (req): Promise<SessionStatus> => (platformOf(req.query.platform) === 'youtube' ? youtubeSession() : sessionProbe()));
-  // The last sign-in log lines (what the server did on TikTok's page), for diagnosing without a shell.
-  app.get('/api/session/log', async () => sessionLog());
-  app.post<{ Body: SessionLoginRequest }>('/api/session/login', resolveLimit, async (req, reply) => {
+  app.get<{ Querystring: { platform?: string } }>('/api/session', async (req): Promise<SessionStatus> => (platformOf(req.query.platform) === 'youtube' ? youtubeSessionStatus() : sessionProbe()));
+  // The last sign-in log lines (what the server did on TikTok's page / with the YouTube cookies), for diagnosing without a shell.
+  app.get<{ Querystring: { platform?: string } }>('/api/session/log', async (req) => (platformOf(req.query.platform) === 'youtube' ? youtubeSessionLog() : sessionLog()));
+  // A cookies.txt export can run to a few hundred KB when a whole browser was exported (the server keeps youtube.com only).
+  app.post<{ Body: SessionLoginRequest }>('/api/session/login', { ...resolveLimit, bodyLimit: 4 * 1024 * 1024 }, async (req, reply) => {
+    const platform = platformOf(req.body?.platform);
     try {
+      if (platform === 'youtube') {
+        const mode = req.body?.mode === 'window' ? 'window' : 'cookies';
+        return await youtubeStartLogin(mode, typeof req.body?.cookies === 'string' ? req.body.cookies : undefined, (m) => req.log.info({ what: 'youtube-session' }, m));
+      }
       const mode = req.body?.mode === 'window' ? 'window' : 'qr';
       return await startLogin(mode, (m) => req.log.info(m));
     } catch (e) {
-      return reply.code(500).send({ ...sessionStatus(), error: (e as Error).message });
+      const status = e instanceof YouTubeSessionError ? e.status : 500;
+      const base = platform === 'youtube' ? await youtubeSessionStatus() : sessionStatus();
+      return reply.code(status).send({ ...base, error: (e as Error).message });
     }
   });
-  app.post('/api/session/logout', async () => logout());
+  app.post<{ Body: SessionActionRequest }>('/api/session/logout', async (req) => {
+    if (platformOf(req.body?.platform) === 'youtube') {
+      youtubeForYou = undefined;
+      return youtubeLogout();
+    }
+    return logout();
+  });
   // Cancels a pending sign-in and forgets its token/ticket/dialog (the next sign-in starts from zero).
-  app.post('/api/session/cancel', async () => cancelLogin());
+  app.post<{ Body: SessionActionRequest }>('/api/session/cancel', async (req) => (platformOf(req.body?.platform) === 'youtube' ? youtubeCancelLogin() : cancelLogin()));
   // Clicks / typing for TikTok's verification modal on the headless sign-in page (see SessionInputRequest).
   app.post<{ Body: SessionInputRequest }>('/api/session/input', async (req, reply) => {
     try {
@@ -419,7 +459,7 @@ export async function buildServer() {
 
   registerProxyRoutes(app);
 
-  app.get('/api/stats', async () => ({ mediaRecords: mediaCount(), exploreStock: exploreStock(), youtubeStock: youtubeStock(), forYouStock: forYouStock(), workPage: workState(), uptimeSec: Math.round(process.uptime()) }));
+  app.get('/api/stats', async () => ({ mediaRecords: mediaCount(), exploreStock: exploreStock(), youtubeStock: youtubeStock(), youtubeForYouStock: youtubeForYou?.stats, forYouStock: forYouStock(), workPage: workState(), uptimeSec: Math.round(process.uptime()) }));
 
   if (config.serveClient) {
     const dist = findUp(path.join('client', 'dist')) || findUp(path.join('client', 'dist'), process.cwd()) || path.resolve('client', 'dist');
@@ -447,7 +487,7 @@ if (require.main === module) {
         process.once(sig, () => {
           app.log.info({ sig }, 'shutting down');
           shutdownYtDlp();
-          void Promise.race([shutdownBrowsers(), new Promise((r) => setTimeout(r, 8000))]).finally(() => process.exit(0));
+          void Promise.race([Promise.all([shutdownBrowsers(), shutdownYouTubeSession()]), new Promise((r) => setTimeout(r, 8000))]).finally(() => process.exit(0));
         });
       }
     })

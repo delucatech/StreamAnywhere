@@ -1,5 +1,5 @@
 /**
- * YouTube, guest mode (no sign-in), through yt-dlp:
+ * YouTube through yt-dlp (guest for Shorts, search and channels; the saved cookies for the account):
  *
  *  - search:   `ytsearch<N>:<query>` with --flat-playlist (about 3-4 s a page of 20).
  *  - explore:  the Shorts tab of a hashtag page (youtube.com/hashtag/<tag>/shorts): vertical videos,
@@ -9,6 +9,8 @@
  *              token and answers 403), so the player gets two files: H.264 video (itag 160/133/134/
  *              135/136, 144p-720p) and AAC audio (itag 140), both fragmented MP4, both relayed by
  *              the proxy: googlevideo URLs are bound to the server's IP and carry no CORS header.
+ *  - foryou:   youtube.com/feed/recommended (the signed-in home feed) with the cookie file of the
+ *              YouTube sign-in (youtubeSession.ts); a signed-out visitor gets an empty list there.
  *
  * Measured 2026-10-12 from the dev machine and from the GCP VM (no bot check there for guests).
  */
@@ -103,10 +105,10 @@ const PAGE = 20;
  * A page of a flat listing. `target` is a yt-dlp URL or a `ytsearchN:` spec; yt-dlp walks the
  * continuation pages until it has `offset + count` entries (page 2 costs about a second more).
  */
-async function listFlat(target: (n: number) => string, offset: number, count: number, log: (m: string) => void): Promise<{ items: FeedItem[]; hasMore: boolean }> {
+async function listFlat(target: (n: number) => string, offset: number, count: number, log: (m: string) => void, cookieFile?: string): Promise<{ items: FeedItem[]; hasMore: boolean }> {
   const want = offset + count;
   const t0 = Date.now();
-  const json = await ytdlpInfo({ url: target(want), flat: true, playlistItems: `${offset + 1}-${want}` }, LIST_TIMEOUT_MS);
+  const json = await ytdlpInfo({ url: target(want), flat: true, playlistItems: `${offset + 1}-${want}`, cookieFile }, LIST_TIMEOUT_MS);
   const entries: any[] = Array.isArray(json?.entries) ? json.entries : [];
   const items: FeedItem[] = [];
   for (const e of entries) {
@@ -127,6 +129,15 @@ export async function searchYouTube(q: string, offset: number, log: (m: string) 
 export async function exploreYouTube(tag: string, page: number, count: number, log: (m: string) => void): Promise<{ items: FeedItem[]; hasMore: boolean }> {
   const safe = tag.replace(/[^\w]/g, '').toLowerCase() || 'shorts';
   return listFlat(() => `https://www.youtube.com/hashtag/${safe}/shorts`, page * count, count, log);
+}
+
+/**
+ * The signed-in account's recommendations (what youtube.com shows on its home page), through the
+ * saved cookies. `offset` walks the "load more" continuations (30 a page); YouTube answers a
+ * signed-out visitor with an empty list, which the caller turns into a sign-in check.
+ */
+export async function recommendedYouTube(offset: number, count: number, cookieFile: string, log: (m: string) => void): Promise<{ items: FeedItem[]; hasMore: boolean }> {
+  return listFlat(() => 'https://www.youtube.com/feed/recommended', offset, count, log, cookieFile);
 }
 
 /** A channel's videos (its /videos tab; Shorts live on /shorts and are listed when /videos is empty). */
@@ -163,30 +174,45 @@ export function pickAudio(formats: any[]): any | undefined {
   return aac.sort((a, b) => score(b) - score(a))[0];
 }
 
-/** Resolves one video: metadata plus proxy URLs for the H.264 video files and the AAC audio file. */
-export async function resolveYouTube(inputUrl: string, log: (m: string) => void): Promise<ResolveResponse> {
+/**
+ * Resolves one video: metadata plus proxy URLs for the H.264 video files and the AAC audio file.
+ * `cookieFile` (the YouTube sign-in) is used only when the guest extraction is refused (age gate,
+ * private video of the account, "sign in to confirm you're not a bot"): the guest path is the
+ * measured one, and it keeps the account's cookies out of every ordinary play.
+ */
+export async function resolveYouTube(inputUrl: string, log: (m: string) => void, cookieFile?: string): Promise<ResolveResponse> {
   const id = youTubeVideoId(inputUrl);
   if (!id) throw new YouTubeError('That is not a YouTube video URL', 400);
   const hit = cache.get(id);
   if (hit && Date.now() - hit.at < CACHE_MS) return hit.value;
   let p = inFlight.get(id);
   if (!p) {
-    p = resolveUncached(id, inputUrl, log).finally(() => inFlight.delete(id));
+    p = resolveUncached(id, inputUrl, log, cookieFile).finally(() => inFlight.delete(id));
     inFlight.set(id, p);
   }
   return p;
 }
 
-async function resolveUncached(id: string, inputUrl: string, log: (m: string) => void): Promise<ResolveResponse> {
+function classify(msg: string): YouTubeError {
+  if (/private|unavailable|not available|removed|does not exist|age/i.test(msg)) return new YouTubeError(msg, 404);
+  if (/sign in|bot|captcha/i.test(msg)) return new YouTubeError(`YouTube refused the request from this server: ${msg}`, 503);
+  return new YouTubeError(msg);
+}
+
+async function resolveUncached(id: string, inputUrl: string, log: (m: string) => void, cookieFile?: string): Promise<ResolveResponse> {
   const t0 = Date.now();
   let info: any;
   try {
     info = await ytdlpInfo({ url: `https://www.youtube.com/watch?v=${id}`, noplaylist: true }, RESOLVE_TIMEOUT_MS);
   } catch (e) {
-    const msg = (e as Error).message;
-    if (/private|unavailable|not available|removed|does not exist|age/i.test(msg)) throw new YouTubeError(msg, 404);
-    if (/sign in|bot|captcha/i.test(msg)) throw new YouTubeError(`YouTube refused the request from this server: ${msg}`, 503);
-    throw new YouTubeError(msg);
+    const guestErr = classify((e as Error).message);
+    if (!cookieFile) throw guestErr;
+    log(`youtube ${id}: guest extraction refused (${guestErr.message.slice(0, 120)}); retrying with the account's cookies`);
+    try {
+      info = await ytdlpInfo({ url: `https://www.youtube.com/watch?v=${id}`, noplaylist: true, cookieFile }, RESOLVE_TIMEOUT_MS);
+    } catch (e2) {
+      throw classify((e2 as Error).message);
+    }
   }
   const all: any[] = Array.isArray(info.formats) ? info.formats : [];
   const warnings: string[] = [];

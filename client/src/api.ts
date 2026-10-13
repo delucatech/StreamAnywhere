@@ -84,9 +84,9 @@ export const api = {
     if (!res.ok) throw new ApiError(`session ${res.status}`, res.status);
     return res.json();
   },
-  sessionLogin: (mode: LoginMode): Promise<SessionStatus> => post('/api/session/login', { mode }),
-  sessionLogout: (): Promise<SessionStatus> => post('/api/session/logout', {}),
-  sessionCancel: (): Promise<SessionStatus> => post('/api/session/cancel', {}),
+  sessionLogin: (mode: LoginMode, platform: Platform = 'tiktok', cookies?: string): Promise<SessionStatus> => post('/api/session/login', { mode, platform, cookies }),
+  sessionLogout: (platform: Platform = 'tiktok'): Promise<SessionStatus> => post('/api/session/logout', { platform }),
+  sessionCancel: (platform: Platform = 'tiktok'): Promise<SessionStatus> => post('/api/session/cancel', { platform }),
   sessionInput: (req: SessionInputRequest): Promise<SessionStatus> => post('/api/session/input', req),
   search: (req: SearchRequest): Promise<SearchResponse> => post('/api/search', req),
   profile: (req: ProfileRequest): Promise<ProfileResponse> => post('/api/profile', req),

@@ -30,6 +30,7 @@ Windows 10 (see **Test results** for exactly what was measured):
 | H.265 TikTok variants through WebCodecs | **Browser-dependent** – fails cleanly where `VideoDecoder.isConfigSupported` says no |
 | **Feed page** (`feed.html`): TikTok-style vertical stream, Explore feed without sign-in | **Working** (Node server and IIS handler) |
 | Feed page: personal **For You** feed after signing in to TikTok (QR code or window) | **Working mechanism** (signed-out test; QR rendered and refreshed); needs the Node server + Chrome/Edge/Chromium on that machine – see **Feed** |
+| **YouTube sign-in**: paste/upload the cookies of a signed-in browser (or a sign-in window on the server machine); **For You** = the account's recommendations | **Working mechanism** (built 2026-10-13; verified signed-out: cookie parsing, YouTube's account check, rejection paths. The signed-in feed itself awaits a real account) – see **YouTube** |
 | **Launcher** (`home.html`, the landing page): iPad-style icons that open each platform like an app | **Working** |
 | **YouTube, guest mode**: Shorts by hashtag, search, channels; picture + sound as two files played in sync | **Working** (Node server with yt-dlp) – see **YouTube** |
 
@@ -83,6 +84,8 @@ Configuration is optional. Copy `.env.example` to `server/.env` (or repo-root `.
 | `SERVE_CLIENT` | `false` | serve `client/dist` from the server (production) |
 | `BROWSER_PATH` | *(auto-detect)* | Chrome/Edge executable used for TikTok sign-in / For You (feed page) |
 | `TIKTOK_PROFILE_DIR` | `~/.streamanywhere/tiktok-profile` | browser profile that keeps the TikTok session (treat like a password) |
+| `YOUTUBE_COOKIES_FILE` | `~/.streamanywhere/youtube-cookies.txt` | the YouTube sign-in: a Netscape cookies.txt yt-dlp reads and refreshes (treat like a password) |
+| `YOUTUBE_PROFILE_DIR` | `~/.streamanywhere/youtube-profile` | browser profile of the YouTube sign-in *window* (deleted at sign-out) |
 | `ENABLE_BROWSER_SESSION` | `1` | set `0` to disable the sign-in feature entirely |
 | `LOG_LEVEL` | `info` | `debug` adds per-request logs |
 
@@ -230,7 +233,8 @@ Open **`/feed.html`** (from the launcher; `?platform=youtube` for YouTube). It i
   `@author_<id>.mp4`; if the direct fetch fails it goes through the server proxy.
 - Sources: **Explore** (TikTok's public explore feed, with the same categories as tiktok.com/explore;
   no sign-in; works with both the Node server and the IIS handler) and **For You** (your own feed
-  after signing in; Node server only).
+  after signing in; Node server only). On YouTube the two are **Shorts** (hashtag Shorts, guest)
+  and **For You** (the signed-in account's recommendations, see **YouTube**).
 - Playback uses the browser's `<video>` element (several items are kept warm, H.264 variant
   preferred, proxy fallback on error); the WebCodecs pipeline stays on the lab page.
 
@@ -300,6 +304,31 @@ Measured 2026-10-12 (dev machine and the GCP VM; the VM's IP is not bot-checked 
   CLI. The `<video>` fallback renderer cannot play two files and stays silent for YouTube; the
   download button saves the picture only.
 
+### YouTube sign-in (For You)
+
+Google refuses sign-ins from automated browsers, the TV-code flow (youtube.com/activate) hands out
+OAuth tokens that YouTube stopped honouring for yt-dlp in 2024, and the VM has no display for a
+Google window - so the YouTube sign-in is the way yt-dlp documents: **the cookies of a browser
+that is signed in**. Profile → the panel offers:
+
+- **Paste / choose cookies.txt**: on a computer, sign in at youtube.com in a *private window*,
+  export the cookies with a cookie-export extension ("Get cookies.txt LOCALLY" for Chrome/Edge,
+  "cookies.txt" for Firefox) while on youtube.com, close the private window (an open tab would
+  rotate the cookies behind the server's back), then paste the text or pick the file. A JSON
+  export of a cookie-editor extension and a copied `Cookie:` header are accepted too.
+- **Open sign-in window on server** (a desktop running the server, not the VM): a visible
+  Chrome/Edge with its own profile opens Google's sign-in; once youtube.com holds the account
+  cookies they are exported to the same file and the window closes.
+
+The server keeps only youtube.com / google.com cookies, checks them at once with YouTube's own
+account menu (`youtubei/v1/account/account_menu` with the site's `SAPISIDHASH` authorisation) and
+shows the account name, handle and avatar. The file (`YOUTUBE_COOKIES_FILE`) *is* the sign-in:
+yt-dlp reads it for the feed and writes rotated cookies back, a saved file is re-checked at start,
+and **Sign out** deletes it. **For You** lists `youtube.com/feed/recommended` (the account's home
+feed; a signed-out visitor gets an empty list, which triggers the account check). Playback stays
+the guest two-file path; the cookies are used for a video only when the guest extraction is
+refused (age gate, private video, bot check). `/api/session/log?platform=youtube` shows the steps.
+
 ## Diagnostics without a shell
 
 - **`/api/log`** (site password): the last 800 server log lines as text, newest last; `?n=100`,
@@ -308,7 +337,7 @@ Measured 2026-10-12 (dev machine and the GCP VM; the VM's IP is not bot-checked 
   device), so a problem on the Tesla or a phone can be read afterwards from any browser.
 - **`/api/health`** (public): build facts, yt-dlp and daemon status, uptime. **`/api/stats`**: feed
   stock per category, media records, the headless work page.
-- **`/api/session/log`**: the last TikTok sign-in steps.
+- **`/api/session/log`**: the last TikTok sign-in steps; `?platform=youtube` for the YouTube one.
 
 ## Using the app
 

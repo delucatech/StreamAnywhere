@@ -10,7 +10,8 @@
  *    ↑/↓ (or J/K) move, Space pauses, M mutes, F fullscreen, D downloads, A toggles auto-scroll,
  *    W hides the bars.
  *  - Right-hand action column: who posted it (profile), sound, save (download), auto-scroll,
- *    fullscreen. Bottom bar: Home, Friends, + (placeholders), Inbox (messages), Profile (sign-in).
+ *    fullscreen. Bottom bar: Home, Friends, + (placeholders), Inbox (messages), Profile (sign-in:
+ *    TikTok's QR code / window; YouTube's pasted cookies / window, see platforms.ts `signIn`).
  *  - Search (top bar) and account profiles (social.ts) hand the feed a play list: search results
  *    or an account's videos then play in place of the source, with a pill to go back. The video
  *    pauses while any panel (search, profile, inbox, sign-in) covers the feed and resumes on close.
@@ -70,6 +71,12 @@ const el = {
   navProfileLabel: $('navProfileLabel'),
   session: $('session'),
   sessionText: $('sessionText'),
+  sessionCookies: $<HTMLFormElement>('sessionCookies'),
+  sessionCookiesText: $<HTMLTextAreaElement>('sessionCookiesText'),
+  sessionCookiesFile: $<HTMLInputElement>('sessionCookiesFile'),
+  sessionCookiesPick: $<HTMLButtonElement>('sessionCookiesPick'),
+  sessionCookiesSend: $<HTMLButtonElement>('sessionCookiesSend'),
+  sessionCookiesResult: $('sessionCookiesResult'),
   sessionLogin: $<HTMLButtonElement>('sessionLogin'),
   sessionLoginWindow: $<HTMLButtonElement>('sessionLoginWindow'),
   sessionQr: $('sessionQr'),
@@ -313,6 +320,36 @@ el.sessionRefresh.addEventListener('click', () =>
 );
 el.sessionLogin.addEventListener('click', () => pressed(el.sessionLogin, () => startLogin('qr'), { label: 'Starting' }));
 el.sessionLoginWindow.addEventListener('click', () => pressed(el.sessionLoginWindow, () => startLogin('window'), { label: 'Opening' }));
+el.sessionLoginWindow.title = `Opens ${P.name}'s sign-in page in a visible browser window on the machine that runs the server`;
+// Cookie sign-in (YouTube): the pasted text (or the chosen file's text) goes to the server, which checks it with YouTube.
+el.sessionCookies.addEventListener('submit', (e) => {
+  e.preventDefault();
+  const text = el.sessionCookiesText.value.trim();
+  if (!text) {
+    showCookiesResult('err', 'Paste the cookies first, or choose the cookies.txt file.');
+    el.sessionCookiesText.focus();
+    return;
+  }
+  pressed(el.sessionCookiesSend, () => startLogin('cookies', text), { label: 'Checking with YouTube' });
+});
+el.sessionCookiesPick.addEventListener('click', () => el.sessionCookiesFile.click());
+el.sessionCookiesFile.addEventListener('change', () => {
+  const f = el.sessionCookiesFile.files?.[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    el.sessionCookiesText.value = String(reader.result || '');
+    el.sessionCookiesFile.value = '';
+    if (el.sessionCookiesText.value.trim()) el.sessionCookies.requestSubmit();
+    else showCookiesResult('err', `${f.name} is empty`);
+  };
+  reader.onerror = () => showCookiesResult('err', `Could not read ${f.name}`);
+  reader.readAsText(f);
+});
+function showCookiesResult(kind: 'ok' | 'err' | 'wait', text: string): void {
+  el.sessionCookiesResult.textContent = text;
+  el.sessionCookiesResult.className = `session-code-result ${kind}`;
+}
 el.sessionLogout.addEventListener('click', () => pressed(el.sessionLogout, () => signOut(), { label: 'Signing out' }));
 el.sessionCancel.addEventListener('click', () => pressed(el.sessionCancel, () => cancelLogin(), { label: 'Cancelling' }));
 el.sessionRestart.addEventListener('click', () =>
@@ -506,14 +543,19 @@ function renderSession(): void {
     return;
   }
   const lines: string[] = [];
-  if (!s.supported && P.id !== 'tiktok') {
-    // Platforms without a sign-in yet (YouTube guest mode): what works, nothing to press but Close.
-    lines.push(`<b>${esc(P.name)} sign-in is not available yet.</b>`);
-    lines.push(esc(s.message || P.signInHint));
+  const cookieSignIn = P.signIn === 'cookies';
+  if (!s.supported && cookieSignIn) {
+    lines.push(`<b>${esc(P.name)} sign-in is not available on this server.</b>`);
+    lines.push(esc(s.error || s.message || ''));
+    lines.push(`${esc(P.tabs.explore)} and search need the same thing, so they are unavailable here as well.`);
   } else if (!s.supported) {
     lines.push('<b>Sign-in is not available on this server.</b>');
     lines.push(s.error || '');
     lines.push('For You needs the Node server (npm run dev / npm start) on a machine with Chrome or Edge. The Explore feed works everywhere.');
+  } else if (s.state === 'logged_in' && cookieSignIn) {
+    lines.push(`<b>Signed in as @${esc(s.username || '?')}</b>${s.nickname && s.nickname !== s.username ? ` (${esc(s.nickname)})` : ''}`);
+    lines.push(`Your ${esc(P.tabs.foryou)} feed is ${esc(P.name)}'s own recommendations for this account. Sign out deletes the saved cookies on the server.`);
+    if (s.notice) lines.push(`<span style="color:var(--muted)">${esc(s.notice)}</span>`);
   } else if (s.state === 'logged_in') {
     lines.push(`<b>Signed in as @${esc(s.username || '?')}</b>${s.nickname && s.nickname !== s.username ? ` (${esc(s.nickname)})` : ''}`);
     lines.push('The For You feed comes from this account. Sign out closes the browser session and deletes the saved profile on the server.');
@@ -526,7 +568,14 @@ function renderSession(): void {
     if (!s.qr && /did not show/i.test(s.message || '')) lines.push(`<span style="color:var(--muted)">${esc(s.message || '')}</span>`);
   } else if (s.state === 'login_pending') {
     lines.push('<b>Waiting for sign-in…</b>');
-    lines.push('A TikTok window opened on the machine running the server. Sign in there (any method). This page updates automatically.');
+    lines.push(`A ${esc(cookieSignIn ? 'Google' : P.name)} sign-in window opened on the machine running the server. Sign in there (any method). This page updates automatically.`);
+  } else if (s.probing) {
+    lines.push('<b>Checking the saved sign-in…</b>');
+    lines.push(esc(s.message || ''));
+  } else if (cookieSignIn) {
+    lines.push('<b>Not signed in.</b>');
+    lines.push(`${esc(P.signInHint)} StreamAnywhere never sees your password.`);
+    if (s.error) lines.push(`<span style="color:var(--err)">${esc(s.error)}</span>`);
   } else {
     lines.push('<b>Not signed in.</b>');
     lines.push(`${esc(P.signInHint)} The session then lives in a private ${esc(s.browser || 'browser')} profile on the server. StreamAnywhere never sees your password.`);
@@ -564,8 +613,10 @@ function renderSession(): void {
   }
   const idle = s.supported && s.state !== 'logged_in' && s.state !== 'login_pending';
   const locked = showQr && s.qrState === 'verify' && s.verifyStep === 'code';
-  el.sessionLogin.classList.toggle('hidden', !idle);
+  el.sessionLogin.classList.toggle('hidden', !idle || cookieSignIn);
   el.sessionLoginWindow.classList.toggle('hidden', !idle);
+  el.sessionCookies.classList.toggle('hidden', !(idle && cookieSignIn && !s.probing));
+  if (!(idle && cookieSignIn)) el.sessionCookiesResult.classList.add('hidden');
   // "Sign out" only when there is a session to end; while a sign-in is pending the button is "Cancel".
   // In the code step only Cancel remains (Cancel forgets the attempt; "Sign in" then starts from zero).
   el.sessionLogout.classList.toggle('hidden', s.state !== 'logged_in');
@@ -645,12 +696,7 @@ async function refreshSession(announce = false): Promise<SessionStatus | undefin
     if (announce) toast(state.session.message || state.session.state);
     if (state.session.state === 'logged_in' && (prev === 'login_pending' || (restoreForYou && prevProbing))) {
       restoreForYou = false;
-      closeSessionPanel();
-      toast(`Signed in as @${state.session.username || '?'} – loading your ${P.tabs.foryou} feed`);
-      prefs.source = 'foryou';
-      savePrefs();
-      renderSourceUi();
-      void reload();
+      onSignedIn();
     } else if (restoreForYou && !state.session.probing) {
       // The profile check finished without a session: Explore stays, and the preference follows.
       restoreForYou = false;
@@ -692,19 +738,46 @@ function pollSession(): void {
   }, 2000);
 }
 
-async function startLogin(mode: LoginMode): Promise<void> {
+async function startLogin(mode: LoginMode, cookies?: string): Promise<void> {
   el.sessionLogin.disabled = el.sessionLoginWindow.disabled = true;
-  el.sessionText.innerHTML = mode === 'qr' ? '<b>Starting TikTok on the server…</b>\nThis can take up to a minute the first time (the browser has to start).' : '<b>Opening the sign-in window on the server…</b>';
+  if (mode === 'cookies') showCookiesResult('wait', 'Checking the cookies with YouTube…');
+  else el.sessionText.innerHTML = mode === 'qr' ? '<b>Starting TikTok on the server…</b>\nThis can take up to a minute the first time (the browser has to start).' : '<b>Opening the sign-in window on the server…</b>';
   try {
-    state.session = await api.sessionLogin(mode);
+    const prev = state.session?.state;
+    state.session = await api.sessionLogin(mode, P.id, cookies);
+    if (mode === 'cookies') {
+      el.sessionCookiesText.value = '';
+      el.sessionCookiesResult.classList.add('hidden');
+    }
     renderSession();
-    pollSession();
+    // The cookie sign-in finishes in the same request: straight to the account's feed.
+    if (state.session.state === 'logged_in' && prev !== 'logged_in') onSignedIn();
+    else pollSession();
   } catch (e) {
-    toast(`Sign-in could not start: ${errMsg(e)}`, true, 6000);
-    renderSession();
+    if (mode === 'cookies') {
+      const body = (e as ApiError)?.body as Partial<SessionStatus> | undefined;
+      if (body && typeof body === 'object' && 'state' in body) state.session = { ...(body as SessionStatus), error: undefined };
+      renderSession();
+      showCookiesResult('err', errMsg(e));
+      el.sessionCookiesText.focus();
+    } else {
+      toast(`Sign-in could not start: ${errMsg(e)}`, true, 6000);
+      renderSession();
+    }
   } finally {
     el.sessionLogin.disabled = el.sessionLoginWindow.disabled = false;
   }
+}
+
+/** A sign-in just completed: close the panel and switch to the account's feed. */
+function onSignedIn(): void {
+  signedOutPanelShown = false;
+  closeSessionPanel();
+  toast(`Signed in as @${state.session?.username || '?'} – loading your ${P.tabs.foryou} feed`);
+  prefs.source = 'foryou';
+  savePrefs();
+  renderSourceUi();
+  void reload();
 }
 
 /** Cancels a pending sign-in on the server and forgets it; the next "Sign in" starts from zero. */
@@ -720,7 +793,7 @@ async function cancelLogin(quiet = false): Promise<void> {
   resultSeenAt = 0;
   el.sessionCodeText.value = '';
   try {
-    state.session = await api.sessionCancel();
+    state.session = await api.sessionCancel(P.id);
     renderSession();
     if (!quiet) toast('Sign-in cancelled – "Sign in with QR code" starts over');
   } catch (e) {
@@ -733,9 +806,9 @@ async function cancelLogin(quiet = false): Promise<void> {
 
 async function signOut(cancelOnly = false): Promise<void> {
   el.sessionLogout.disabled = el.sessionCancel.disabled = true;
-  el.sessionText.innerHTML = '<b>Signing out…</b>\nClosing the browser session on the server (a few seconds).';
+  el.sessionText.innerHTML = P.signIn === 'cookies' ? '<b>Signing out…</b>\nDeleting the saved cookies on the server.' : '<b>Signing out…</b>\nClosing the browser session on the server (a few seconds).';
   try {
-    state.session = await api.sessionLogout();
+    state.session = await api.sessionLogout(P.id);
     renderSession();
     if (prefs.source === 'foryou') {
       prefs.source = 'explore';
@@ -905,7 +978,7 @@ async function loadMore(): Promise<number> {
     reportProblem('feed batch', `${sourceLabel()}: ${msg}`);
     if (state.emptyBatches === 1 || state.emptyBatches % 4 === 0) toast(`Feed: ${msg} – retrying`, true, 5000);
     if (!state.entries.length && state.emptyBatches >= 3) showEmpty(`Feed failed: ${msg}`);
-    if (prefs.source === 'foryou' && /not signed in|session/i.test(msg)) {
+    if (prefs.source === 'foryou' && /not signed in|session|sign in/i.test(msg)) {
       // The TikTok session is gone: retrying every 20 s would only reopen this panel again and again.
       // Stop the loop (signing in or switching the source calls reload(), which starts it afresh).
       state.exhausted = true;

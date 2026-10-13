@@ -30,7 +30,9 @@ export interface PlatformDef {
   tabs: { explore: string; foryou: string };
   /** Whether accounts can be followed / messaged (TikTok only) */
   social: boolean;
-  /** What the sign-in panel says while this platform cannot sign in */
+  /** How the sign-in panel's main button works: TikTok's QR code, or pasted/uploaded cookies (YouTube) */
+  signIn: 'qr' | 'cookies';
+  /** What the sign-in panel says before a sign-in */
   signInHint: string;
 }
 
@@ -48,6 +50,7 @@ export const PLATFORMS: PlatformDef[] = [
     defaultCategory: 120,
     tabs: { explore: 'Explore', foryou: 'For You' },
     social: true,
+    signIn: 'qr',
     signInHint: '"Sign in with QR code" shows TikTok\'s login QR here; scan it with the TikTok app on your phone.',
   },
   {
@@ -63,7 +66,8 @@ export const PLATFORMS: PlatformDef[] = [
     defaultCategory: 0,
     tabs: { explore: 'Shorts', foryou: 'For You' },
     social: false,
-    signInHint: 'YouTube sign-in is coming later. Explore and search work without an account.',
+    signIn: 'cookies',
+    signInHint: 'Sign in with the cookies of a browser that is signed in to YouTube: paste a cookies.txt export below (or choose the file). The server checks them with YouTube and keeps only the youtube.com ones.',
   },
 ];
 

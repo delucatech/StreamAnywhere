@@ -383,11 +383,21 @@ export const YOUTUBE_CATEGORIES: YouTubeCategory[] = [
 export type SessionState = 'unsupported' | 'none' | 'login_pending' | 'logged_in' | 'error';
 
 /** 'qr' = TikTok's QR login rendered by a headless page and shown in the feed page (works on servers
- *  without a display); 'window' = a visible browser window on the server machine. */
-export type LoginMode = 'qr' | 'window';
+ *  without a display); 'window' = a visible browser window on the server machine (TikTok and YouTube);
+ *  'cookies' = YouTube: the cookies of a browser that is signed in, pasted or uploaded (works everywhere). */
+export type LoginMode = 'qr' | 'window' | 'cookies';
 
 export interface SessionLoginRequest {
+  /** Which platform to sign in to (default tiktok) */
+  platform?: Platform;
   mode?: LoginMode;
+  /** mode 'cookies': the text of a cookies.txt export (Netscape format), a cookie extension's JSON export, or a Cookie: header */
+  cookies?: string;
+}
+
+/** Body of /api/session/logout and /api/session/cancel */
+export interface SessionActionRequest {
+  platform?: Platform;
 }
 
 /** Input forwarded to the server's sign-in page while TikTok asks for an extra verification there.
