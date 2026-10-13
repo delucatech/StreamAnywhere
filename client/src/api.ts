@@ -47,13 +47,14 @@ export class ApiError extends Error {
 }
 
 /** 401 = the site password cookie is missing or expired: back to the server's login page. */
-function toLoginOn401(res: Response): void {
-  if (res.status === 401 && !apiBase) location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search);
+/** The site password cookie is gone: the server's own 401 names its login page. A platform's "not signed in" 401 does not. */
+function toLoginOn401(res: Response, body?: unknown): void {
+  const login = (body as { login?: unknown } | undefined)?.login;
+  if (res.status === 401 && !apiBase && (body === undefined || typeof login === 'string')) location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search);
 }
 
 async function post<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(apiUrl(path), { method: 'POST', mode: 'cors', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-  toLoginOn401(res);
   const text = await res.text();
   let json: unknown;
   try {
@@ -61,6 +62,7 @@ async function post<T>(path: string, body: unknown): Promise<T> {
   } catch {
     json = text;
   }
+  toLoginOn401(res, json ?? null);
   if (!res.ok) {
     const msg = (json as { error?: string })?.error || `${res.status} ${res.statusText}`;
     throw new ApiError(msg, res.status, json);
@@ -78,8 +80,8 @@ export const api = {
   probe: (url: string): Promise<ServerProbe> => post('/api/probe', { url, origin: location.origin }),
   report: (req: ReportRequest): Promise<void> => post('/api/report', req).then(() => undefined, () => undefined),
   feed: (req: FeedRequest): Promise<FeedResponse> => post('/api/feed', req),
-  session: async (platform: Platform = 'tiktok'): Promise<SessionStatus> => {
-    const res = await fetch(apiUrl(`/api/session?platform=${platform}`), { mode: 'cors', credentials: 'same-origin' });
+  session: async (platform: Platform = 'tiktok', recheck = false): Promise<SessionStatus> => {
+    const res = await fetch(apiUrl(`/api/session?platform=${platform}${recheck ? '&recheck=1' : ''}`), { mode: 'cors', credentials: 'same-origin' });
     toLoginOn401(res);
     if (!res.ok) throw new ApiError(`session ${res.status}`, res.status);
     return res.json();

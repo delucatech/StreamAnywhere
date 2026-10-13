@@ -178,8 +178,12 @@ const state = {
   wantNext: false,
   /** Consecutive batches that brought nothing (drives the retry delay) */
   emptyBatches: 0,
+  /** ms epoch before which no batch is requested: the server said the platform is limiting it (HTTP 429) */
+  pauseUntil: 0,
   retryTimer: 0,
 };
+/** How long a 429 ("limited, try later") from the server pauses the feed's retries. */
+const LIMITED_PAUSE_MS = 120_000;
 
 // ---------- helpers ----------
 let toastTimer = 0;
@@ -338,7 +342,7 @@ el.sessionRefresh.addEventListener('click', () =>
     el.sessionRefresh,
     async () => {
       sessionPollFailures = 0;
-      await refreshSession(true);
+      await refreshSession(true, true);
       // A sign-in or profile check still running on the server is followed again from here.
       if (state.session?.state === 'login_pending' || state.session?.probing) pollSession();
     },
@@ -724,11 +728,11 @@ let booting = true;
 /** A signed-in account watches its own feed unless the viewer tapped Explore while signed in. */
 const wantsForYou = (): boolean => prefs.pick !== 'user' || prefs.source === 'foryou';
 
-async function refreshSession(announce = false): Promise<SessionStatus | undefined> {
+async function refreshSession(announce = false, recheck = false): Promise<SessionStatus | undefined> {
   try {
     const prev = state.session?.state;
     const prevProbing = Boolean(state.session?.probing);
-    state.session = await api.session(P.id);
+    state.session = await api.session(P.id, recheck);
     sessionPollFailures = 0;
     if (state.session.state === 'logged_in') signedOutPanelShown = false;
     renderSession();
@@ -805,6 +809,8 @@ async function startLogin(mode: LoginMode, cookies?: string): Promise<void> {
       renderSession();
       showCookiesResult('err', errMsg(e));
       el.sessionCookiesText.focus();
+      // The failed paste may have started a check of the saved file: follow it so the form comes back.
+      if (state.session?.probing || state.session?.state === 'login_pending') pollSession();
     } else {
       toast(`Sign-in could not start: ${errMsg(e)}`, true, 6000);
       renderSession();
@@ -938,6 +944,7 @@ async function reload(preloaded?: FeedItem[], startIndex = 0): Promise<void> {
   state.active = -1;
   state.exhausted = false;
   state.emptyBatches = 0;
+  state.pauseUntil = 0;
   state.wantNext = false;
   el.feed.innerHTML = '';
   el.feed.scrollTop = 0;
@@ -1014,7 +1021,7 @@ async function loadMore(): Promise<number> {
         state.exhausted = true;
         if (state.mode.kind !== 'source' && state.entries.length) toast('That was the last video of this list', false, 4000);
       }
-    } else state.emptyBatches = 0;
+    } else state.emptyBatches = state.pauseUntil = 0;
     if (!state.entries.length && state.emptyBatches >= 3) showEmpty(r.warnings[0] || 'The feed returned no playable videos. Try again or pick another category.');
     if (state.active < 0 && state.entries.length) setActive(0);
   } catch (e) {
@@ -1023,7 +1030,9 @@ async function loadMore(): Promise<number> {
     const msg = errMsg(e);
     console.warn('[feed] batch failed:', msg);
     reportProblem('feed batch', `${sourceLabel()}: ${msg}`);
-    if (state.emptyBatches === 1 || state.emptyBatches % 4 === 0) toast(`Feed: ${msg} – retrying`, true, 5000);
+    // A 429 means the platform is limiting the server: asking every few seconds only lengthens that.
+    if (e instanceof ApiError && e.status === 429) state.pauseUntil = Date.now() + LIMITED_PAUSE_MS;
+    if (state.emptyBatches === 1 || state.emptyBatches % 4 === 0) toast(`Feed: ${msg} – ${state.pauseUntil > Date.now() ? `next try in ${Math.round((state.pauseUntil - Date.now()) / 1000)} s` : 'retrying'}`, true, 5000);
     if (!state.entries.length && state.emptyBatches >= 3) showEmpty(`Feed failed: ${msg}`);
     if ((prefs.source === 'foryou' || P.loginRequired) && /not signed in|session|sign in|needs a sign-in/i.test(msg)) {
       // The TikTok session is gone: retrying every 20 s would only reopen this panel again and again.
@@ -1056,7 +1065,7 @@ function scheduleMoreIfNeeded(): void {
   if (state.exhausted || state.loading) return;
   const ahead = state.entries.length - 1 - state.active;
   if (ahead >= AHEAD) return;
-  const delay = state.emptyBatches === 0 ? 0 : Math.min(20_000, 3000 * 2 ** (state.emptyBatches - 1));
+  const delay = Math.max(state.emptyBatches === 0 ? 0 : Math.min(20_000, 3000 * 2 ** (state.emptyBatches - 1)), state.pauseUntil - Date.now());
   if (delay) showRetryStatus(delay);
   state.retryTimer = window.setTimeout(() => void loadMore(), delay);
 }

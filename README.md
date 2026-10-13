@@ -89,7 +89,7 @@ Configuration is optional. Copy `.env.example` to `server/.env` (or repo-root `.
 | `TIKTOK_PROFILE_DIR` | `~/.streamanywhere/tiktok-profile` | browser profile that keeps the TikTok session (treat like a password) |
 | `YOUTUBE_COOKIES_FILE` | `~/.streamanywhere/youtube-cookies.txt` | the YouTube sign-in: a Netscape cookies.txt yt-dlp reads and refreshes (treat like a password) |
 | `YOUTUBE_PROFILE_DIR` | `~/.streamanywhere/youtube-profile` | browser profile of the YouTube sign-in *window* (deleted at sign-out) |
-| `INSTAGRAM_COOKIES_FILE` | `~/.streamanywhere/instagram-cookies.txt` | the Instagram sign-in (Netscape cookies.txt; treat like a password) |
+| `INSTAGRAM_COOKIES_FILE` | `~/.streamanywhere/instagram-cookies.txt` | the Instagram sign-in (Netscape cookies.txt; treat like a password); `…cookies.meta.json` next to it keeps the User-Agent the cookies came from |
 | `INSTAGRAM_PROFILE_DIR` / `INSTAGRAM_LOGIN_PROFILE_DIR` | `~/.streamanywhere/instagram-profile` / `…-login-profile` | profile of the headless Instagram browser / of the sign-in *window* (both deleted at sign-out) |
 | `INSTAGRAM_CATALOG_FILE` | `~/.streamanywhere/instagram-catalog.json` | each account's last listed Reels (a cache; deleting it is harmless) |
 | `ENABLE_BROWSER_SESSION` | `1` | set `0` to disable the sign-in feature entirely |
@@ -373,14 +373,48 @@ saved cookies check out. Why there is no guest mode, measured 2026-10-13 from th
 Instagram has no QR/TV-code login and challenges scripted password logins, so - like YouTube - the
 sign-in is **the cookies of a browser that is signed in** (paste / choose `cookies.txt`, or a sign-in
 window on the machine running the server; a `sessionid` must be among them). The server keeps only
-instagram.com cookies in `INSTAGRAM_COOKIES_FILE`, loads them into its headless browser and checks
-them at once with Instagram (`/api/v1/accounts/current_user/`): bad cookies are refused (verified:
-Instagram answers 401), a saved sign-in is dropped only after two "signed out" answers. **For You** is
-the account's Reels page (`/reels/`): its GraphQL answers are captured while the page is paged with the
-keyboard and only the post *codes* are taken from them - the playable file always comes from the embed
-page. **This signed-in half could not be tried without an account**; `/api/session/log?platform=instagram`
-shows what Instagram answered at each step. Automation on a real account can make Instagram ask for a
-checkpoint: the server is deliberately slow and sparse, but keep that in mind.
+instagram.com cookies in `INSTAGRAM_COOKIES_FILE`, next to them the **identity of the browser they came
+from** (`…cookies.meta.json`: the paste request's own `User-Agent`, or the sign-in window's) - Instagram
+ties a web session to the browser that made it and answers `useragent mismatch` otherwise - and its
+headless browser presents that identity (with matching client hints for Chrome/Edge). Paste from the
+browser you exported with, and export the whole file: a thin export (no `mid`, `ig_did`, `datr`) is
+accepted with a warning.
+
+The cookies are loaded into the headless browser and **checked at once**, in three steps, because
+Instagram refuses its account API from a datacenter address (the GCP VM gets **429 at once** for
+`/api/v1/accounts/current_user/`, while the dev machine gets a plain 401 for bad cookies):
+
+1. the account API - 200 names the account; `login_required` (401/403) = bad cookies, refused (verified);
+   a 429, or its throttle text ("Please wait a few minutes…", which can come with `require_login: true`
+   for good cookies too) says nothing about the cookies;
+2. the settings page `/accounts/edit/` - only a signed-in account stays on it (and the page names the
+   account); a redirect to the login page = signed out, unless it carries Instagram's rate-limit flag
+   (`is_from_rle`), a bare 429 for the page = the address is limited, `/challenge/` = the account must
+   confirm "it was me" in your own browser first (403 to the client);
+3. when neither could say, cookies with the **shape of a session** (`sessionid` = `<account id>:<token>…`
+   agreeing with `ds_user_id`) are **kept as a provisional sign-in** (`Signed in as @user<id>`, "not yet
+   confirmed"), because every tool that reads Instagram (yt-dlp, gallery-dl, instaloader) does the same:
+   it trusts the sessionid and learns from a login redirect later. The first **For You** fill settles
+   it: a served Reels page confirms the sign-in (and names the account), a login redirect without the
+   rate-limit flag triggers one more full check and a conclusive "signed out" deletes the cookies.
+   A saved sign-in Instagram will not check is tried again every 10 minutes, a few times, never faster
+   (quick retries lengthen Instagram's throttle); the feed does not ask for a verdict again within
+   those 10 minutes either, a refused page (429, rate-limit redirect) pauses signed-in page loads for
+   10 minutes, and the feed page waits 2 minutes after a 429 instead of retrying every few seconds.
+   Between tries the sign-in panel shows the reason (a checkpoint, the wrong browser identity, cookies
+   that are no session) and the cookies form, so a fresh export can be pasted. Instagram also **deletes a `sessionid` it rejects**
+   (verified with bad cookies): that counts as "signed out" whatever the pages said, and a login
+   redirect that leaves the cookie in place while the address is limited is no verdict (provisional).
+
+**For You** is the account's Reels page (`/reels/`): its GraphQL answers are captured while the page
+is paged with the keyboard and only the post *codes* are taken from them - the playable file always
+comes from the embed page. **This signed-in half could not be tried without an account**;
+`/api/session/log?platform=instagram` shows what Instagram answered at each step (the first words of
+each refused answer's body included) and `/api/stats` → `instagram.lastAccountCheck` the last verdict.
+If the VM's address is on Instagram's datacenter list, no cookie fixes it: the pages themselves come
+back 429 or go to the login page; only another egress address (a residential proxy) would. Automation
+on a real account can make Instagram ask for a checkpoint: the server is deliberately slow and sparse,
+but keep that in mind.
 
 ## Diagnostics without a shell
 

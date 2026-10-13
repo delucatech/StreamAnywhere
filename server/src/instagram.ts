@@ -153,14 +153,137 @@ export function handleFromQuery(q: string): string | undefined {
 
 // ---------------------------------------------------------------- hooks from the sign-in module
 
-let cookieSource: (() => ParsedCookie[] | undefined) | undefined;
-let signedInFn: (() => boolean) | undefined;
-/** instagramSession.ts tells this module where the saved cookies are and whether the account is signed in. */
-export function setSessionHooks(h: { cookies: () => ParsedCookie[] | undefined; signedIn: () => boolean }): void {
-  cookieSource = h.cookies;
-  signedInFn = h.signedIn;
+export interface SessionHooks {
+  /** The saved sign-in's cookies (loaded into the browser when it starts). */
+  cookies: () => ParsedCookie[] | undefined;
+  /** Whether the server treats the account as signed in (a provisional, unconfirmed sign-in counts). */
+  signedIn: () => boolean;
+  /** A signed-in-only page came back for the saved cookies: they work (with the account's name when the page showed it). */
+  confirmed?: (username?: string) => void;
+  /** The User-Agent of the browser the saved cookies came from: Instagram ties a web session to it. */
+  userAgent?: () => string | undefined;
+  /** A signed-in page ran into something the person must act on (a checkpoint): shown with the sign-in status. */
+  trouble?: (message: string) => void;
 }
-const signedIn = (): boolean => Boolean(signedInFn?.());
+let hooks: SessionHooks | undefined;
+/** instagramSession.ts tells this module where the saved cookies are and whether the account is signed in. */
+export function setSessionHooks(h: SessionHooks): void {
+  hooks = h;
+}
+const cookieSource = (): ParsedCookie[] | undefined => hooks?.cookies();
+const signedIn = (): boolean => Boolean(hooks?.signedIn());
+
+/**
+ * Where Instagram sends a page it will not show: its login page (signed out - or, with the `is_from_rle`
+ * flag, the server's address is rate-limited and the cookies are not the problem), or a checkpoint page
+ * (the account must confirm "it was me" in the person's own browser).
+ */
+export function sentAway(url: string): { kind: 'login' | 'limited' | 'checkpoint' } | undefined {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return undefined;
+  }
+  if (/^\/accounts\/login/.test(u.pathname)) return { kind: u.searchParams.has('is_from_rle') ? 'limited' : 'login' };
+  if (/^\/(challenge|accounts\/suspended|accounts\/disabled)/.test(u.pathname)) return { kind: 'checkpoint' };
+  return undefined;
+}
+
+/** After Instagram refused a signed-in page for the address: no such page is loaded again for this long (quick retries lengthen the throttle). */
+const LIMITED_PAUSE_MS = 10 * 60 * 1000;
+let limitedUntil = 0;
+const limitedForSec = (): number => Math.max(0, Math.ceil((limitedUntil - Date.now()) / 1000));
+/** Remembers that Instagram is limiting this server's address for its pages right now. */
+function markLimited(): void {
+  limitedUntil = Math.max(limitedUntil, Date.now() + LIMITED_PAUSE_MS);
+}
+/** index.ts: Instagram gave no verdict on a login redirect - the Reels page is left alone for a while as well. */
+export const pauseInstagramPages = (): void => markLimited();
+/** Throws the 429 at once while a recent refusal lasts, instead of asking Instagram again. */
+function throwIfLimited(what: string): void {
+  if (Date.now() < limitedUntil) throw new InstagramError(`Instagram is limiting this server's address; ${what} is not tried again for another ${Math.max(1, Math.ceil(limitedForSec() / 60))} min.`, 429, 'instagram_rate_limited');
+}
+
+/** Throws when Instagram refused to serve a page at all (a bare 429 is how it treats a flagged address). */
+function throwIfRefused(status: number, what: string): void {
+  if (status === 429) {
+    markLimited();
+    throw new InstagramError(`Instagram is limiting this server's address right now (${what} answered 429); next try in ${Math.round(LIMITED_PAUSE_MS / 60000)} min.`, 429, 'instagram_rate_limited');
+  }
+  if (status >= 400) throw new InstagramError(`Instagram answered ${status} for ${what}`, 502, 'instagram_error');
+}
+
+/** Throws the matching error when a signed-in page was redirected away (see sentAway). */
+function throwIfSentAway(url: string, what: string): void {
+  const away = sentAway(url);
+  if (!away) return;
+  if (away.kind === 'limited') {
+    markLimited();
+    throw new InstagramError(`Instagram is limiting this server's address right now (${what} was sent to the login page with the rate-limit flag); next try in ${Math.round(LIMITED_PAUSE_MS / 60000)} min.`, 429, 'instagram_rate_limited');
+  }
+  if (away.kind === 'checkpoint') {
+    const msg = `Instagram wants a verification for this account from this server's address (${what} was sent to ${new URL(url).pathname}). Open instagram.com in your own browser, confirm it was you, then sign out here and sign in again with fresh cookies.`;
+    hooks?.trouble?.(msg);
+    throw new InstagramError(msg, 403, 'instagram_checkpoint');
+  }
+  throw new InstagramError(`Instagram signed this server out (${what} was sent to the login page); sign in again from Profile.`, 401, 'instagram_not_signed_in');
+}
+
+/**
+ * Runs inside a signed-in page: the account's username, from the viewer record Instagram embeds in
+ * every page of a signed-in session, else from the Profile link of the side bar. '' when neither is there.
+ */
+const VIEWER_JS = String.raw`(() => {
+  for (const s of document.scripts) {
+    const t = s.textContent || '';
+    const i = t.indexOf('"PolarisViewer"');
+    if (i < 0) continue;
+    const m = /"username":"([\w.]{1,40})"/.exec(t.slice(i, i + 6000));
+    if (m) return m[1];
+  }
+  for (const a of document.querySelectorAll('a[href]')) {
+    const href = a.getAttribute('href') || '';
+    if (/^\/[\w.]{1,40}\/$/.test(href) && a.querySelector('img[alt$="profile picture"]') && /^\s*Profile\s*$/i.test(a.textContent || '')) return href.slice(1, -1);
+  }
+  return '';
+})()`;
+async function viewerName(p: Page): Promise<string> {
+  try {
+    const v = (await p.evaluate(VIEWER_JS)) as unknown;
+    return typeof v === 'string' && /^[\w.]{1,40}$/.test(v) ? v : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Client-hint metadata that agrees with a Chromium-family User-Agent string, so the `sec-ch-ua*`
+ * headers the browser sends match the identity it claims; undefined for other browsers (the string
+ * alone is set then).
+ */
+export function uaMetadata(ua: string): { brands: { brand: string; version: string }[]; fullVersionList: { brand: string; version: string }[]; fullVersion: string; platform: string; platformVersion: string; architecture: string; bitness: string; wow64: boolean; model: string; mobile: boolean } | undefined {
+  const chrome = /\bChrome\/(\d+)(?:\.(\d+\.\d+\.\d+))?/.exec(ua);
+  if (!chrome || /\bFirefox\//.test(ua)) return undefined;
+  const major = chrome[1];
+  const chromeFull = chrome[2] ? `${major}.${chrome[2]}` : `${major}.0.0.0`;
+  const edge = /\bEdg\/(\d+)(?:\.(\d+\.\d+\.\d+))?/.exec(ua);
+  const edgeFull = edge ? (edge[2] ? `${edge[1]}.${edge[2]}` : `${edge[1]}.0.0.0`) : '';
+  const brands = [{ brand: 'Chromium', version: major }, { brand: edge ? 'Microsoft Edge' : 'Google Chrome', version: edge ? edge[1] : major }, { brand: 'Not_A Brand', version: '24' }];
+  // The high-entropy hints too, or the browser fills them with its real (headless) brand and version.
+  const fullVersionList = [{ brand: 'Chromium', version: chromeFull }, { brand: edge ? 'Microsoft Edge' : 'Google Chrome', version: edge ? edgeFull : chromeFull }, { brand: 'Not_A Brand', version: '24.0.0.0' }];
+  const platform = /Windows/.test(ua) ? 'Windows' : /Android/.test(ua) ? 'Android' : /iPhone|iPad/.test(ua) ? 'iOS' : /Mac OS X/.test(ua) ? 'macOS' : /CrOS/.test(ua) ? 'Chrome OS' : 'Linux';
+  const mobile = /\bMobile\b/.test(ua);
+  const handheld = mobile || platform === 'Android' || platform === 'iOS';
+  return { brands, fullVersionList, fullVersion: edge ? edgeFull : chromeFull, platform, platformVersion: platform === 'Windows' ? '10.0.0' : platform === 'macOS' ? '14.0.0' : '', architecture: handheld ? '' : 'x86', bitness: handheld ? '' : '64', wow64: false, model: '', mobile };
+}
+
+/** Makes the page present `ua` (with matching client hints for a Chromium-family string). */
+async function applyUserAgent(p: Page, ua: string): Promise<void> {
+  const meta = uaMetadata(ua);
+  if (meta) await p.setUserAgent(ua, meta);
+  else await p.setUserAgent(ua);
+}
 
 /** Instagram does not serve guests at all (its pages and APIs ask for a login): everything here needs the saved sign-in. */
 function requireSignedIn(): void {
@@ -240,14 +363,15 @@ async function workPage(): Promise<Page> {
   if (page && !page.isClosed()) return page;
   const first = (await b.pages())[0];
   const p = first && first.url() === 'about:blank' ? first : await b.newPage();
-  await p.setUserAgent((await b.userAgent()).replace('HeadlessChrome', 'Chrome'));
+  // The identity of the browser the cookies came from, when known: Instagram ties a session to it.
+  await applyUserAgent(p, hooks?.userAgent?.() || (await b.userAgent()).replace('HeadlessChrome', 'Chrome'));
   await p.setRequestInterception(true);
   p.on('request', (req) => {
     const t = req.resourceType();
     if (t === 'image' || t === 'media' || t === 'font') req.abort().catch(() => undefined);
     else req.continue().catch(() => undefined);
   });
-  const saved = cookieSource?.();
+  const saved = cookieSource();
   if (saved?.length) await p.setCookie(...cookieParams(saved));
   page = p;
   await p.goto(`${ORIGIN}/robots.txt`, { waitUntil: 'domcontentloaded', timeout: 40_000 });
@@ -560,7 +684,7 @@ interface ProfileState {
  * paging while the page is scrolled, up to `want`).
  */
 async function scrapeProfile(handle: string, want: number, log: (m: string) => void): Promise<CatalogEntry> {
-  if (Date.now() < blockedUntil) throw new InstagramError(`Instagram is limiting profile pages from this server's address for another ${Math.ceil(blockedForSec() / 60)} min. Sign in (Profile) to avoid the limit, or try again later.`, 429, 'instagram_rate_limited');
+  if (Date.now() < blockedUntil) throw new InstagramError(`Instagram is limiting profile pages from this server's address for another ${Math.ceil(blockedForSec() / 60)} min; they are tried again after that.`, 429, 'instagram_rate_limited');
   const hourAgo = Date.now() - 3600_000;
   while (profileLoads.length && profileLoads[0] < hourAgo) profileLoads.shift();
   if (profileLoads.length >= PROFILE_BUDGET_PER_HOUR) throw new InstagramError('Too many Instagram profile loads this hour (Instagram blocks a server that loads many); try again in a few minutes.', 429, 'instagram_budget');
@@ -579,7 +703,7 @@ async function scrapeProfile(handle: string, want: number, log: (m: string) => v
         blockedUntil = Date.now() + pause;
         note(`@${handle}: Instagram redirected to the login page (profile rate limit); no profile loads for ${Math.round(pause / 60000)} min`);
         await p.goto(`${ORIGIN}/robots.txt`, { waitUntil: 'domcontentloaded' }).catch(() => undefined);
-        throw new InstagramError("Instagram is limiting profile pages from this server's address. Sign in (Profile) to avoid the limit, or try again in a while.", 429, 'instagram_rate_limited');
+        throw new InstagramError(`Instagram is limiting profile pages from this server's address; they are tried again in ${Math.round(pause / 60000)} min.`, 429, 'instagram_rate_limited');
       }
       if (/isn't available|page not found/i.test(st.title) || /Sorry, this page isn't available/i.test(st.text)) throw new InstagramError(`@${handle} was not found on Instagram`, 404, 'instagram_not_found');
       if (/This account is private/i.test(st.text)) throw new InstagramError(`@${handle} is a private account`, 403, 'instagram_private');
@@ -707,7 +831,8 @@ export async function exploreInstagram(catId: number, want: number, log: (m: str
  */
 export async function forYouInstagram(want: number, log: (m: string) => void): Promise<{ items: FeedItem[]; warnings: string[] }> {
   requireSignedIn();
-  const codes = await withPage(async (p) => {
+  throwIfLimited('the Reels page');
+  const { codes, viewer } = await withPage(async (p) => {
     const found = new Set<string>();
     const onResponse = (res: import('puppeteer-core').HTTPResponse): void => {
       const u = res.url();
@@ -721,23 +846,28 @@ export async function forYouInstagram(want: number, log: (m: string) => void): P
     };
     p.on('response', onResponse);
     try {
-      await p.goto(`${ORIGIN}/reels/`, { waitUntil: 'domcontentloaded', timeout: 40_000 });
+      const nav = await p.goto(`${ORIGIN}/reels/`, { waitUntil: 'domcontentloaded', timeout: 40_000 });
+      throwIfRefused(nav?.status() ?? 0, 'the Reels page');
       const t0 = Date.now();
       for (let step = 0; step < 14 && found.size < want && Date.now() - t0 < 25_000; step++) {
         await sleep(1200);
         const here = /\/reels\/([\w-]{5,20})/.exec(new URL(p.url()).pathname)?.[1];
         if (here && CODE.test(here)) found.add(here);
-        if (/^\/accounts\/login/.test(new URL(p.url()).pathname)) throw new InstagramError('Instagram signed this server out; sign in again from Profile.', 401, 'instagram_not_signed_in');
+        throwIfSentAway(p.url(), 'the Reels page');
         await p.keyboard.press('ArrowDown');
       }
+      throwIfSentAway(p.url(), 'the Reels page');
+      // Only a signed-in account gets the Reels page: name it, for a sign-in Instagram would not confirm.
+      const viewer = found.size ? await viewerName(p) : '';
+      return { codes: [...found], viewer };
     } finally {
       p.off('response', onResponse);
       await p.goto(`${ORIGIN}/robots.txt`, { waitUntil: 'domcontentloaded' }).catch(() => undefined);
     }
-    return [...found];
   });
-  log(`instagram foryou: ${codes.length} reel codes captured`);
+  log(`instagram foryou: ${codes.length} reel codes captured${viewer ? ' for @' + viewer : ''}`);
   if (!codes.length) return { items: [], warnings: ['Instagram returned no Reels this time'] };
+  hooks?.confirmed?.(viewer || undefined);
   return { items: await itemsFor(codes, log), warnings: [] };
 }
 
@@ -814,6 +944,12 @@ export interface InstagramAccount {
   name?: string;
   avatar?: string;
   error?: string;
+  /** ok:false because Instagram is limiting the server's address: the answer says nothing about the cookies */
+  limited?: boolean;
+  /** ok:false because Instagram wants the account to confirm itself (a checkpoint): not a cookie problem either */
+  checkpoint?: boolean;
+  /** ok:false because the session was made by another browser identity than the one presented ("useragent mismatch") */
+  uaMismatch?: boolean;
 }
 
 const ACCOUNT_JS = String.raw`(async () => {
@@ -824,7 +960,22 @@ const ACCOUNT_JS = String.raw`(async () => {
   return { status: r.status, text: t.slice(0, 20000) };
 })()`;
 
-/** What Instagram says about a set of cookies (the account the web app would show), or ok:false when it could not be asked. */
+/** The first words of an answer's body for the log (tags stripped, whitespace folded); never holds cookies. */
+export function bodyHint(text: string, max = 140): string {
+  const t = (text || '')
+    .replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return t.length > max ? t.slice(0, max) + '…' : t;
+}
+
+/**
+ * What Instagram says about a set of cookies (the account the web app would show), or ok:false when it
+ * could not be asked. Its throttle answer ("Please wait a few minutes before you try again") comes as
+ * 429 but also as 401/400 and at times with `require_login: true`, for good and bad cookies alike: it
+ * never counts as "signed out". A session is signed out when Instagram says `login_required`.
+ */
 export function accountFromAnswer(status: number, text: string): InstagramAccount {
   let json: any;
   try {
@@ -833,18 +984,40 @@ export function accountFromAnswer(status: number, text: string): InstagramAccoun
     /* not JSON */
   }
   const u = json?.user;
+  const msg = typeof json?.message === 'string' ? json.message : '';
+  const hint = bodyHint(msg || text);
+  const said = `Instagram answered ${status}${hint ? ' "' + hint + '"' : ''}`;
   if (status === 200 && u && typeof u.username === 'string') return { ok: true, loggedIn: true, username: u.username, name: u.full_name || undefined, avatar: u.profile_pic_url || undefined };
-  if (status === 401 || status === 403 || json?.require_login === true || json?.message === 'login_required') return { ok: true, loggedIn: false, error: json?.message ? String(json.message) : `Instagram answered ${status}` };
-  return { ok: false, loggedIn: false, error: `Instagram answered ${status}` };
+  if (/checkpoint_required|challenge_required/i.test(msg)) return { ok: false, loggedIn: false, checkpoint: true, error: said };
+  if (/useragent mismatch/i.test(hint)) return { ok: false, loggedIn: false, uaMismatch: true, error: `${said} (the cookies were made by another browser identity than the one this server presents)` };
+  if (status === 429 || /please wait a few minutes/i.test(hint)) return { ok: false, loggedIn: false, limited: true, error: said };
+  if (status === 401 || status === 403 || msg === 'login_required' || json?.require_login === true) return { ok: true, loggedIn: false, error: msg || said };
+  return { ok: false, loggedIn: false, error: said };
+}
+
+let lastCheck: { at: string; api: number; outcome: string } | undefined;
+
+/** True when the browser no longer holds a `sessionid` for instagram.com: Instagram deletes a session cookie it rejects. */
+async function sessionCookieGone(p: Page): Promise<boolean> {
+  try {
+    const cs = await p.cookies(ORIGIN);
+    return !cs.some((c) => c.name === 'sessionid' && c.value);
+  } catch {
+    return false;
+  }
 }
 
 /**
- * Puts `cookies` into the browser (replacing what it holds) and asks Instagram who they belong to.
- * With no cookies the browser's current ones are checked. A refusal removes the cookies again.
+ * Puts `cookies` into the browser (replacing what it holds) and asks Instagram who they belong to: the
+ * account API first and, when that is refused (429 for a datacenter address), the settings page, which
+ * only a signed-in account can stay on. `userAgent` is the identity of the browser the cookies came
+ * from. With no cookies the browser's current ones are checked. A conclusive "signed out" removes the
+ * cookies again; an inconclusive answer (ok:false) leaves them in.
  */
-export async function checkInstagramAccount(cookies?: ParsedCookie[]): Promise<InstagramAccount> {
+export async function checkInstagramAccount(cookies?: ParsedCookie[], userAgent?: string): Promise<InstagramAccount> {
   try {
     return await withPage(async (p) => {
+      if (userAgent) await applyUserAgent(p, userAgent);
       if (cookies) {
         const cdp = await p.createCDPSession();
         await cdp.send('Network.clearBrowserCookies').catch(() => undefined);
@@ -855,16 +1028,35 @@ export async function checkInstagramAccount(cookies?: ParsedCookie[]): Promise<I
       }
       const r = (await p.evaluate(ACCOUNT_JS)) as { status: number; text: string };
       let acc = accountFromAnswer(r.status, r.text);
-      if (!acc.ok) {
-        // The API call was refused (429 from a datacenter address): ask through a page instead.
-        note(`account check: API answered ${r.status}; trying the settings page`);
-        acc = await accountFromSettingsPage(p, cookies);
+      if (!acc.ok && !acc.checkpoint && !acc.uaMismatch) {
+        // The API call was refused (429 for a datacenter address): ask through a page instead. (A checkpoint
+        // or the wrong browser identity is a verdict already: the page could only say "login" to those.)
+        note(`account check: API answered ${r.status} "${bodyHint(r.text) || '(empty body)'}"; trying the settings page`);
+        const apiLimited = Boolean(acc.limited);
+        const viaPage = await accountFromSettingsPage(p, cookies);
+        // An inconclusive page keeps what the API said about the address.
+        acc = viaPage.ok || viaPage.limited || viaPage.checkpoint ? viaPage : { ...viaPage, limited: apiLimited, uaMismatch: acc.uaMismatch, error: `${viaPage.error}; ${acc.error}` };
+        // Instagram deletes the session cookie of a sign-in it rejects (seen with bad cookies): that settles
+        // it whatever the pages said - and a login redirect that leaves the cookie in place, while Instagram
+        // is limiting the address, is no verdict on the cookies.
+        const gone = await sessionCookieGone(p);
+        note(`account check: the sessionid cookie ${gone ? 'was deleted by Instagram' : 'is still there'}`);
+        if (!acc.ok && gone) acc = { ok: true, loggedIn: false, error: 'Instagram deleted the session cookie' };
+        else if (acc.ok && !acc.loggedIn && !gone && apiLimited) acc = { ok: false, loggedIn: false, limited: true, error: `${acc.error}, but Instagram kept the session cookie while limiting this server's address (no verdict)` };
       }
-      note(`account check: status ${r.status} -> ${acc.ok ? (acc.loggedIn ? 'signed in as @' + acc.username : 'signed out') : acc.error}`);
+      lastCheck = { at: new Date().toISOString(), api: r.status, outcome: acc.ok ? (acc.loggedIn ? 'signed in as @' + acc.username : 'signed out (' + acc.error + ')') : 'inconclusive (' + acc.error + ')' };
+      note(`account check: API ${r.status} -> ${lastCheck.outcome}`);
       if (cookies && acc.ok && !acc.loggedIn) {
         const cdp = await p.createCDPSession();
         await cdp.send('Network.clearBrowserCookies').catch(() => undefined);
         await cdp.detach().catch(() => undefined);
+        // The page is shared: put the saved sign-in (if any) back, with its own browser identity.
+        const saved = cookieSource();
+        if (saved?.length && saved !== cookies) {
+          await applyUserAgent(p, hooks?.userAgent?.() || (await p.browser().userAgent()).replace('HeadlessChrome', 'Chrome')).catch(() => undefined);
+          const params = cookieParams(saved);
+          if (params.length) await p.setCookie(...params).catch(() => undefined);
+        }
       }
       return acc;
     });
@@ -873,26 +1065,36 @@ export async function checkInstagramAccount(cookies?: ParsedCookie[]): Promise<I
   }
 }
 
-/** The settings page needs a sign-in: it stays put when signed in and is sent to the login page when not. */
+/**
+ * The settings page needs a sign-in: it stays put (and names the account) when signed in and is sent
+ * to the login page when not - unless the redirect carries Instagram's rate-limit flag, which says
+ * nothing about the cookies. A flagged address may not get the page at all (429).
+ */
 async function accountFromSettingsPage(p: Page, cookies?: ParsedCookie[]): Promise<InstagramAccount> {
   try {
-    await p.goto(`${ORIGIN}/accounts/edit/`, { waitUntil: 'domcontentloaded', timeout: 40_000 });
+    const nav = await p.goto(`${ORIGIN}/accounts/edit/`, { waitUntil: 'domcontentloaded', timeout: 40_000 });
+    const code = nav?.status() ?? 0;
     let st = { path: '', url: '', user: '' };
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < 20 && code < 400; i++) {
       st = (await p.evaluate(String.raw`({ path: location.pathname, url: location.href, user: (document.querySelector('input[name="username"]') || {}).value || '' })`)) as typeof st;
-      if (/^\/accounts\/login/.test(st.path) || (/^\/accounts\/edit/.test(st.path) && st.user)) break;
+      if (sentAway(st.url) || (/^\/accounts\/edit/.test(st.path) && st.user)) break;
       await sleep(500);
     }
+    const away = sentAway(st.url);
+    const viewer = !away && code < 400 && /^\/accounts\/edit/.test(st.path) ? await viewerName(p) : '';
     await p.goto(`${ORIGIN}/robots.txt`, { waitUntil: 'domcontentloaded' }).catch(() => undefined);
-    note(`settings page: ${st.path || '?'}${/is_from_rle/.test(st.url) ? ' (rate-limit redirect)' : ''}`);
-    if (/^\/accounts\/login/.test(st.path)) {
-      // The same redirect is how Instagram limits a busy address: that says nothing about the cookies.
-      if (/is_from_rle/.test(st.url)) return { ok: false, loggedIn: false, error: "Instagram is limiting this server's address (rate-limit redirect)" };
-      return { ok: true, loggedIn: false, error: 'the settings page sent the cookies to the login page' };
+    note(`settings page: ${code}${st.path ? ' ' + st.path : ''}${away ? ' (' + away.kind + ')' : ''}${viewer ? ', viewer @' + viewer : ''}`);
+    if (code === 429 || away?.kind === 'limited') {
+      // Pages are refused for the address: no signed-in page is loaded again for a while.
+      markLimited();
+      return { ok: false, loggedIn: false, limited: true, error: code === 429 ? "Instagram is limiting this server's address (429 for the settings page)" : "Instagram is limiting this server's address (rate-limit redirect)" };
     }
+    if (code >= 400) return { ok: false, loggedIn: false, error: `the settings page answered ${code}` };
+    if (away?.kind === 'checkpoint') return { ok: false, loggedIn: false, checkpoint: true, error: `Instagram sent the settings page to ${st.path}` };
+    if (away) return { ok: true, loggedIn: false, error: 'the settings page sent the cookies to the login page' };
     if (/^\/accounts\/edit/.test(st.path)) {
-      const id = (cookies || cookieSource?.() || []).find((c) => c.name === 'ds_user_id')?.value;
-      return { ok: true, loggedIn: true, username: st.user || (id ? `user${id}` : 'instagram') };
+      const id = (cookies || cookieSource() || []).find((c) => c.name === 'ds_user_id')?.value;
+      return { ok: true, loggedIn: true, username: viewer || st.user || (id ? `user${id}` : 'instagram') };
     }
     return { ok: false, loggedIn: false, error: `unexpected settings page ${st.path || '(none)'}` };
   } catch (e) {
@@ -901,5 +1103,5 @@ async function accountFromSettingsPage(p: Page, cookies?: ParsedCookie[]): Promi
 }
 
 export function instagramStats(): Record<string, unknown> {
-  return { browser: Boolean(browser?.isConnected()), blockedForSec: blockedForSec(), profileLoadsLastHour: profileLoads.filter((t) => t > Date.now() - 3600_000).length, catalogAccounts: loadCatalog().size, embedCache: embedCache.size };
+  return { browser: Boolean(browser?.isConnected()), blockedForSec: blockedForSec(), limitedForSec: limitedForSec(), profileLoadsLastHour: profileLoads.filter((t) => t > Date.now() - 3600_000).length, catalogAccounts: loadCatalog().size, embedCache: embedCache.size, lastAccountCheck: lastCheck };
 }
