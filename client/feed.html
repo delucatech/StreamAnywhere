@@ -94,9 +94,9 @@
               </div>
             </div>
           </div>
-          <!-- Cookie sign-in (YouTube): the cookies of a browser that is signed in, pasted or picked as a file. -->
+          <!-- Cookie sign-in (YouTube, Instagram): the cookies of a browser that is signed in, pasted or picked as a file. -->
           <form id="sessionCookies" class="session-cookies hidden" autocomplete="off" novalidate>
-            <label class="session-label" for="sessionCookiesText">Cookies of a browser that is signed in to YouTube</label>
+            <label id="sessionCookiesLabel" class="session-label" for="sessionCookiesText">Cookies of a browser that is signed in</label>
             <textarea id="sessionCookiesText" rows="5" spellcheck="false" autocapitalize="off" placeholder="Paste the contents of cookies.txt here (Netscape format, as cookie export extensions save it) – or choose the file"></textarea>
             <div class="session-input">
               <input id="sessionCookiesFile" type="file" accept=".txt,.json,text/plain,application/json" class="hidden" />
@@ -106,12 +106,7 @@
             <div id="sessionCookiesResult" class="session-code-result hidden" aria-live="polite"></div>
             <details class="session-help">
               <summary>How to get the cookies</summary>
-              <ol>
-                <li>On a computer, open a <b>private / incognito window</b> and sign in at <b>youtube.com</b>.</li>
-                <li>Export the cookies with a cookie export extension (for example “Get cookies.txt LOCALLY” for Chrome/Edge, “cookies.txt” for Firefox) while on youtube.com, as a <b>cookies.txt</b> file.</li>
-                <li><b>Close the private window</b> (so the browser does not rotate the cookies behind this server's back), then paste the file's text here or choose the file.</li>
-              </ol>
-              <p>The server keeps the youtube.com / google.com cookies in a private file and uses them for your feed; nothing else is read. "Sign out" deletes the file. YouTube may sign the server out after a while – then paste a fresh export.</p>
+              <div id="sessionCookiesHelp"></div>
             </details>
           </form>
           <div class="session-actions">

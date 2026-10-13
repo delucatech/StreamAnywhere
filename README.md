@@ -33,6 +33,8 @@ Windows 10 (see **Test results** for exactly what was measured):
 | **YouTube sign-in**: paste/upload the cookies of a signed-in browser (or a sign-in window on the server machine); **For You** = the account's recommendations | **Working mechanism** (built 2026-10-13; verified signed-out: cookie parsing, YouTube's account check, rejection paths. The signed-in feed itself awaits a real account) – see **YouTube** |
 | **Launcher** (`home.html`, the landing page): iPad-style icons that open each platform like an app | **Working** |
 | **YouTube, guest mode**: Shorts by hashtag, search, channels; picture + sound as two files played in sync | **Working** (Node server with yt-dlp) – see **YouTube** |
+| **Instagram, guest mode** (built 2026-10-13): Reels from a rotation of big public accounts, `@handle` / link search, profiles; one muxed MP4 per Reel | **Working** (Node server + Chrome/Edge; Instagram rate-limits profile pages per IP, see **Instagram**) |
+| **Instagram sign-in**: paste/upload the cookies of a signed-in browser (or a sign-in window on the server machine); **For You** = the account's Reels page, real search | **Working mechanism, unverified signed in** (cookie parsing, rejection of bad cookies and the guest paths are verified; the signed-in feed awaits a real account) – see **Instagram** |
 
 ## Repository layout
 
@@ -48,12 +50,14 @@ client/   Vite 4 + TypeScript front end (no framework)
   src/diagnostics.ts              the six experiments (measured, with explanations)
   src/main.ts                     UI, source/renderer selection, direct-vs-proxy decision
   home.html + src/home/home.ts    the launcher: one app icon per platform (src/platforms.ts), zoom-open animation
-  feed.html + src/feed/feed.ts    the feed page (feed.html?platform=tiktok|youtube): snap-scrolling stream, tap-to-pause, auto-scroll, download
+  feed.html + src/feed/feed.ts    the feed page (feed.html?platform=tiktok|youtube|instagram): snap-scrolling stream, tap-to-pause, auto-scroll, download
 server/   Fastify 4 + TypeScript (Node 16 compatible)
   src/tiktok.ts                   native TikTok resolver (page JSON) + server-side CORS probe
   src/feed.ts                     Explore feed (unsigned TikTok API) + itemStruct → FeedItem conversion
   src/session.ts                  TikTok sign-in through a real Chrome/Edge (puppeteer-core) + For You capture
   src/youtube.ts                  YouTube guest mode through yt-dlp: hashtag Shorts, search, channels, two-file resolve
+  src/instagram.ts                Instagram through a headless Chrome page: account catalog, embed-page resolver, explore/search/profile/For You
+  src/instagramSession.ts         Instagram sign-in (cookies / window), account check
   src/ytdlp.ts                    yt-dlp fallback resolver
   src/proxy.ts                    GET/HEAD /api/media/:id streaming relay with Range support
   src/ssrf.ts                     https-only, host allowlist, private-IP rejection
@@ -86,6 +90,9 @@ Configuration is optional. Copy `.env.example` to `server/.env` (or repo-root `.
 | `TIKTOK_PROFILE_DIR` | `~/.streamanywhere/tiktok-profile` | browser profile that keeps the TikTok session (treat like a password) |
 | `YOUTUBE_COOKIES_FILE` | `~/.streamanywhere/youtube-cookies.txt` | the YouTube sign-in: a Netscape cookies.txt yt-dlp reads and refreshes (treat like a password) |
 | `YOUTUBE_PROFILE_DIR` | `~/.streamanywhere/youtube-profile` | browser profile of the YouTube sign-in *window* (deleted at sign-out) |
+| `INSTAGRAM_COOKIES_FILE` | `~/.streamanywhere/instagram-cookies.txt` | the Instagram sign-in (Netscape cookies.txt; treat like a password) |
+| `INSTAGRAM_PROFILE_DIR` / `INSTAGRAM_LOGIN_PROFILE_DIR` | `~/.streamanywhere/instagram-profile` / `…-login-profile` | profile of the headless Instagram browser / of the sign-in *window* (both deleted at sign-out) |
+| `INSTAGRAM_CATALOG_FILE` | `~/.streamanywhere/instagram-catalog.json` | each account's last listed Reels (a cache; deleting it is harmless) |
 | `ENABLE_BROWSER_SESSION` | `1` | set `0` to disable the sign-in feature entirely |
 | `LOG_LEVEL` | `info` | `debug` adds per-request logs |
 
@@ -268,7 +275,7 @@ Docker) have no Chrome: the feed page then offers Explore only and says so.
 
 ## Launcher and platforms
 
-**`/`** (`home.html`) is an iPad-style home screen: one icon per platform (TikTok, YouTube) plus the
+**`/`** (`home.html`) is an iPad-style home screen: one icon per platform (TikTok, YouTube, Instagram) plus the
 lab player, a dock, and a zoom-from-icon animation into `feed.html?platform=…`; the feed's Home
 button (top left) zooms back. A green badge on an icon means that platform is signed in on the
 server. The page has a web-app manifest, so it can be added to a phone's or tablet's home screen
@@ -329,6 +336,52 @@ feed; a signed-out visitor gets an empty list, which triggers the account check)
 the guest two-file path; the cookies are used for a video only when the guest extraction is
 refused (age gate, private video, bot check). `/api/session/log?platform=youtube` shows the steps.
 
+## Instagram
+
+Same idea as the other two platforms, but Instagram gives a signed-out visitor much less. Measured
+2026-10-13 from the dev machine:
+
+- **Every Instagram API refuses guests** (`/api/v1/...`, `web_profile_info`, tags, search, clips all
+  answer 401 `require_login`, also when called from inside a real instagram.com page) and yt-dlp's
+  Instagram extractors are marked broken. The Explore page, `/reels/` and hashtag pages redirect to
+  the login page. What a guest *can* see: a public profile page (`/<handle>/reels/` renders its 12
+  latest Reels, no paging) and the **embed page of any post** (`/p/<code>/embed/captioned/`).
+- **Explore (Reels tab)** is therefore a rotation over big public accounts: each chip is a list of
+  accounts (`INSTAGRAM_CATEGORIES` in `shared/types.ts`, all verified to list 8+ Reels to a guest),
+  "All" alternates between the categories, and the Reels of the next few accounts are interleaved so
+  the stream never shows a dozen from one account in a row.
+- **Playback** is the easy part: the embed page, fetched from inside an instagram.com page (a plain
+  HTTPS client gets a generic shell), carries the post's JSON with a **progressive, muxed H.264 + AAC
+  MP4** (`video_url`: moov first, Range, `Access-Control-Allow-Origin: *`), caption, counts, owner and
+  cover. About 0.9 s each, 8 in parallel inside one page. The viewer fetches the CDN URL itself
+  (`directUrl`) and falls back to the proxy (`*.cdninstagram.com` is on the allowlist).
+- **Profile pages are rate limited per IP**: about 100 profile loads in 4 minutes made every profile
+  redirect to `/accounts/login` for over 30 minutes (a fresh browser profile did not help), while embed
+  pages kept working. So the server keeps a **catalog** (`INSTAGRAM_CATALOG_FILE`): one listing per
+  account every 6 hours, at most 40 profile loads an hour, 3 s between loads, a back-off of 10 min
+  (doubling to 1 h) after a redirect, and stale listings are served rather than an error. While
+  profiles are blocked, only accounts already in the catalog feed the stream. Signing in avoids the
+  limit (it counts per account then). `/api/stats` shows `instagram.blockedForSec` and the catalog size.
+- **Search** has no guest API: type an `@handle` (or profile link) for the account and its Reels, or
+  paste a post/reel link. Signed in, the account search (`/web/search/topsearch/`) finds accounts.
+  **Profile** = the account's Reels (12 as a guest; a signed-in account keeps paging on scroll).
+- All of it runs in **one headless Chrome/Edge page** (`src/instagram.ts`, its own profile), one job at
+  a time, closed after 5 idle minutes (the 1 GB VM needs the memory); no yt-dlp involved.
+
+### Instagram sign-in (For You)
+
+Instagram has no QR/TV-code login and challenges scripted password logins, so - like YouTube - the
+sign-in is **the cookies of a browser that is signed in** (paste / choose `cookies.txt`, or a sign-in
+window on the machine running the server; a `sessionid` must be among them). The server keeps only
+instagram.com cookies in `INSTAGRAM_COOKIES_FILE`, loads them into its headless browser and checks
+them at once with Instagram (`/api/v1/accounts/current_user/`): bad cookies are refused (verified:
+Instagram answers 401), a saved sign-in is dropped only after two "signed out" answers. **For You** is
+the account's Reels page (`/reels/`): its GraphQL answers are captured while the page is paged with the
+keyboard and only the post *codes* are taken from them - the playable file always comes from the embed
+page. **This signed-in half could not be tried without an account**; `/api/session/log?platform=instagram`
+shows what Instagram answered at each step. Automation on a real account can make Instagram ask for a
+checkpoint: the server is deliberately slow and sparse, but keep that in mind.
+
 ## Diagnostics without a shell
 
 - **`/api/log`** (site password): the last 800 server log lines as text, newest last; `?n=100`,
@@ -337,7 +390,7 @@ refused (age gate, private video, bot check). `/api/session/log?platform=youtube
   device), so a problem on the Tesla or a phone can be read afterwards from any browser.
 - **`/api/health`** (public): build facts, yt-dlp and daemon status, uptime. **`/api/stats`**: feed
   stock per category, media records, the headless work page.
-- **`/api/session/log`**: the last TikTok sign-in steps; `?platform=youtube` for the YouTube one.
+- **`/api/session/log`**: the last TikTok sign-in steps; `?platform=youtube` / `?platform=instagram` for those.
 
 ## Using the app
 

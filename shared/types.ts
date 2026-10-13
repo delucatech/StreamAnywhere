@@ -3,16 +3,16 @@
  * The client imports this file directly (Vite fs.allow covers ../shared).
  */
 
-export type SourceKind = 'tiktok' | 'youtube' | 'mp4';
+export type SourceKind = 'tiktok' | 'youtube' | 'instagram' | 'mp4';
 export type ResolverKind = 'native' | 'ytdlp' | 'passthrough';
 
 /**
  * A platform is one "app" on the launcher (home.html): its own feed, search and sign-in. The feed
  * page is shared; `platform` in a request tells the server which one it is asking about.
  */
-export type Platform = 'tiktok' | 'youtube';
-export const PLATFORM_IDS: Platform[] = ['tiktok', 'youtube'];
-export const platformOf = (v: unknown): Platform => (v === 'youtube' ? 'youtube' : 'tiktok');
+export type Platform = 'tiktok' | 'youtube' | 'instagram';
+export const PLATFORM_IDS: Platform[] = ['tiktok', 'youtube', 'instagram'];
+export const platformOf = (v: unknown): Platform => (v === 'youtube' ? 'youtube' : v === 'instagram' ? 'instagram' : 'tiktok');
 export type CodecFamily = 'h264' | 'h265' | 'av1' | 'vp9' | 'unknown';
 
 /** Result of a server-side HTTP probe of a media URL (what the *server* observed, not the browser). */
@@ -380,11 +380,38 @@ export const YOUTUBE_CATEGORIES: YouTubeCategory[] = [
   { id: 19, label: 'Tech', tag: 'tech' },
 ];
 
+/**
+ * Instagram guest "Explore": Instagram shows a signed-out visitor no global feed (the Explore page,
+ * hashtag pages, search and its REST API all demand a login), but a public account's profile lists
+ * its 12 latest Reels and every post has a guest-readable embed page. So each category is a list of
+ * big public accounts whose latest Reels the server rotates through (accounts verified 2026-10-13
+ * to list 8+ Reels to a guest). id 0 = All rotates through every category.
+ */
+export interface InstagramCategory {
+  id: number;
+  label: string;
+  /** @handles without the @ */
+  accounts: string[];
+}
+export const INSTAGRAM_CATEGORIES: InstagramCategory[] = [
+  { id: 0, label: 'All', accounts: [] },
+  { id: 1, label: 'Funny', accounts: ['9gag', 'ladbible', 'unilad', 'memezar', 'funnyordie', 'barstoolsports', 'comedycentral', 'jimmyfallon'] },
+  { id: 2, label: 'Animals', accounts: ['thedodo', 'animalplanet', 'dogsofinstagram', 'catsofinstagram', 'sandiegozoo', 'montereybayaquarium', 'itsdougthepug'] },
+  { id: 3, label: 'Sports', accounts: ['espn', 'nba', 'bleacherreport', '433', 'sportscenter', 'nfl', 'championsleague', 'fifaworldcup', 'ufc', 'wwe'] },
+  { id: 4, label: 'Music', accounts: ['spotify', 'billboard', 'applemusic', 'mtv', 'rollingstone', 'genius', 'vevo', 'taylorswift', 'arianagrande', 'billieeilish'] },
+  { id: 5, label: 'Food', accounts: ['buzzfeedtasty', 'foodnetwork', 'gordongram', 'bonappetitmag', 'delish', 'nytcooking', 'jamieoliver', 'thefeedfeed'] },
+  { id: 6, label: 'Travel', accounts: ['beautifuldestinations', 'lonelyplanet', 'natgeotravel', 'travelandleisure', 'airbnb', 'cntraveler', 'earthpix', 'roamtheplanet', 'passionpassport'] },
+  { id: 7, label: 'Science', accounts: ['nasa', 'sciencechannel', 'iflscience', 'nasahubble', 'spacex', 'natgeo', 'discovery', 'smithsonian'] },
+  { id: 8, label: 'Tech', accounts: ['verge', 'mkbhd', 'wired', 'techcrunch', 'apple', 'samsung', 'google', 'microsoft', 'engadget'] },
+  { id: 9, label: 'Gaming', accounts: ['playstation', 'xbox', 'gamespot', 'fortnite', 'minecraft', 'leagueoflegends', 'pokemon', 'twitch'] },
+  { id: 10, label: 'Cars', accounts: ['topgear', 'ferrari', 'porsche', 'lamborghini'] },
+];
+
 export type SessionState = 'unsupported' | 'none' | 'login_pending' | 'logged_in' | 'error';
 
 /** 'qr' = TikTok's QR login rendered by a headless page and shown in the feed page (works on servers
- *  without a display); 'window' = a visible browser window on the server machine (TikTok and YouTube);
- *  'cookies' = YouTube: the cookies of a browser that is signed in, pasted or uploaded (works everywhere). */
+ *  without a display); 'window' = a visible browser window on the server machine (every platform);
+ *  'cookies' = YouTube / Instagram: the cookies of a browser that is signed in, pasted or uploaded (works everywhere). */
 export type LoginMode = 'qr' | 'window' | 'cookies';
 
 export interface SessionLoginRequest {

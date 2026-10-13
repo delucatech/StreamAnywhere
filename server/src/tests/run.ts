@@ -14,6 +14,9 @@ import { parseTikTokUrl } from '../tiktok';
 import { itemToFeedItem } from '../feed';
 import { entryToFeedItem, isYouTubeUrl, pickAudio, youTubeVideoId } from '../youtube';
 import { accountFromMenu, parseCookiesText, sapisidHash, toNetscape, YouTubeSessionError } from '../youtubeSession';
+import { accountFromAnswer, collectCodes, embedToFeedItem, handleFromQuery, instagramCode, isInstagramUrl, parseCount, parseProfileMeta, urlExpiry } from '../instagram';
+import { InstagramSessionError, parseInstagramCookies } from '../instagramSession';
+import { INSTAGRAM_CATEGORIES } from '../../../shared/types';
 import { Reservoir, expiredSoon } from '../reservoir';
 import type { FeedItem } from '../../../shared/types';
 import type { FeedResponse } from '../../../shared/types';
@@ -183,6 +186,41 @@ async function offline(): Promise<void> {
   check('account menu: name, handle, largest avatar', acc.loggedIn && acc.name === 'Mario' && acc.handle === 'mario' && acc.avatar === 'l', acc);
   const out = accountFromMenu({ responseContext: { mainAppWebResponseContext: { loggedOut: true } }, actions: [] });
   check('account menu: signed out', out.ok && !out.loggedIn, out);
+
+  console.log('\n== 7. Instagram (offline)');
+  check('instagram urls recognised', isInstagramUrl('https://www.instagram.com/reel/DecPSQfoaRe/') && isInstagramUrl('https://instagr.am/p/DecPSQfoaRe') && isInstagramUrl('https://m.instagram.com/natgeo/') && !isInstagramUrl('https://www.tiktok.com/@x') && !isInstagramUrl('https://notinstagram.com/p/DecPSQfoaRe/'));
+  check('post code from reel / p / user-reel / reels urls', ['https://www.instagram.com/reel/DecPSQfoaRe/', 'https://www.instagram.com/p/DecPSQfoaRe', 'https://www.instagram.com/natgeo/reel/DecPSQfoaRe/?igsh=x', 'https://www.instagram.com/reels/DecPSQfoaRe/'].every((u) => instagramCode(u) === 'DecPSQfoaRe') && instagramCode('https://www.instagram.com/natgeo/') === undefined && instagramCode('https://www.youtube.com/reel/DecPSQfoaRe/') === undefined);
+  check('counts: 268M, 1.2K, 32,070', parseCount('268M') === 268000000 && parseCount('1.2K') === 1200 && parseCount('32,070') === 32070 && parseCount('x') === undefined);
+  const meta = parseProfileMeta('natgeo', '268M Followers, 194 Following, 32,070 Posts - See Instagram photos and videos from National Geographic (@natgeo)', 'National Geographic (@natgeo) • Instagram photos and videos', 'https://x/a.jpg');
+  check('profile meta: name, followers, following, posts', meta.nickname === 'National Geographic' && meta.followers === 268000000 && meta.following === 194 && meta.videos === 32070 && meta.avatar === 'https://x/a.jpg', meta);
+  check('handle from the search box', handleFromQuery('@natgeo') === 'natgeo' && handleFromQuery('nasa') === 'nasa' && handleFromQuery('https://www.instagram.com/natgeo/') === 'natgeo' && handleFromQuery('https://www.instagram.com/reel/DecPSQfoaRe/') === undefined && handleFromQuery('funny cats') === undefined);
+  check('cdn url expiry (oe= hex seconds)', urlExpiry('https://scontent.cdninstagram.com/o1/v/x.mp4?_nc_cat=1&oe=6AD04B1B&oh=00') === 0x6ad04b1b && urlExpiry('https://x/y.mp4?a=b') === undefined);
+  const codes = new Set<string>();
+  collectCodes({ data: { edges: [{ node: { media: { code: 'AbCdEfGh1', video_versions: [{ url: 'u' }], user: { code: 'NotAPost12' } } } }, { node: { media: { code: 'PhotoPost1', media_type: 1 } } }, { node: { media: { code: 'ClipPost_2', product_type: 'clips' } } }] } }, codes);
+  check('codes of video posts in a graphql tree (photos and users skipped)', [...codes].sort().join() === 'AbCdEfGh1,ClipPost_2', [...codes]);
+  const it = embedToFeedItem({ code: 'DecPSQfoaRe', videoUrl: 'https://scontent-hou1-1.cdninstagram.com/o1/v/t2/f2/m86/x.mp4?oe=6AD04B1B', width: 1080, height: 1920, duration: 30.03, views: 30472, likes: 6830, comments: 60, caption: 'hello', cover: 'https://scontent/c.jpg', music: 'Original audio · natgeo', owner: { id: '787132', username: 'natgeo', fullName: 'National Geographic', avatar: 'https://scontent/a.jpg' } });
+  const f0 = it.formats[0];
+  check('embed -> feed item: author, stats, direct + proxy url', it.id === 'DecPSQfoaRe' && it.author.uniqueId === 'natgeo' && it.stats.likes === 6830 && it.stats.plays === 30472 && f0.codec === 'h264' && f0.directUrl!.endsWith('oe=6AD04B1B') && /^\/api\/media\//.test(f0.proxyUrl || '') && f0.expiresAt === 0x6ad04b1b && !f0.audioProxyUrl, it);
+  check('categories: All plus 10 with accounts, no duplicates inside one', INSTAGRAM_CATEGORIES[0].id === 0 && INSTAGRAM_CATEGORIES.length === 11 && INSTAGRAM_CATEGORIES.slice(1).every((c) => c.accounts.length >= 4 && new Set(c.accounts).size === c.accounts.length));
+  const acct = accountFromAnswer(200, JSON.stringify({ user: { username: 'mario', full_name: 'Mario D', profile_pic_url: 'p' }, status: 'ok' }));
+  check('account answer: signed in', acct.ok && acct.loggedIn && acct.username === 'mario' && acct.name === 'Mario D', acct);
+  const gone = accountFromAnswer(401, JSON.stringify({ message: 'login_required', require_login: true, status: 'fail' }));
+  check('account answer: signed out', gone.ok && !gone.loggedIn, gone);
+  check('account answer: a 429 is not an answer', !accountFromAnswer(429, 'slow down').ok);
+  const igText = ['# Netscape HTTP Cookie File', '.instagram.com\tTRUE\t/\tTRUE\t1790000000\tsessionid\t123%3Aabc', '#HttpOnly_.instagram.com\tTRUE\t/\tTRUE\t1790000000\tcsrftoken\ttok', '.instagram.com\tTRUE\t/\tTRUE\t1790000000\tds_user_id\t123', '.facebook.com\tTRUE\t/\tTRUE\t1790000000\txs\tother'].join('\n');
+  const igParsed = parseInstagramCookies(igText);
+  check('instagram cookies: instagram.com kept, other sites dropped', igParsed.cookies.length === 3 && igParsed.warnings.length === 1 && igParsed.cookies.find((c) => c.name === 'csrftoken')?.httpOnly === true, igParsed);
+  const igHeader = parseInstagramCookies('Cookie: sessionid=123%3Aabc; csrftoken=tok; mid=zz');
+  check('instagram cookies: header line lands on instagram.com', igHeader.cookies.length === 3 && igHeader.cookies.every((c) => c.domain === '.instagram.com'), igHeader);
+  for (const [label, text] of [['no sessionid', '.instagram.com\tTRUE\t/\tTRUE\t1790000000\tcsrftoken\ttok'], ['a youtube export', '.youtube.com\tTRUE\t/\tTRUE\t1790000000\tSAPISID\tabc'], ['nothing', 'hello world']] as const) {
+    let got = 0;
+    try {
+      parseInstagramCookies(text);
+    } catch (e) {
+      got = e instanceof InstagramSessionError ? e.status : -1;
+    }
+    check(`instagram cookies rejects ${label}`, got === 400, got);
+  }
 }
 
 /** A fake item: one format whose play URL expires at `expiresAt` (unix seconds; undefined = unknown). */

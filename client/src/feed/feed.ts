@@ -78,6 +78,8 @@ const el = {
   sessionCookiesPick: $<HTMLButtonElement>('sessionCookiesPick'),
   sessionCookiesSend: $<HTMLButtonElement>('sessionCookiesSend'),
   sessionCookiesResult: $('sessionCookiesResult'),
+  sessionCookiesLabel: $('sessionCookiesLabel'),
+  sessionCookiesHelp: $('sessionCookiesHelp'),
   sessionLogin: $<HTMLButtonElement>('sessionLogin'),
   sessionLoginWindow: $<HTMLButtonElement>('sessionLoginWindow'),
   sessionQr: $('sessionQr'),
@@ -346,7 +348,14 @@ el.sessionRefresh.addEventListener('click', () =>
 el.sessionLogin.addEventListener('click', () => pressed(el.sessionLogin, () => startLogin('qr'), { label: 'Starting' }));
 el.sessionLoginWindow.addEventListener('click', () => pressed(el.sessionLoginWindow, () => startLogin('window'), { label: 'Opening' }));
 el.sessionLoginWindow.title = `Opens ${P.name}'s sign-in page in a visible browser window on the machine that runs the server`;
-// Cookie sign-in (YouTube): the pasted text (or the chosen file's text) goes to the server, which checks it with YouTube.
+// Cookie sign-in (YouTube, Instagram): the pasted text (or the chosen file's text) goes to the server, which checks it with the site.
+el.sessionCookiesLabel.textContent = `Cookies of a browser that is signed in to ${P.name}`;
+el.sessionCookiesHelp.innerHTML = `<ol>
+  <li>On a computer, open a <b>private / incognito window</b> and sign in at <b>${esc(P.cookieSite)}</b>.</li>
+  <li>Export the cookies with a cookie export extension (for example “Get cookies.txt LOCALLY” for Chrome/Edge, “cookies.txt” for Firefox) while on ${esc(P.cookieSite)}, as a <b>cookies.txt</b> file.</li>
+  <li><b>Close the private window</b> (so the browser does not rotate the cookies behind this server's back), then paste the file's text here or choose the file.</li>
+</ol>
+<p>The server keeps the ${esc(P.cookieSite)} cookies in a private file and uses them for your feed; nothing else is read. "Sign out" deletes the file. ${esc(P.name)} may sign the server out after a while – then paste a fresh export.</p>`;
 el.sessionCookies.addEventListener('submit', (e) => {
   e.preventDefault();
   const text = el.sessionCookiesText.value.trim();
@@ -355,7 +364,7 @@ el.sessionCookies.addEventListener('submit', (e) => {
     el.sessionCookiesText.focus();
     return;
   }
-  pressed(el.sessionCookiesSend, () => startLogin('cookies', text), { label: 'Checking with YouTube' });
+  pressed(el.sessionCookiesSend, () => startLogin('cookies', text), { label: `Checking with ${P.name}` });
 });
 el.sessionCookiesPick.addEventListener('click', () => el.sessionCookiesFile.click());
 el.sessionCookiesFile.addEventListener('change', () => {
@@ -593,7 +602,7 @@ function renderSession(): void {
     if (!s.qr && /did not show/i.test(s.message || '')) lines.push(`<span style="color:var(--muted)">${esc(s.message || '')}</span>`);
   } else if (s.state === 'login_pending') {
     lines.push('<b>Waiting for sign-in…</b>');
-    lines.push(`A ${esc(cookieSignIn ? 'Google' : P.name)} sign-in window opened on the machine running the server. Sign in there (any method). This page updates automatically.`);
+    lines.push(`A ${esc(P.signInWindowOwner)} sign-in window opened on the machine running the server. Sign in there (any method). This page updates automatically.`);
   } else if (s.probing) {
     lines.push('<b>Checking the saved sign-in…</b>');
     lines.push(esc(s.message || ''));
@@ -775,7 +784,7 @@ function pollSession(): void {
 
 async function startLogin(mode: LoginMode, cookies?: string): Promise<void> {
   el.sessionLogin.disabled = el.sessionLoginWindow.disabled = true;
-  if (mode === 'cookies') showCookiesResult('wait', 'Checking the cookies with YouTube…');
+  if (mode === 'cookies') showCookiesResult('wait', `Checking the cookies with ${P.name}…`);
   else el.sessionText.innerHTML = mode === 'qr' ? '<b>Starting TikTok on the server…</b>\nThis can take up to a minute the first time (the browser has to start).' : '<b>Opening the sign-in window on the server…</b>';
   try {
     const prev = state.session?.state;

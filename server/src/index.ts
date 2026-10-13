@@ -18,6 +18,8 @@ import { cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouStock, logout, 
 import { Reservoir, type ReservoirStats } from './reservoir';
 import { conversation, fetchProfile, followUser, inbox, inboxDebug, searchTikTok, sendMessage, SocialError } from './social';
 import { channelVideos, exploreYouTube, isYouTubeUrl, recommendedYouTube, resolveYouTube, searchYouTube, youTubeCategory, YouTubeError } from './youtube';
+import { exploreInstagram, forYouInstagram, instagramCategory, instagramStats, InstagramError, isInstagramUrl, profileInstagram, resolveInstagram, searchInstagram, setInstagramLogger, shutdownInstagram } from './instagram';
+import { instagramCancelLogin, instagramLogout, instagramSessionLog, instagramSessionLost, instagramSessionStatus, instagramSignedIn, instagramStartLogin, InstagramSessionError, setInstagramSessionLogger, shutdownInstagramSession } from './instagramSession';
 import { setYouTubeSessionLogger, shutdownYouTubeSession, youtubeCancelLogin, youtubeCookieFile, youtubeLogout, youtubeSessionLog, youtubeSessionLost, youtubeSessionStatus, youtubeStartLogin, YouTubeSessionError } from './youtubeSession';
 
 /** After the browser path rescued an explore request, prefer it for a while (datacenter IPs). */
@@ -134,6 +136,43 @@ function youtubeForYouReservoir(log: (m: string) => void): Reservoir {
   return youtubeForYou;
 }
 
+/**
+ * Instagram guest Explore stock per category: the latest Reels of a rotation of big public accounts
+ * (instagram.ts explains why: a signed-out visitor has no global feed). Fills are slow-ish (a profile
+ * page load each, paced by the module) so the stock is deep and refilled early.
+ */
+const instagramReservoirs = new Map<number, Reservoir>();
+function instagramReservoir(categoryId: number, log: (m: string) => void): Reservoir {
+  let r = instagramReservoirs.get(categoryId);
+  if (!r) {
+    const cat = instagramCategory(categoryId);
+    r = new Reservoir(`instagram ${cat.label}`, ({ count }) => exploreInstagram(cat.id, count, log), { log, batch: 30, target: 45, low: 25, gapMs: 4000, waitMs: 45_000 });
+    instagramReservoirs.set(categoryId, r);
+  }
+  return r;
+}
+export const instagramStock = (): Record<string, ReservoirStats> => Object.fromEntries([...instagramReservoirs].map(([k, v]) => [String(k), v.stats]));
+
+/** The signed-in account's Reels page, stocked like the others (a fill pages the Reels viewer for ~20 s). */
+let instagramForYou: Reservoir | undefined;
+function instagramForYouReservoir(log: (m: string) => void): Reservoir {
+  if (!instagramForYou) {
+    instagramForYou = new Reservoir(
+      'instagram foryou',
+      async ({ count }) => {
+        const res = await forYouInstagram(count, log);
+        if (!res.items.length) {
+          const lost = await instagramSessionLost();
+          if (lost) throw new FeedError(`Not signed in to Instagram any more: ${lost}`, 'instagram_not_signed_in', 401);
+        }
+        return res;
+      },
+      { log, batch: 20, target: 30, low: 15, gapMs: 3000, waitMs: 60_000 },
+    );
+  }
+  return instagramForYou;
+}
+
 export async function buildServer() {
   const app = Fastify({
     // stdout (journald) plus the in-memory tail served by /api/log
@@ -164,6 +203,8 @@ export async function buildServer() {
   registerAuth(app);
   setYtDlpLogger((m) => app.log.info({ what: 'yt-dlp' }, m));
   setYouTubeSessionLogger((m) => app.log.info({ what: 'youtube-session' }, m));
+  setInstagramSessionLogger((m) => app.log.info({ what: 'instagram-session' }, m));
+  setInstagramLogger((m) => app.log.info({ what: 'instagram' }, m));
 
   app.get('/api/health', async (): Promise<HealthResponse> => ({
     ok: true,
@@ -190,6 +231,16 @@ export async function buildServer() {
         const err = e as Error;
         req.log.warn({ err: err.message }, 'youtube resolve failed');
         return reply.code(e instanceof YouTubeError ? e.status : 502).send({ error: err.message, attempts: [{ resolver: 'ytdlp', ok: false, error: err.message, elapsedMs: Date.now() - t0 }], elapsedMs: Date.now() - t0 });
+      }
+    }
+
+    if (isInstagramUrl(url)) {
+      try {
+        return await resolveInstagram(url, (m) => log(m));
+      } catch (e) {
+        const err = e as Error;
+        req.log.warn({ err: err.message }, 'instagram resolve failed');
+        return reply.code(e instanceof InstagramError ? e.status : 502).send({ error: err.message, attempts: [{ resolver: 'native', ok: false, error: err.message, elapsedMs: Date.now() - t0 }], elapsedMs: Date.now() - t0 });
       }
     }
 
@@ -296,6 +347,20 @@ export async function buildServer() {
     const log = (msg: string) => app.log.info({ platform, source }, msg);
     const warn = (err: string, msg: string) => app.log.warn({ platform, source, err }, msg);
     try {
+      if (platform === 'instagram') {
+        if (source === 'foryou') {
+          if (!instagramSignedIn()) throw new FeedError('Not signed in to Instagram: sign in from Profile to see your For You feed.', 'instagram_not_signed_in', 401);
+          const r = await instagramForYouReservoir(log).take(count);
+          const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0 };
+          log(`instagram foryou: ${r.items.length} served ${r.fromStock ? 'from stock' : 'after a fill'}, ${r.ready} ready, ${resp.elapsedMs} ms`);
+          return resp;
+        }
+        const cat = instagramCategory(b.category);
+        const r = await instagramReservoir(cat.id, log).take(count);
+        const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0 };
+        log(`instagram explore ${cat.label}: ${r.items.length} served ${r.fromStock ? 'from stock' : 'after a fill'}, ${r.ready} ready, ${resp.elapsedMs} ms`);
+        return resp;
+      }
       if (platform === 'youtube') {
         if (source === 'foryou') {
           if (!youtubeCookieFile()) throw new FeedError('Not signed in to YouTube: sign in from Profile to see your For You feed.', 'youtube_not_signed_in', 401);
@@ -325,7 +390,7 @@ export async function buildServer() {
     } catch (e) {
       const err = e as Error;
       req.log.warn({ source, err: err.message }, 'feed request failed');
-      const status = err instanceof FeedError ? err.status : err instanceof YouTubeError ? err.status : 502;
+      const status = err instanceof FeedError ? err.status : err instanceof YouTubeError || err instanceof InstagramError ? err.status : 502;
       return reply.code(status).send({ error: err.message, source, elapsedMs: Date.now() - t0 });
     }
   });
@@ -335,9 +400,10 @@ export async function buildServer() {
   const socialFail = (reply: import('fastify').FastifyReply, e: unknown, t0: number) => {
     const err = e as Error;
     app.log.warn({ err: err.message }, 'social request failed');
-    return reply.code(e instanceof SocialError || e instanceof YouTubeError ? e.status : 502).send({ error: err.message, elapsedMs: Date.now() - t0 });
+    return reply.code(e instanceof SocialError || e instanceof YouTubeError || e instanceof InstagramError ? e.status : 502).send({ error: err.message, elapsedMs: Date.now() - t0 });
   };
   const youtubeLog = (m: string) => app.log.info({ what: 'youtube' }, m);
+  const instagramLog = (m: string) => app.log.info({ what: 'instagram' }, m);
   const handle = (user: unknown): string => {
     const u = String(user || '')
       .trim()
@@ -352,6 +418,7 @@ export async function buildServer() {
       if (!q) throw new SocialError('Type something to search for', 400);
       const offset = Math.max(0, Math.min(500, Number(req.body?.offset) || 0));
       if (platformOf(req.body?.platform) === 'youtube') return await searchYouTube(q, offset, youtubeLog);
+      if (platformOf(req.body?.platform) === 'instagram') return await searchInstagram(q, offset, instagramLog);
       return await searchTikTok(q, offset, socialLog('search'));
     } catch (e) {
       return socialFail(reply, e, t0);
@@ -363,6 +430,7 @@ export async function buildServer() {
       const user = handle(req.body?.user);
       const offset = Math.max(0, Math.min(2000, Number(req.body?.offset) || 0));
       const count = Math.max(1, Math.min(60, Number(req.body?.count) || 24));
+      if (platformOf(req.body?.platform) === 'instagram') return await profileInstagram(user, offset, count, instagramLog);
       if (platformOf(req.body?.platform) === 'youtube') {
         const r = await channelVideos(user, offset, count, youtubeLog);
         const resp: ProfileResponse = { user: { uniqueId: user, nickname: r.items[0]?.author.nickname }, items: r.items, offset, hasMore: r.hasMore, warnings: [], elapsedMs: Date.now() - t0 };
@@ -420,13 +488,24 @@ export async function buildServer() {
     }
   });
 
-  app.get<{ Querystring: { platform?: string } }>('/api/session', async (req): Promise<SessionStatus> => (platformOf(req.query.platform) === 'youtube' ? youtubeSessionStatus() : sessionProbe()));
+  app.get<{ Querystring: { platform?: string } }>('/api/session', async (req): Promise<SessionStatus> => {
+    const platform = platformOf(req.query.platform);
+    return platform === 'youtube' ? youtubeSessionStatus() : platform === 'instagram' ? instagramSessionStatus() : sessionProbe();
+  });
   // The last sign-in log lines (what the server did on TikTok's page / with the YouTube cookies), for diagnosing without a shell.
-  app.get<{ Querystring: { platform?: string } }>('/api/session/log', async (req) => (platformOf(req.query.platform) === 'youtube' ? youtubeSessionLog() : sessionLog()));
+  app.get<{ Querystring: { platform?: string } }>('/api/session/log', async (req) => {
+    const platform = platformOf(req.query.platform);
+    return platform === 'youtube' ? youtubeSessionLog() : platform === 'instagram' ? instagramSessionLog() : sessionLog();
+  });
   // A cookies.txt export can run to a few hundred KB when a whole browser was exported (the server keeps youtube.com only).
   app.post<{ Body: SessionLoginRequest }>('/api/session/login', { ...resolveLimit, bodyLimit: 4 * 1024 * 1024 }, async (req, reply) => {
     const platform = platformOf(req.body?.platform);
     try {
+      if (platform === 'instagram') {
+        instagramForYou = undefined;
+        const mode = req.body?.mode === 'window' ? 'window' : 'cookies';
+        return await instagramStartLogin(mode, typeof req.body?.cookies === 'string' ? req.body.cookies : undefined, (m) => req.log.info({ what: 'instagram-session' }, m));
+      }
       if (platform === 'youtube') {
         const mode = req.body?.mode === 'window' ? 'window' : 'cookies';
         return await youtubeStartLogin(mode, typeof req.body?.cookies === 'string' ? req.body.cookies : undefined, (m) => req.log.info({ what: 'youtube-session' }, m));
@@ -434,8 +513,8 @@ export async function buildServer() {
       const mode = req.body?.mode === 'window' ? 'window' : 'qr';
       return await startLogin(mode, (m) => req.log.info(m));
     } catch (e) {
-      const status = e instanceof YouTubeSessionError ? e.status : 500;
-      const base = platform === 'youtube' ? await youtubeSessionStatus() : sessionStatus();
+      const status = e instanceof YouTubeSessionError || e instanceof InstagramSessionError ? e.status : 500;
+      const base = platform === 'youtube' ? await youtubeSessionStatus() : platform === 'instagram' ? await instagramSessionStatus() : sessionStatus();
       return reply.code(status).send({ ...base, error: (e as Error).message });
     }
   });
@@ -444,10 +523,17 @@ export async function buildServer() {
       youtubeForYou = undefined;
       return youtubeLogout();
     }
+    if (platformOf(req.body?.platform) === 'instagram') {
+      instagramForYou = undefined;
+      return instagramLogout();
+    }
     return logout();
   });
   // Cancels a pending sign-in and forgets its token/ticket/dialog (the next sign-in starts from zero).
-  app.post<{ Body: SessionActionRequest }>('/api/session/cancel', async (req) => (platformOf(req.body?.platform) === 'youtube' ? youtubeCancelLogin() : cancelLogin()));
+  app.post<{ Body: SessionActionRequest }>('/api/session/cancel', async (req) => {
+    const platform = platformOf(req.body?.platform);
+    return platform === 'youtube' ? youtubeCancelLogin() : platform === 'instagram' ? instagramCancelLogin() : cancelLogin();
+  });
   // Clicks / typing for TikTok's verification modal on the headless sign-in page (see SessionInputRequest).
   app.post<{ Body: SessionInputRequest }>('/api/session/input', async (req, reply) => {
     try {
@@ -459,7 +545,7 @@ export async function buildServer() {
 
   registerProxyRoutes(app);
 
-  app.get('/api/stats', async () => ({ mediaRecords: mediaCount(), exploreStock: exploreStock(), youtubeStock: youtubeStock(), youtubeForYouStock: youtubeForYou?.stats, forYouStock: forYouStock(), workPage: workState(), uptimeSec: Math.round(process.uptime()) }));
+  app.get('/api/stats', async () => ({ mediaRecords: mediaCount(), exploreStock: exploreStock(), youtubeStock: youtubeStock(), youtubeForYouStock: youtubeForYou?.stats, instagramStock: instagramStock(), instagramForYouStock: instagramForYou?.stats, instagram: instagramStats(), forYouStock: forYouStock(), workPage: workState(), uptimeSec: Math.round(process.uptime()) }));
 
   if (config.serveClient) {
     const dist = findUp(path.join('client', 'dist')) || findUp(path.join('client', 'dist'), process.cwd()) || path.resolve('client', 'dist');
@@ -487,7 +573,7 @@ if (require.main === module) {
         process.once(sig, () => {
           app.log.info({ sig }, 'shutting down');
           shutdownYtDlp();
-          void Promise.race([Promise.all([shutdownBrowsers(), shutdownYouTubeSession()]), new Promise((r) => setTimeout(r, 8000))]).finally(() => process.exit(0));
+          void Promise.race([Promise.all([shutdownBrowsers(), shutdownYouTubeSession(), shutdownInstagram(), shutdownInstagramSession()]), new Promise((r) => setTimeout(r, 8000))]).finally(() => process.exit(0));
         });
       }
     })

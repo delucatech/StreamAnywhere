@@ -4,7 +4,7 @@
  *
  * The icons are original drawings that evoke each service; they are not the official logos.
  */
-import { EXPLORE_CATEGORIES, YOUTUBE_CATEGORIES, platformOf, type Platform } from '../../shared/types';
+import { EXPLORE_CATEGORIES, INSTAGRAM_CATEGORIES, YOUTUBE_CATEGORIES, platformOf, type Platform } from '../../shared/types';
 
 export interface PlatformCategory {
   id: number;
@@ -30,10 +30,14 @@ export interface PlatformDef {
   tabs: { explore: string; foryou: string };
   /** Whether accounts can be followed / messaged (TikTok only) */
   social: boolean;
-  /** How the sign-in panel's main button works: TikTok's QR code, or pasted/uploaded cookies (YouTube) */
+  /** How the sign-in panel's main button works: TikTok's QR code, or pasted/uploaded cookies (YouTube, Instagram) */
   signIn: 'qr' | 'cookies';
   /** What the sign-in panel says before a sign-in */
   signInHint: string;
+  /** Cookie sign-in: the site whose cookies are exported, whose sign-in page the server window opens, and the placeholder of the search box */
+  cookieSite: string;
+  signInWindowOwner: string;
+  searchPlaceholder: string;
 }
 
 export const PLATFORMS: PlatformDef[] = [
@@ -52,6 +56,9 @@ export const PLATFORMS: PlatformDef[] = [
     social: true,
     signIn: 'qr',
     signInHint: '"Sign in with QR code" shows TikTok\'s login QR here; scan it with the TikTok app on your phone.',
+    cookieSite: 'tiktok.com',
+    signInWindowOwner: 'TikTok',
+    searchPlaceholder: 'Search videos and accounts',
   },
   {
     id: 'youtube',
@@ -68,6 +75,28 @@ export const PLATFORMS: PlatformDef[] = [
     social: false,
     signIn: 'cookies',
     signInHint: 'Sign in with the cookies of a browser that is signed in to YouTube: paste a cookies.txt export below (or choose the file). The server checks them with YouTube and keeps only the youtube.com ones.',
+    cookieSite: 'youtube.com',
+    signInWindowOwner: 'Google',
+    searchPlaceholder: 'Search YouTube',
+  },
+  {
+    id: 'instagram',
+    name: 'Instagram',
+    short: 'Instagram',
+    url: 'feed.html?platform=instagram',
+    accent: '#e1306c',
+    accent2: '#fcaf45',
+    tile: 'linear-gradient(45deg, #fdc468 0%, #fa7e1e 22%, #d62976 50%, #962fbf 78%, #4f5bd5 100%)',
+    icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.6" y="3.6" width="16.8" height="16.8" rx="5.2" fill="none" stroke="#fff" stroke-width="1.9"/><circle cx="12" cy="12" r="3.9" fill="none" stroke="#fff" stroke-width="1.9"/><circle cx="17.1" cy="6.9" r="1.15" fill="#fff"/></svg>',
+    categories: INSTAGRAM_CATEGORIES,
+    defaultCategory: 0,
+    tabs: { explore: 'Reels', foryou: 'For You' },
+    social: false,
+    signIn: 'cookies',
+    signInHint: 'Instagram shows a signed-out visitor no feed of its own, so Reels rotates through big public accounts. Sign in with the cookies of a browser that is signed in to Instagram (paste a cookies.txt export below, or choose the file) to get your own For You feed and real search.',
+    cookieSite: 'instagram.com',
+    signInWindowOwner: 'Instagram',
+    searchPlaceholder: 'Search an @account or paste a link',
   },
 ];
 

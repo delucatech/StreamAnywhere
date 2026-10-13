@@ -515,7 +515,7 @@ el.inboxForm.addEventListener('submit', (e) => {
 export function initSocial(h: SocialHost): void {
   host = h;
   const p = h.platform;
-  el.searchInput.placeholder = p.social ? 'Search videos and accounts' : `Search ${p.name}`;
+  el.searchInput.placeholder = p.searchPlaceholder;
   // Follow and messages exist on TikTok only; the other platforms show the account's videos.
   el.profileFollow.classList.toggle('hidden', !p.social);
   el.profileMessage.classList.toggle('hidden', !p.social);

@@ -64,7 +64,7 @@ const keepDomain = (d: string): boolean => KEEP_DOMAIN.test(d.replace(/^\./, '')
 /** Cookies Google sets identically on .google.com and .youtube.com at sign-in. */
 const AUTH_COOKIES = ['SID', 'HSID', 'SSID', 'APISID', 'SAPISID', '__Secure-1PSID', '__Secure-3PSID', '__Secure-1PAPISID', '__Secure-3PAPISID', '__Secure-1PSIDTS', '__Secure-3PSIDTS', '__Secure-1PSIDCC', '__Secure-3PSIDCC', 'SIDCC', 'LOGIN_INFO'];
 
-function fromJson(text: string): ParsedCookie[] | undefined {
+export function fromJson(text: string, defaultDomain = '.youtube.com'): ParsedCookie[] | undefined {
   let data: unknown;
   try {
     data = JSON.parse(text);
@@ -76,14 +76,14 @@ function fromJson(text: string): ParsedCookie[] | undefined {
   const out: ParsedCookie[] = [];
   for (const c of arr as Record<string, unknown>[]) {
     if (!c || typeof c.name !== 'string' || typeof c.value !== 'string') continue;
-    const domain = typeof c.domain === 'string' ? c.domain : '.youtube.com';
+    const domain = typeof c.domain === 'string' ? c.domain : defaultDomain;
     const exp = Number(c.expirationDate ?? c.expires ?? c.expiry ?? 0);
     out.push({ domain, path: typeof c.path === 'string' ? c.path : '/', secure: c.secure !== false, httpOnly: Boolean(c.httpOnly), expires: Number.isFinite(exp) && exp > 0 ? Math.floor(exp) : 0, name: c.name, value: c.value });
   }
   return out;
 }
 
-function fromNetscape(text: string): ParsedCookie[] {
+export function fromNetscape(text: string): ParsedCookie[] {
   const out: ParsedCookie[] = [];
   for (const raw of text.split(/\r?\n/)) {
     let line = raw.trim();
@@ -105,7 +105,7 @@ function fromNetscape(text: string): ParsedCookie[] {
 }
 
 /** A `Cookie:` request header (name=value; name2=value2), as DevTools copies it. */
-function fromHeader(text: string): ParsedCookie[] {
+export function fromHeader(text: string, defaultDomain = '.youtube.com'): ParsedCookie[] {
   const out: ParsedCookie[] = [];
   const body = text.replace(/^\s*cookie\s*:\s*/i, '');
   for (const part of body.split(/;\s*/)) {
@@ -113,7 +113,7 @@ function fromHeader(text: string): ParsedCookie[] {
     if (eq <= 0) continue;
     const name = part.slice(0, eq).trim();
     if (!/^[\w.\-]+$/.test(name)) continue;
-    out.push({ domain: '.youtube.com', path: '/', secure: true, httpOnly: false, expires: 0, name, value: part.slice(eq + 1).trim() });
+    out.push({ domain: defaultDomain, path: '/', secure: true, httpOnly: false, expires: 0, name, value: part.slice(eq + 1).trim() });
   }
   return out;
 }
@@ -151,8 +151,8 @@ export function parseCookiesText(text: string): { cookies: ParsedCookie[]; warni
 }
 
 /** Netscape cookies.txt text (what yt-dlp --cookies reads; #HttpOnly_ marks what a browser hides from scripts). */
-export function toNetscape(cookies: ParsedCookie[]): string {
-  const lines = ['# Netscape HTTP Cookie File', '# YouTube sign-in saved by StreamAnywhere on ' + new Date().toISOString() + ' - this file IS the sign-in; keep it private.', ''];
+export function toNetscape(cookies: ParsedCookie[], site = 'YouTube'): string {
+  const lines = ['# Netscape HTTP Cookie File', `# ${site} sign-in saved by StreamAnywhere on ` + new Date().toISOString() + ' - this file IS the sign-in; keep it private.', ''];
   for (const c of cookies) {
     const domain = c.domain;
     const sub = domain.startsWith('.') ? 'TRUE' : 'FALSE';
