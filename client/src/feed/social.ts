@@ -19,6 +19,8 @@ export interface SocialHost {
   isLoggedIn(): boolean;
   openSessionPanel(): Promise<void>;
   fmtCount(n?: number): string;
+  /** Called when the first panel opens (true) and when the last one closes (false): the feed pauses behind a panel. */
+  onPanelsChange(open: boolean): void;
   /** Which platform the panels search and browse (follow / messages exist on TikTok only) */
   platform: PlatformDef;
 }
@@ -82,16 +84,20 @@ function status(node: HTMLElement, text: string, isError = false): void {
 /** Panels stack: the last opened one is on top (Escape / close pops it). */
 const open: HTMLElement[] = [];
 function show(panel: HTMLElement): void {
+  const wasOpen = open.length > 0;
   const i = open.indexOf(panel);
   if (i >= 0) open.splice(i, 1);
   open.push(panel);
   panel.classList.remove('hidden');
   panel.scrollTop = 0;
+  if (!wasOpen) host.onPanelsChange(true);
 }
 function hide(panel: HTMLElement): void {
   const i = open.indexOf(panel);
-  if (i >= 0) open.splice(i, 1);
+  if (i < 0) return;
+  open.splice(i, 1);
   panel.classList.add('hidden');
+  if (!open.length) host.onPanelsChange(false);
 }
 /** Closes the panel on top; false when none is open. */
 export function closeTopPanel(): boolean {

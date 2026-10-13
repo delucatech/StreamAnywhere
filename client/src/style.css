@@ -36,7 +36,26 @@ body {
   align-items: center;
   gap: 14px;
 }
+/* Back to the launcher (home.html) */
+.home-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  text-decoration: none;
+  font-size: 14px;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.home-link:hover {
+  border-color: var(--accent);
+}
 .logo {
+  flex: 0 0 auto;
   width: 40px;
   height: 40px;
   border-radius: 10px;
@@ -373,6 +392,13 @@ td.details code {
   color: var(--muted);
 }
 @media (max-width: 760px) {
+  .topbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .support {
+    text-align: left;
+  }
   .row {
     flex-direction: column;
     align-items: stretch;

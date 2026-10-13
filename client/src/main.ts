@@ -7,6 +7,7 @@ import { EmbedRenderer } from './renderers/embedRenderer';
 import type { LoadSource, PlayerStats, Renderer, RendererEvents } from './renderers/types';
 import { VideoElementRenderer } from './renderers/videoElementRenderer';
 import { WebCodecsRenderer, webCodecsSupported } from './renderers/webcodecsRenderer';
+import { rememberApp } from './platforms';
 import { DEFAULT_TIKTOK_URL, TEST_SOURCES } from './testSources';
 import { $, clearLog, formatBytes, formatTime, log, setOverlay } from './ui';
 
@@ -14,6 +15,7 @@ type SourceMode = 'auto' | 'direct' | 'proxy' | 'test' | 'local';
 type RendererKind = 'webcodecs' | 'video' | 'embed';
 
 const el = {
+  homeLink: $<HTMLAnchorElement>('homeLink'),
   url: $<HTMLInputElement>('url'),
   load: $<HTMLButtonElement>('load'),
   source: $<HTMLSelectElement>('source'),
@@ -95,6 +97,16 @@ function checkServer(): void {
       log('warn', `resolver server not reachable at ${base}/api (${(e as Error).message}). TikTok needs the server; Test MP4 / local file modes still work. Set the API base URL above (e.g. your Render URL).`);
     });
 }
+rememberApp('lab');
+// Back to the launcher: the home screen plays the reverse of its open animation for the Lab tile.
+el.homeLink.addEventListener('click', () => {
+  try {
+    sessionStorage.setItem('streamanywhere.returnFrom', 'lab');
+  } catch {
+    /* ignore */
+  }
+});
+
 el.apiBase.addEventListener('change', () => {
   setApiBase(el.apiBase.value);
   checkServer();

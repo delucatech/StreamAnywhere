@@ -12,7 +12,8 @@
  *  - Right-hand action column: who posted it (profile), sound, save (download), auto-scroll,
  *    fullscreen. Bottom bar: Home, Friends, + (placeholders), Inbox (messages), Profile (sign-in).
  *  - Search (top bar) and account profiles (social.ts) hand the feed a play list: search results
- *    or an account's videos then play in place of the source, with a pill to go back.
+ *    or an account's videos then play in place of the source, with a pill to go back. The video
+ *    pauses while any panel (search, profile, inbox, sign-in) covers the feed and resumes on close.
  *  - Download: fetches the cookie-free CDN URL (CORS *) as a blob and saves it as @author_id.mp4;
  *    falls back to the server proxy when the direct fetch fails.
  *
@@ -295,7 +296,7 @@ el.actAuthor.addEventListener('click', () => {
   const cur = activeEntry();
   if (cur?.item.author.uniqueId) void openProfile(cur.item.author.uniqueId);
 });
-initSocial({ play: playList, toast, isLoggedIn: () => state.session?.state === 'logged_in', openSessionPanel, fmtCount, platform: P });
+initSocial({ play: playList, toast, isLoggedIn: () => state.session?.state === 'logged_in', openSessionPanel, fmtCount, platform: P, onPanelsChange: syncOverlayPause });
 el.navProfile.addEventListener('click', () => pressed(el.navProfile, () => openSessionPanel()));
 el.sessionClose.addEventListener('click', () => closeSessionPanel());
 el.sessionRefresh.addEventListener('click', () =>
@@ -675,11 +676,13 @@ async function refreshSession(announce = false): Promise<SessionStatus | undefin
 
 async function openSessionPanel(): Promise<void> {
   el.session.classList.remove('hidden');
+  syncOverlayPause();
   await refreshSession();
   pollSession();
 }
 function closeSessionPanel(): void {
   el.session.classList.add('hidden');
+  syncOverlayPause();
 }
 function pollSession(): void {
   clearInterval(state.sessionPoll);
@@ -1547,13 +1550,19 @@ document.addEventListener('fullscreenchange', onViewportChange);
 window.visualViewport?.addEventListener('resize', onViewportChange);
 new ResizeObserver(onViewportChange).observe(el.feed);
 
-// Pause when the tab is hidden; resume on return.
-document.addEventListener('visibilitychange', () => {
+/** A panel (search, profile, inbox, sign-in) covers the feed: the video waits behind it. */
+function overlayOpen(): boolean {
+  return panelOpen() || !el.session.classList.contains('hidden');
+}
+// Pause while the tab is hidden or a panel covers the feed; resume (unless the user paused) when
+// the tab returns and the last panel closes.
+function syncOverlayPause(): void {
   const cur = activeEntry();
   if (!cur) return;
-  if (document.hidden) cur.player?.pause();
+  if (document.hidden || overlayOpen()) cur.player?.pause();
   else if (!state.userPaused) void playEntry(cur);
-});
+}
+document.addEventListener('visibilitychange', syncOverlayPause);
 
 // ---------- boot ----------
 // The feed must not wait for the session check (it may launch a browser on the server): start with
