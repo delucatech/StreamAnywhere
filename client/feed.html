@@ -79,13 +79,13 @@
       </div>
 
       <!-- The stage. Phones: both wrappers are display: contents, so the feed fills the screen as before.
-           Wide screens: the feed is a 9:16 column with the edges of the previous / next videos above and
-           below it, and the actions beside it instead of over the picture. -->
+           Wide screens: the feed is a 9:16 column of rounded panels with the edges of the previous / next
+           videos showing above and below the one in view, and the actions beside it instead of over the picture.
+           The feed is the clip; the track inside it holds every video panel and is moved by feed.ts
+           (it follows the finger / mouse, then snaps). -->
       <div class="stage" id="stage">
         <div class="feed-col">
-          <button class="peek prev" id="peekPrev" type="button" aria-label="Previous video" title="Previous video (↑)"></button>
-          <main id="feed" class="feed" tabindex="0" aria-label="Video feed"></main>
-          <button class="peek next" id="peekNext" type="button" aria-label="Next video" title="Next video (↓)"></button>
+          <main id="feed" class="feed" tabindex="0" aria-label="Video feed"><div id="track" class="track"></div></main>
         </div>
 
         <!-- right-hand action column (acts on the video in view) -->

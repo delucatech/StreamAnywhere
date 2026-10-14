@@ -3,16 +3,16 @@
    feed.ts puts the class `wide` on .app when the window is wide enough and not taller
    than wide (or when ?layout=wide asked for it); everything here applies only then.
    Left: a rail with every app (the one in use marked) and the sections. Middle: header,
-   categories and the feed as a 9:16 column with the edges of the previous / next videos
-   above and below it, the actions beside it. Right: Up next.
-   The feed itself (scroll-snap, swipe, drag, wheel, keys, seek) is the same element as on
-   phones, only sized differently; its items still fill it exactly (index × clientHeight).
+   categories and the feed: a column of 9:16 rounded panels, the one in view centred with the
+   edges of the previous / next panels showing above and below it, the actions beside it.
+   Right: Up next.
+   The feed itself (drag, swipe, wheel, keys, seek) is the same element as on phones: the clip
+   window is the whole column, the panels inside it are --feed-h tall and move as one track.
    ===================================================================================== */
 
 /* Phones: the wide-only parts are hidden, and the stage wrappers drop out of the layout */
 .rail,
 .upnext,
-.peek,
 .app-title,
 .search-label,
 .item .src-badge {
@@ -28,11 +28,14 @@
   --upnext-w: clamp(230px, 24vw, 300px);
   /* rows: header 72 + categories 52; the stage keeps 12 px below the feed column */
   --stage-h: calc(var(--vh) - 136px);
-  /* beside the feed: rail, Up next, the stage's padding, the gap and the action column, some air */
-  --side: calc(92px + var(--upnext-w) + 48px + 18px + 76px + 16px);
-  /* the feed column: as tall as the stage allows (minus the two 14 px peeks and their 8 px gaps),
-     unless the width runs out first */
-  --feed-h: min(calc(var(--stage-h) - 44px), calc((100vw - var(--side)) * 16 / 9));
+  /* at least this much of the previous / next panel shows above / below the one in view */
+  --peek: 26px;
+  /* room beside the panels inside the clip window, for their shadow */
+  --feed-air: 32px;
+  /* beside the feed: rail, Up next, the stage's padding, the air, the gap and the action column, some air */
+  --side: calc(92px + var(--upnext-w) + 48px + 2 * var(--feed-air) + 18px + 76px + 16px);
+  /* a panel: as tall as the stage allows (minus the two peeks), unless the width runs out first */
+  --feed-h: min(calc(var(--stage-h) - 2 * var(--peek)), calc((100vw - var(--side)) * 16 / 9));
   --feed-w: calc(var(--feed-h) * 9 / 16);
   display: grid;
   grid-template-columns: 92px minmax(0, 1fr) var(--upnext-w);
@@ -342,46 +345,27 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  gap: 8px;
   min-height: 0;
 }
+/* the clip window: the whole column's height, the panels' width plus air for their shadow */
 .wide .feed {
-  flex: 0 0 auto;
+  flex: 1 1 auto;
+  width: calc(var(--feed-w) + 2 * var(--feed-air));
+  background: none;
+}
+/* the panels: 9:16, rounded, stacked with no gap; the one in view is centred by feed.ts */
+.wide .item {
   height: var(--feed-h);
   width: var(--feed-w);
+  margin: 0 auto;
   border-radius: 22px;
-  background: #000;
   box-shadow:
     0 30px 80px rgba(0, 0, 0, 0.55),
     0 0 0 1px rgba(255, 255, 255, 0.06);
 }
-.wide .peek {
-  display: block;
-  flex: 0 0 14px;
-  width: calc(var(--feed-w) - 40px);
-  padding: 0;
-  border: 0;
-  background: #1a1d26 center / cover no-repeat;
-  opacity: 0.5;
+/* the previous / next panel showing above / below: click it to go there */
+.wide .item:not(.active) {
   cursor: pointer;
-  transition: opacity 0.15s;
-}
-.wide .peek.prev {
-  border-radius: 0 0 14px 14px;
-  background-position: center bottom;
-}
-.wide .peek.next {
-  border-radius: 14px 14px 0 0;
-  background-position: center top;
-}
-.wide .peek:hover {
-  opacity: 0.85;
-}
-.wide .peek:disabled {
-  opacity: 0.12;
-  background-image: none;
-  cursor: default;
 }
 /* the caption no longer shares the picture with the action column */
 .wide .item .info {
@@ -603,8 +587,7 @@
   grid-template-areas: 'stage';
 }
 .app.wide.fullwindow .rail,
-.app.wide.fullwindow .upnext,
-.app.wide.fullwindow .peek {
+.app.wide.fullwindow .upnext {
   display: none;
 }
 .app.wide.fullwindow .stage {
@@ -612,7 +595,11 @@
 }
 .app.wide.fullwindow .feed {
   width: 100%;
-  height: var(--vh);
+}
+.app.wide.fullwindow .item {
+  width: 100%;
+  height: 100%;
+  margin: 0;
   border-radius: 0;
   box-shadow: none;
 }

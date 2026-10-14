@@ -3,9 +3,11 @@
  *
  *  - Source "Explore" (no sign-in) or "For You" (the signed-in account's feed; needs the Node
  *    server with a Chrome/Edge session, see server/src/session.ts). Tabs in the transparent top bar.
- *  - One full-height <canvas> per item, scroll-snap; the item that fills the viewport plays, the
- *    others pause. Items near the end trigger the next batch, and a batch that brings nothing is
- *    retried with a growing delay, so the feed never "ends" (like the app).
+ *  - One full-height <canvas> per item; the items are stacked in a track that is translated (no
+ *    native scrolling): a drag moves the track with the finger / mouse, the next video coming in
+ *    from below (or the previous from above), and on release it snaps to one video, which plays
+ *    while the others pause. Items near the end trigger the next batch, and a batch that brings
+ *    nothing is retried with a growing delay, so the feed never "ends" (like the app).
  *  - Swipe (touch) or drag (mouse) up/down = next/previous video. Tap/click = pause/resume.
  *    ↑/↓ (or J/K) move, Space pauses, M mutes, F fullscreen, D downloads, A toggles auto-scroll,
  *    W hides the bars.
@@ -48,6 +50,7 @@ const el = {
   app: $('app'),
   homeLink: $<HTMLAnchorElement>('homeLink'),
   feed: $('feed'),
+  track: $('track'),
   tabs: $('tabs'),
   chips: $('chips'),
   context: $('context'),
@@ -110,7 +113,7 @@ const el = {
   loading: $('loading'),
   loadingTitle: $('loadingTitle'),
   loadingDetail: $('loadingDetail'),
-  // wide-screen layout (the car): rail, header title, peeks, Up next
+  // wide-screen layout (the car): rail, header title, Up next
   railLauncher: $<HTMLButtonElement>('railLauncher'),
   railApps: $('railApps'),
   railFriends: $<HTMLButtonElement>('railFriends'),
@@ -120,8 +123,6 @@ const el = {
   appName: $('appName'),
   appSub: $('appSub'),
   searchLabel: $('searchLabel'),
-  peekPrev: $<HTMLButtonElement>('peekPrev'),
-  peekNext: $<HTMLButtonElement>('peekNext'),
   upnextAuto: $<HTMLButtonElement>('upnextAuto'),
   upnextList: $('upnextList'),
 };
@@ -289,8 +290,6 @@ function sourceCandidates(item: FeedItem): SourceCandidate[] {
   return out;
 }
 const activeEntry = (): Entry | undefined => state.entries[state.active];
-/** Timestamp of the last user-driven scroll (touch, wheel, key, drag); realign() stays out of the way for a while after it. */
-let userScrollAt = 0;
 /** Clicks before this time are the tail of a drag or a seek and must not toggle pause. */
 let suppressClickUntil = 0;
 
@@ -435,15 +434,6 @@ el.railFriends.addEventListener('click', () => el.navFriends.click());
 el.railInbox.addEventListener('click', () => el.navInbox.click());
 el.railProfile.addEventListener('click', () => el.navProfile.click());
 el.upnextAuto.addEventListener('click', () => toggleAutoscroll());
-el.peekPrev.addEventListener('click', () => {
-  userScrollAt = Date.now();
-  goTo(state.active - 1);
-});
-el.peekNext.addEventListener('click', () => {
-  if (!state.started) start();
-  userScrollAt = Date.now();
-  goTo(state.active + 1);
-});
 initSocial({ play: playList, toast, isLoggedIn: () => state.session?.state === 'logged_in', openSessionPanel, fmtCount, platform: P, onPanelsChange: syncOverlayPause });
 el.navProfile.addEventListener('click', () => pressed(el.navProfile, () => openSessionPanel()));
 el.sessionClose.addEventListener('click', () => closeSessionPanel());
@@ -1080,8 +1070,8 @@ async function reload(preloaded?: FeedItem[], startIndex = 0): Promise<void> {
   state.emptyBatches = 0;
   state.pauseUntil = 0;
   state.wantNext = false;
-  el.feed.innerHTML = '';
-  el.feed.scrollTop = 0;
+  el.track.innerHTML = '';
+  jumpTo(0);
   renderQueue();
   syncWait();
   if (preloaded?.length) {
@@ -1089,7 +1079,7 @@ async function reload(preloaded?: FeedItem[], startIndex = 0): Promise<void> {
     addItems(preloaded);
     const idx = Math.max(0, Math.min(state.entries.length - 1, startIndex));
     if (!state.started) start();
-    el.feed.scrollTo({ top: idx * el.feed.clientHeight });
+    jumpTo(idx);
     setActive(idx);
     return;
   }
@@ -1106,21 +1096,18 @@ function addItems(items: FeedItem[]): number {
     state.entries.push(makeEntry(item));
     added++;
   }
-  if (added) renderQueue();
+  if (added) {
+    layout(); // the first items give the track its panel height
+    renderQueue();
+  }
   return added;
 }
 
-// ---------- wide screens: the edges of the previous / next videos + the Up next queue ----------
+// ---------- wide screens: the Up next queue ----------
 /** Rows of the queue: the video before the active one, the active one and this many after it. */
 const QUEUE_AHEAD = 12;
-const cssUrl = (u: string): string => `url("${u.replace(/["\\\n\r]/g, (c) => encodeURIComponent(c))}")`;
 function renderQueue(): void {
   const i = state.active;
-  const prev = state.entries[i - 1];
-  const next = state.entries[i + 1];
-  el.peekPrev.disabled = !prev;
-  el.peekPrev.style.backgroundImage = prev?.item.cover ? cssUrl(prev.item.cover) : '';
-  el.peekNext.style.backgroundImage = next?.item.cover ? cssUrl(next.item.cover) : '';
   const rows: HTMLElement[] = [];
   const from = Math.max(0, i - 1);
   const to = Math.min(state.entries.length, Math.max(i, 0) + QUEUE_AHEAD + 1);
@@ -1161,7 +1148,6 @@ function renderQueue(): void {
     row.append(thumb, text);
     row.addEventListener('click', () => {
       if (!state.started) start();
-      userScrollAt = Date.now();
       if (k !== state.active) goTo(k);
     });
     rows.push(row);
@@ -1272,21 +1258,11 @@ function showEmpty(text: string): void {
   const d = document.createElement('div');
   d.className = 'item empty-state';
   d.textContent = text;
-  el.feed.appendChild(d);
+  el.track.appendChild(d);
+  layout();
 }
 
 // ---------- entries ----------
-const observer = new IntersectionObserver(
-  (records) => {
-    for (const r of records) {
-      if (!r.isIntersecting || r.intersectionRatio < 0.6) continue;
-      const idx = state.entries.findIndex((e) => e.root === r.target);
-      if (idx >= 0 && idx !== state.active) setActive(idx);
-    }
-  },
-  { root: el.feed, threshold: [0.6] },
-);
-
 function makeEntry(item: FeedItem): Entry {
   const root = document.createElement('article');
   root.className = 'item';
@@ -1384,13 +1360,11 @@ function makeEntry(item: FeedItem): Entry {
     root.classList.add('seeking');
     progress.setPointerCapture(e.pointerId);
     suppressClickUntil = Date.now() + 600;
-    userScrollAt = Date.now();
     seekTo(e.clientX, true);
   });
   progress.addEventListener('pointermove', (e) => {
     if (!seeking) return;
     e.stopPropagation();
-    userScrollAt = Date.now();
     seekTo(e.clientX, false);
   });
   const endSeek = (e: PointerEvent) => {
@@ -1423,17 +1397,22 @@ function makeEntry(item: FeedItem): Entry {
 
   const entry: Entry = { item, root, canvas, progress: bar, err, triedProxy: false, failed: false, isSeeking: () => seeking, waitEl, waitText, buffering: false, retrying: false };
 
-  // Tap/click on the picture (poster or canvas) = pause/resume. The info block and progress bar
-  // handle their own pointer events.
+  // Tap/click on the picture (poster or canvas) = pause/resume; on the edge of the previous / next
+  // video showing above / below (wide screens) = go there. The info block and progress bar handle
+  // their own pointer events.
   for (const target of [canvas, root.querySelector<HTMLImageElement>('.cover')]) {
     target?.addEventListener('click', () => {
       if (suppressClickUntil > Date.now()) return; // the click that ends a drag
+      if (activeEntry() !== entry) {
+        if (!state.started) start();
+        goTo(state.entries.indexOf(entry));
+        return;
+      }
       togglePause(entry);
     });
   }
 
-  el.feed.appendChild(root);
-  observer.observe(root);
+  el.track.appendChild(root);
   return entry;
 }
 
@@ -1582,12 +1561,14 @@ function setActive(idx: number): void {
   const prev = activeEntry();
   if (prev && prev !== state.entries[idx]) {
     prev.player?.pause();
-    prev.root.classList.remove('paused');
-    prev.player?.seek(0);
+    prev.root.classList.remove('paused', 'active');
+    // back to its first frame once it has slid out of view (not while it is still on screen)
+    window.setTimeout(() => activeEntry() !== prev && prev.player?.seek(0), SNAP_MS + 40);
   }
   state.active = idx;
   state.userPaused = false;
   const cur = state.entries[idx];
+  cur.root.classList.add('active');
   if (cur.item.author.avatar) el.actAuthorImg.src = cur.item.author.avatar;
   else el.actAuthorImg.removeAttribute('src');
   el.actAuthor.disabled = !cur.item.author.uniqueId;
@@ -1619,8 +1600,7 @@ function goTo(idx: number): void {
     }
     return;
   }
-  // scrollTo on the container (not scrollIntoView) so the page itself never scrolls on phones.
-  el.feed.scrollTo({ top: idx * el.feed.clientHeight, behavior: 'smooth' });
+  snapTo(idx);
 }
 
 function togglePause(entry: Entry): void {
@@ -1773,7 +1753,6 @@ document.addEventListener('keydown', (e) => {
     case 'PageDown':
       e.preventDefault();
       if (!state.started) start();
-      userScrollAt = Date.now();
       goTo(state.active + 1);
       break;
     case 'ArrowUp':
@@ -1781,7 +1760,6 @@ document.addEventListener('keydown', (e) => {
     case 'K':
     case 'PageUp':
       e.preventDefault();
-      userScrollAt = Date.now();
       goTo(state.active - 1);
       break;
     case ' ':
@@ -1819,158 +1797,198 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// ---------- touch: swipe up/down = next/previous video (like the app) ----------
-// Native scroll-snap already moves one item per flick; this guarantees it for short or fast swipes
-// and keeps a half-dragged video from sticking between two snap points.
-let touchStartY = 0;
-let touchStartX = 0;
-let touchStartAt = 0;
-let touchStartIdx = 0;
-let touchMoved = false;
-let touching = false;
-let swipeTimer = 0;
-function settleAfterSwipe(target: number): void {
-  // The browser's own snap animation runs after the gesture; only step in if it settles elsewhere.
-  clearTimeout(swipeTimer);
-  swipeTimer = window.setTimeout(() => {
-    const h = Math.max(1, el.feed.clientHeight);
-    if (Math.round(el.feed.scrollTop / h) !== target) goTo(target);
-  }, 450);
+// ---------- the track: it follows the finger / mouse, then snaps to one video ----------
+// No native scrolling. The feed is a clip window and the track inside it (every video panel with
+// its caption and progress bar, stacked with no gap) is translated. While a finger or the mouse
+// holds it, it moves with the pointer: the next panel comes in from below, the previous one from
+// above. On release it snaps to the next / previous panel when the drag went far or fast enough,
+// otherwise back to the one it started on. The wheel and the keys snap directly. The panel in
+// view is centred in the window: on wide screens the window is taller than a panel, so the edges
+// of the neighbours show; on phones a panel is the whole window.
+const SNAP_MS = 320;
+/** A drag moves on when it covers this share of a panel ... */
+const SWIPE_SHARE = 0.2;
+/** ... or ends at this speed (px per ms) in its own direction. */
+const FLICK_SPEED = 0.45;
+/** Pointer movement below this is a tap / click, not a drag. */
+const SLOP = 6;
+let itemH = 1;
+let padTop = 0;
+/** The panel the track rests on (= state.active once a move is decided). */
+let trackIdx = 0;
+/** The drag displacement in px: positive = pulled down (towards the previous panel). */
+let offset = 0;
+
+/** Reads the panel height and the centring pad; true when they changed. */
+function measure(): boolean {
+  const first = el.track.firstElementChild as HTMLElement | null;
+  const h = Math.max(1, first?.offsetHeight || el.feed.clientHeight);
+  const pad = Math.max(0, Math.round((el.feed.clientHeight - h) / 2));
+  if (h === itemH && pad === padTop) return false;
+  itemH = h;
+  padTop = pad;
+  return true;
 }
-el.feed.addEventListener(
-  'touchstart',
-  (e) => {
-    if (e.touches.length !== 1) return;
-    touching = true;
-    userScrollAt = Date.now();
-    touchStartY = e.touches[0].clientY;
-    touchStartX = e.touches[0].clientX;
-    touchStartAt = Date.now();
-    touchMoved = false;
-    touchStartIdx = Math.round(el.feed.scrollTop / Math.max(1, el.feed.clientHeight));
-  },
-  { passive: true },
-);
-el.feed.addEventListener(
-  'touchmove',
-  () => {
-    touchMoved = true;
-    userScrollAt = Date.now();
-  },
-  { passive: true },
-);
-el.feed.addEventListener(
-  'touchend',
-  (e) => {
-    touching = false;
-    userScrollAt = Date.now();
-    if (!touchMoved || !e.changedTouches.length) return;
-    const dy = touchStartY - e.changedTouches[0].clientY;
-    const dx = touchStartX - e.changedTouches[0].clientX;
-    const dt = Date.now() - touchStartAt;
-    // A swipe to the right (like the back gesture of a phone) returns to the list's panel.
-    if (dx <= -60 && Math.abs(dx) > Math.abs(dy) * 1.5 && dt <= 1200) return backToPanel();
-    if (Math.abs(dy) < 30 || Math.abs(dy) < Math.abs(dx) || dt > 1200) return;
-    if (!state.started) start();
-    const target = Math.max(0, Math.min(state.entries.length - 1, touchStartIdx + (dy > 0 ? 1 : -1)));
-    if (touchStartIdx + (dy > 0 ? 1 : -1) >= state.entries.length) goTo(state.entries.length);
-    else settleAfterSwipe(target);
-  },
-  { passive: true },
-);
-el.feed.addEventListener(
-  'touchcancel',
-  () => {
-    touching = false;
-  },
-  { passive: true },
-);
-el.feed.addEventListener(
-  'wheel',
-  () => {
-    userScrollAt = Date.now();
-  },
-  { passive: true },
-);
+function placeTrack(animate: boolean): void {
+  el.track.classList.toggle('snapping', animate);
+  el.track.style.transform = `translate3d(0, ${padTop - trackIdx * itemH + offset}px, 0)`;
+}
+/** Puts the track on a panel at once (a reload). */
+function jumpTo(idx: number): void {
+  trackIdx = Math.max(0, idx);
+  offset = 0;
+  measure();
+  placeTrack(false);
+}
+/** Slides the track to a panel and makes it the one playing. */
+function snapTo(idx: number): void {
+  trackIdx = idx;
+  offset = 0;
+  placeTrack(true);
+  setActive(idx);
+}
+/** The track's translation as rendered right now (mid-snap it is between two panels). */
+function renderedY(): number {
+  return new DOMMatrixReadOnly(getComputedStyle(el.track).transform).m42;
+}
+/** After a resize (window, orientation, fullscreen, the first items): keep the panel in view exactly in view. */
+function layout(): void {
+  if (!measure()) return;
+  if (!gesture || gesture.axis !== 'y') offset = 0;
+  placeTrack(false);
+}
+new ResizeObserver(layout).observe(el.feed);
+window.addEventListener('resize', layout);
+window.addEventListener('orientationchange', layout);
+document.addEventListener('fullscreenchange', layout);
+window.visualViewport?.addEventListener('resize', layout);
 
-// ---------- mouse: press, drag up/down, release = next/previous video ----------
-let dragStartY = 0;
-let dragStartX = 0;
-let dragStartIdx = 0;
-let dragging = false;
-el.feed.addEventListener('mousedown', (e) => {
-  if (e.button !== 0) return;
-  if ((e.target as HTMLElement).closest('a, button')) return;
-  dragging = true;
-  dragStartY = e.clientY;
-  dragStartX = e.clientX;
-  dragStartIdx = Math.round(el.feed.scrollTop / Math.max(1, el.feed.clientHeight));
-  userScrollAt = Date.now();
-  el.feed.classList.add('dragging');
-});
-window.addEventListener('mousemove', (e) => {
-  if (!dragging) return;
-  userScrollAt = Date.now();
-  if (Math.abs(e.clientY - dragStartY) > 6 || Math.abs(e.clientX - dragStartX) > 6) e.preventDefault();
-});
-window.addEventListener('mouseup', (e) => {
-  if (!dragging) return;
-  dragging = false;
-  el.feed.classList.remove('dragging');
-  const dy = dragStartY - e.clientY;
-  const dx = e.clientX - dragStartX;
-  if (dx >= 80 && dx > Math.abs(dy) * 1.5) {
-    // Dragged to the right (a mouse "swipe back"): back to the list's panel.
-    suppressClickUntil = Date.now() + 400;
-    return backToPanel();
-  }
-  if (Math.abs(dy) < 40) return; // a click, handled by the video's click listener
-  suppressClickUntil = Date.now() + 400;
-  if (!state.started) start();
-  const next = dragStartIdx + (dy > 0 ? 1 : -1);
-  if (next < 0) return;
-  goTo(next);
-});
-
-// ---------- resize: keep the active video exactly in view ----------
-// Items are sized to the feed viewport (height: 100%), so when the window, orientation or
-// fullscreen state changes, the scroll offset must be re-aligned to the active item or the video
-// ends up partly off-screen. The video element itself keeps its aspect ratio (object-fit: contain).
-let resizeTimer = 0;
-let knownHeight = el.feed.clientHeight;
-let knownIdx = 0;
-el.feed.addEventListener(
-  'scroll',
-  () => {
-    // Remember which item the user is on in the current geometry (independent of the observer lag).
-    if (knownHeight > 0) knownIdx = Math.round(el.feed.scrollTop / knownHeight);
-  },
-  { passive: true },
-);
-function realign(): void {
-  const h = el.feed.clientHeight;
-  if (!h || !state.entries.length) return;
-  if (h === knownHeight) return; // nothing changed (e.g. a scroll-driven observer callback)
-  // Phones resize the viewport while the user flicks (toolbar collapses): never fight that.
-  if (touching || dragging || Date.now() - userScrollAt < 900) {
-    clearTimeout(resizeTimer);
-    resizeTimer = window.setTimeout(realign, 400);
+/** Decides where the track goes when the pointer lets go (v: px per ms, positive = downwards). */
+function settle(v: number, moved: number): void {
+  const last = state.entries.length - 1;
+  if (last < 0) {
+    offset = 0;
+    placeTrack(true);
     return;
   }
-  const idx = Math.max(0, Math.min(state.entries.length - 1, knownIdx));
-  knownHeight = h;
-  const top = idx * h;
-  if (Math.abs(el.feed.scrollTop - top) > 1) el.feed.scrollTo({ top, behavior: 'auto' });
+  const far = Math.abs(moved) >= itemH * SWIPE_SHARE;
+  const flick = Math.abs(v) >= FLICK_SPEED && Math.sign(v) === Math.sign(moved) && Math.abs(moved) >= 12;
+  // a short, slow drag goes back; after grabbing a moving track, to the nearest panel
+  let target = far || flick ? trackIdx + (moved < 0 ? 1 : -1) : trackIdx - Math.round(offset / itemH);
+  if (target > last) goTo(last + 1); // past the end: the next batch, and on to it when it arrives
+  target = Math.max(0, Math.min(last, target));
+  if (target !== state.active) snapTo(target);
+  else {
+    trackIdx = target;
+    offset = 0;
+    placeTrack(true);
+  }
 }
-function onViewportChange(): void {
-  clearTimeout(resizeTimer);
-  resizeTimer = window.setTimeout(realign, 120); // after the browser settles (toolbars, snap)
+
+interface Gesture {
+  id: number;
+  x0: number;
+  y0: number;
+  t0: number;
+  /** Decided once the pointer has moved past SLOP: vertical = the track, horizontal = the back gesture. */
+  axis: 'none' | 'x' | 'y';
+  /** The track's offset when it was grabbed (not 0 when grabbed mid-snap). */
+  base: number;
+  /** The last moves, for the release speed. */
+  samples: { y: number; t: number }[];
 }
-window.addEventListener('resize', onViewportChange);
-window.addEventListener('orientationchange', onViewportChange);
-document.addEventListener('fullscreenchange', onViewportChange);
-window.visualViewport?.addEventListener('resize', onViewportChange);
-new ResizeObserver(onViewportChange).observe(el.feed);
+let gesture: Gesture | undefined;
+el.feed.addEventListener('pointerdown', (e) => {
+  if (gesture || !e.isPrimary || (e.pointerType === 'mouse' && e.button !== 0)) return;
+  if ((e.target as HTMLElement).closest('a, button, .progress')) return; // their own clicks and drags
+  gesture = { id: e.pointerId, x0: e.clientX, y0: e.clientY, t0: performance.now(), axis: 'none', base: 0, samples: [] };
+});
+window.addEventListener('pointermove', (e) => {
+  if (!gesture || e.pointerId !== gesture.id) return;
+  const dx = e.clientX - gesture.x0;
+  const dy = e.clientY - gesture.y0;
+  if (gesture.axis === 'none') {
+    if (Math.abs(dx) < SLOP && Math.abs(dy) < SLOP) return;
+    gesture.axis = Math.abs(dy) >= Math.abs(dx) ? 'y' : 'x';
+    if (gesture.axis !== 'y') return;
+    // grabbed: the track stops where it is (mid-snap too) and follows the pointer from there
+    offset = renderedY() - (padTop - trackIdx * itemH);
+    gesture.base = offset;
+    el.track.classList.remove('snapping');
+    el.feed.classList.add('dragging');
+    try {
+      el.feed.setPointerCapture(e.pointerId);
+    } catch {
+      /* the pointer is gone already */
+    }
+  }
+  if (gesture.axis !== 'y') return;
+  const raw = gesture.base + dy;
+  const last = state.entries.length - 1;
+  // before the first / past the last panel the track only gives a little
+  offset = (raw > 0 && trackIdx <= 0) || (raw < 0 && trackIdx >= last) ? raw * 0.35 : raw;
+  placeTrack(false);
+  const t = performance.now();
+  gesture.samples.push({ y: e.clientY, t });
+  while (gesture.samples.length > 1 && t - gesture.samples[0].t > 100) gesture.samples.shift();
+});
+function endGesture(e: PointerEvent, cancelled: boolean): void {
+  if (!gesture || e.pointerId !== gesture.id) return;
+  const g = gesture;
+  gesture = undefined;
+  if (g.axis === 'none') return; // a tap / click: the picture's own click listener
+  el.feed.classList.remove('dragging');
+  try {
+    el.feed.releasePointerCapture(e.pointerId);
+  } catch {
+    /* not captured */
+  }
+  suppressClickUntil = Date.now() + 400; // the click that ends a drag must not toggle pause
+  const dx = e.clientX - g.x0;
+  const dy = e.clientY - g.y0;
+  const dt = performance.now() - g.t0;
+  if (g.axis === 'x') {
+    // A swipe / drag to the right (like the back gesture of a phone) returns to the list's panel.
+    if (!cancelled && dx >= 70 && dx > Math.abs(dy) * 1.5 && dt <= 1200) backToPanel();
+    return;
+  }
+  if (!state.started) start();
+  const s0 = g.samples[0];
+  const s1 = g.samples[g.samples.length - 1];
+  // the speed over the last moves (a span of at least a frame, or the estimate is noise)
+  const v = !cancelled && s0 && s1 && s1.t - s0.t >= 8 ? (s1.y - s0.y) / (s1.t - s0.t) : 0;
+  settle(v, cancelled ? 0 : offset - g.base);
+}
+window.addEventListener('pointerup', (e) => endGesture(e, false));
+window.addEventListener('pointercancel', (e) => endGesture(e, true));
+// nothing in the feed is dragged natively (images, links) and the page never scrolls under it
+el.feed.addEventListener('dragstart', (e) => e.preventDefault());
+
+// ---------- wheel: one notch (or one trackpad flick) = one video ----------
+let wheelAcc = 0;
+let wheelLockUntil = 0;
+let wheelIdle = 0;
+el.feed.addEventListener(
+  'wheel',
+  (e) => {
+    e.preventDefault();
+    const now = Date.now();
+    if (now < wheelLockUntil || gesture?.axis === 'y') {
+      wheelAcc = 0; // the tail of a trackpad flick, or a finger on the track
+      return;
+    }
+    wheelAcc += e.deltaMode === 1 ? e.deltaY * 40 : e.deltaMode === 2 ? e.deltaY * itemH : e.deltaY;
+    clearTimeout(wheelIdle);
+    wheelIdle = window.setTimeout(() => (wheelAcc = 0), 200);
+    if (Math.abs(wheelAcc) < 50) return;
+    const dir = wheelAcc > 0 ? 1 : -1;
+    wheelAcc = 0;
+    wheelLockUntil = now + 600;
+    if (!state.started) start();
+    goTo(state.active + dir);
+  },
+  { passive: false },
+);
 
 /** A panel (search, profile, inbox, sign-in) covers the feed: the video waits behind it. */
 function overlayOpen(): boolean {

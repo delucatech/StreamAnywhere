@@ -187,31 +187,39 @@ button {
 }
 
 /* ---------- feed ---------- */
+/* The feed is a clip window; the track inside it stacks every video panel (one item = one screen)
+   and is translated by feed.ts: it follows the finger / mouse during a drag, with the next or
+   previous panel coming in from below / above, then snaps to one panel. No native scrolling: the
+   browser must not pan, select or drag anything in here (touch-action: none, user-select: none). */
 .feed {
+  position: relative;
   flex: 1 1 auto;
   min-height: 0;
-  overflow-y: auto;
-  scroll-snap-type: y mandatory;
-  scrollbar-width: none;
+  overflow: hidden;
   outline: none;
-  /* one swipe = one video: native snap + no pull-to-refresh / rubber-band into the page */
-  overscroll-behavior-y: contain;
-  touch-action: pan-y;
-  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: none;
+  touch-action: none;
   cursor: grab;
 }
 .feed.dragging {
   cursor: grabbing;
 }
-.feed::-webkit-scrollbar {
-  display: none;
+.track {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  will-change: transform;
+}
+/* the snap after a drag / a key / the wheel; removed while a finger or the mouse holds the track */
+.track.snapping {
+  transition: transform 0.32s cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 .item {
   position: relative;
   height: 100%;
   width: 100%;
-  scroll-snap-align: start;
-  scroll-snap-stop: always;
   background: #000;
   /* flex, not grid: a grid's auto row makes the video's height:100% resolve to auto, so the video
      took its poster's full height and was clipped instead of scaled to fit */
