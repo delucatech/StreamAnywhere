@@ -150,6 +150,13 @@ interface Entry {
   isSeeking: () => boolean;
   /** Play URLs being fetched for an item that came without any (guest search results) */
   resolving?: Promise<boolean>;
+  /** The status shown on the video while it waits (see syncWait) */
+  waitEl: HTMLElement;
+  waitText: HTMLElement;
+  /** The player reports loading / buffering */
+  buffering: boolean;
+  /** The direct URL failed; the proxy is being tried */
+  retrying: boolean;
 }
 
 const playerMode = feedPlayerMode();
@@ -677,6 +684,7 @@ function start(): void {
   el.feed.focus();
   const cur = activeEntry();
   if (cur) void playEntry(cur);
+  syncWait();
 }
 
 // ---------- session ----------
@@ -1075,6 +1083,7 @@ async function reload(preloaded?: FeedItem[], startIndex = 0): Promise<void> {
   el.feed.innerHTML = '';
   el.feed.scrollTop = 0;
   renderQueue();
+  syncWait();
   if (preloaded?.length) {
     // A play list (search results / an account's videos): show it at once, from the tapped video.
     addItems(preloaded);
@@ -1401,7 +1410,18 @@ function makeEntry(item: FeedItem): Entry {
   err.className = 'err hidden';
   root.appendChild(err);
 
-  const entry: Entry = { item, root, canvas, progress: bar, err, triedProxy: false, failed: false, isSeeking: () => seeking };
+  // What this video is waiting for, while it is the one in view (syncWait)
+  const waitEl = document.createElement('div');
+  waitEl.className = 'wait hidden';
+  waitEl.setAttribute('role', 'status');
+  const waitSpin = document.createElement('span');
+  waitSpin.className = 'spinner';
+  waitSpin.setAttribute('aria-hidden', 'true');
+  const waitText = document.createElement('span');
+  waitEl.append(waitSpin, waitText);
+  root.appendChild(waitEl);
+
+  const entry: Entry = { item, root, canvas, progress: bar, err, triedProxy: false, failed: false, isSeeking: () => seeking, waitEl, waitText, buffering: false, retrying: false };
 
   // Tap/click on the picture (poster or canvas) = pause/resume. The info block and progress bar
   // handle their own pointer events.
@@ -1421,7 +1441,15 @@ function makeEntry(item: FeedItem): Entry {
 function ensurePlayer(entry: Entry): FeedPlayer {
   if (entry.player) return entry.player;
   const player = new FeedPlayer(entry.canvas, entry.root, {
-    onFirstFrame: () => entry.root.classList.add('has-frame'),
+    onFirstFrame: () => {
+      entry.root.classList.add('has-frame');
+      entry.retrying = false;
+      if (activeEntry() === entry) syncWait();
+    },
+    onWaiting: (w) => {
+      entry.buffering = w;
+      if (activeEntry() === entry) syncWait();
+    },
     onEnded: () => {
       if (activeEntry() !== entry) return;
       if (prefs.autoscroll) goTo(state.active + 1);
@@ -1454,6 +1482,7 @@ function releasePlayer(entry: Entry): void {
   entry.src = undefined;
   entry.root.classList.remove('has-frame', 'paused');
   entry.progress.style.width = '0%';
+  entry.buffering = false;
 }
 
 function attachSource(entry: Entry, which: 'direct' | 'proxy' | 'auto' = 'auto'): boolean {
@@ -1475,13 +1504,16 @@ function onPlayerError(entry: Entry, e: Error): void {
     console.warn(`[feed] direct URL failed for ${entry.item.id} (${detail}); retrying through the proxy`);
     // A renderer that reported an error is finished; start a fresh one for the proxy URL.
     releasePlayer(entry);
+    entry.retrying = true;
     attachSource(entry, 'proxy');
     if (activeEntry() === entry && state.started) void playEntry(entry);
+    syncWait();
     return;
   }
   entry.failed = true;
   entry.err.textContent = `This video could not be loaded (${detail}).`;
   entry.err.classList.remove('hidden');
+  syncWait();
   reportProblem('player', `${entry.item.id}: ${detail}`, { url: entry.src?.url, connection: entry.src?.kind });
   if (activeEntry() === entry && prefs.autoscroll) window.setTimeout(() => activeEntry() === entry && goTo(state.active + 1), 1500);
 }
@@ -1515,12 +1547,14 @@ function ensureFormats(entry: Entry): Promise<boolean> {
           renderQueue();
         }
         if (!item.duration && r.duration) item.duration = r.duration;
+        if (activeEntry() === entry) syncWait();
         return true;
       })
       .catch((e) => {
         entry.failed = true;
         entry.err.textContent = `This video could not be resolved (${errMsg(e)})`;
         entry.err.classList.remove('hidden');
+        syncWait();
         reportProblem('resolve', `${entry.item.id}: ${errMsg(e)}`, { url: entry.item.canonicalUrl });
         if (activeEntry() === entry && prefs.autoscroll) window.setTimeout(() => activeEntry() === entry && goTo(state.active + 1), 1500);
         return false;
@@ -1558,6 +1592,7 @@ function setActive(idx: number): void {
   else el.actAuthorImg.removeAttribute('src');
   el.actAuthor.disabled = !cur.item.author.uniqueId;
   void playEntry(cur);
+  syncWait();
   renderQueue();
   // Warm the neighbours (their players fetch and decode the first frames, then idle on
   // backpressure), release the rest so decoders and audio contexts do not pile up.
@@ -1602,6 +1637,50 @@ function togglePause(entry: Entry): void {
     entry.player.pause();
     entry.root.classList.add('paused');
   }
+  syncWait();
+}
+
+// ---------- per-video status: what the video in view is waiting for ----------
+// Shown on the video only after a short delay (a quick start never flashes it) and updated as the
+// wait grows. One timer, running only while the video in view waits; nothing runs otherwise.
+const WAIT_SHOW_MS = 450;
+let waitTimer = 0;
+let waitEntry: Entry | undefined;
+let waitPhase = '';
+let waitSince = 0;
+function waitPhaseOf(e: Entry): string {
+  if (!state.started || e.failed || state.userPaused || document.hidden || overlayOpen()) return '';
+  if (e.resolving && !e.item.formats.length) return 'resolve';
+  if (!e.root.classList.contains('has-frame')) return e.retrying ? 'retry' : 'load';
+  return e.buffering ? 'buffer' : '';
+}
+function syncWait(): void {
+  const e = activeEntry();
+  const phase = e ? waitPhaseOf(e) : '';
+  if (waitEntry && waitEntry !== e) waitEntry.waitEl.classList.add('hidden');
+  // the clock starts when a wait starts; from one step to the next (resolve → load) it keeps running
+  if (e !== waitEntry || !waitPhase) waitSince = Date.now();
+  waitEntry = e;
+  waitPhase = phase;
+  if (!e || !phase) {
+    e?.waitEl.classList.add('hidden');
+    clearInterval(waitTimer);
+    waitTimer = 0;
+    return;
+  }
+  renderWait();
+  if (!waitTimer) waitTimer = window.setInterval(renderWait, 500);
+}
+function renderWait(): void {
+  const e = waitEntry;
+  if (!e) return;
+  const ms = Date.now() - waitSince;
+  if (ms < WAIT_SHOW_MS) return e.waitEl.classList.add('hidden');
+  const sec = Math.floor(ms / 1000);
+  let text = waitPhase === 'resolve' ? `Getting the video from ${P.name}…` : waitPhase === 'retry' ? 'Trying another connection…' : waitPhase === 'buffer' ? 'Buffering…' : 'Loading video…';
+  if (sec >= 6) text += `\n${sec} s – slow connection, still loading`;
+  if (e.waitText.textContent !== text) e.waitText.textContent = text;
+  e.waitEl.classList.remove('hidden');
 }
 
 function toggleMute(): void {
@@ -1904,6 +1983,7 @@ function syncOverlayPause(): void {
   if (!cur) return;
   if (document.hidden || overlayOpen()) cur.player?.pause();
   else if (!state.userPaused) void playEntry(cur);
+  syncWait();
 }
 document.addEventListener('visibilitychange', syncOverlayPause);
 

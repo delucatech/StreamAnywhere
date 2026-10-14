@@ -31,6 +31,8 @@ export interface FeedPlayerEvents {
   onPlayingChange(playing: boolean): void;
   /** Progress tick (about 4×/s while a source is loaded) */
   onTime(currentTime: number, duration: number): void;
+  /** The renderer is loading or buffering (true), or no longer waiting for data (false) */
+  onWaiting(waiting: boolean): void;
 }
 
 const TICK_MS = 250;
@@ -43,6 +45,7 @@ export class FeedPlayer {
   private wantPlay = false;
   private muted = false;
   private destroyed = false;
+  private waiting = false;
   /** Loop the current source instead of reporting onEnded */
   loop = false;
   /** URL currently loaded (set by load) */
@@ -90,6 +93,11 @@ export class FeedPlayer {
 
   private onState(s: PlayerState): void {
     if (this.destroyed) return;
+    const waiting = s === 'loading' || s === 'buffering';
+    if (waiting !== this.waiting) {
+      this.waiting = waiting;
+      this.events.onWaiting(waiting);
+    }
     if (s === 'playing') this.events.onPlayingChange(true);
     else if (s === 'paused' || s === 'error') this.events.onPlayingChange(false);
     else if (s === 'ended') {
