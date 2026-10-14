@@ -428,8 +428,46 @@
 .wide .toast {
   bottom: 24px;
 }
-.wide .loading.compact {
-  top: calc(var(--feed-top, 84px) + 14px);
+/* "loading more" while a video plays: under the Up next heading, not over the video (feed.ts showLoading) */
+.upnext-status {
+  display: none;
+}
+.wide .upnext-status:not(.hidden) {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.wide .upnext-status .spinner {
+  width: 18px;
+  height: 18px;
+  border-width: 2px;
+}
+.wide .upnext-status.done {
+  grid-template-columns: minmax(0, 1fr);
+}
+.wide .upnext-status.done .spinner {
+  display: none;
+}
+.wide .upnext-status-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.wide .upnext-status-text b {
+  font-size: 13px;
+  font-weight: 700;
+  color: #fff;
+}
+.wide .upnext-status-text span {
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--muted);
+  white-space: pre-line;
 }
 
 /* ---- Up next ---- */

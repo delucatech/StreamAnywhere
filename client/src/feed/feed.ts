@@ -128,6 +128,9 @@ const el = {
   searchLabel: $('searchLabel'),
   upnextAuto: $<HTMLButtonElement>('upnextAuto'),
   upnextList: $('upnextList'),
+  upnextStatus: $('upnextStatus'),
+  upnextStatusTitle: $('upnextStatusTitle'),
+  upnextStatusDetail: $('upnextStatusDetail'),
 };
 
 /** Stroke icons of the action column (the mute and save icons change, so they are set from here). */
@@ -997,6 +1000,16 @@ function sourceLabel(): string {
   return `${P.tabs.explore}${cat && cat.id !== P.defaultCategory ? ' · ' + cat.label : ''}`;
 }
 function showLoading(title: string, detail: string, centered: boolean, done = false): void {
+  // Wide screens, a video playing: the status goes under "Up next", off the video.
+  if (!centered && el.app.classList.contains('wide')) {
+    el.loading.classList.add('hidden');
+    el.upnextStatus.classList.remove('hidden');
+    el.upnextStatus.classList.toggle('done', done);
+    el.upnextStatusTitle.textContent = title;
+    el.upnextStatusDetail.textContent = detail;
+    return;
+  }
+  el.upnextStatus.classList.add('hidden');
   // centred on the video panel (on wide screens that is the middle column, not the whole window)
   const f = el.feed.getBoundingClientRect();
   const a = el.app.getBoundingClientRect();
@@ -1028,6 +1041,7 @@ function hideLoading(): void {
   clearInterval(loadingTicker);
   loadingTicker = 0; // a late progress answer must not show the indicator again
   el.loading.classList.add('hidden');
+  el.upnextStatus.classList.add('hidden');
 }
 /** Shows what the page is waiting for, updating the detail line as the wait grows. */
 function startLoadingStatus(): void {
