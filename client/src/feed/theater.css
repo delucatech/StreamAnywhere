@@ -3,11 +3,10 @@
    feed.ts puts the class `wide` on .app when the window is wide enough and not taller
    than wide (or when ?layout=wide asked for it); everything here applies only then.
    Left: a rail with every app (the one in use marked) and the sections. Middle: header,
-   categories and the feed: a column of 9:16 rounded panels, the one in view centred with the
-   edges of the previous / next panels showing above and below it, the actions beside it.
-   Right: Up next.
+   categories and the feed: a 9:16 rounded panel, the actions beside it. Right: Up next.
    The feed itself (drag, swipe, wheel, keys, seek) is the same element as on phones: the clip
-   window is the whole column, the panels inside it are --feed-h tall and move as one track.
+   window is exactly one panel, so the previous / next video shows only while the track moves
+   (a drag, a snap), as on a phone.
    ===================================================================================== */
 
 /* Phones: the wide-only parts are hidden, and the stage wrappers drop out of the layout */
@@ -28,14 +27,12 @@
   --upnext-w: clamp(230px, 24vw, 300px);
   /* rows: header 72 + categories 52; the stage keeps 12 px below the feed column */
   --stage-h: calc(var(--vh) - 136px);
-  /* at least this much of the previous / next panel shows above / below the one in view */
-  --peek: 26px;
-  /* room beside the panels inside the clip window, for their shadow */
+  /* room beside the panel inside the clip window, for its shadow */
   --feed-air: 32px;
   /* beside the feed: rail, Up next, the stage's padding, the air, the gap and the action column, some air */
   --side: calc(92px + var(--upnext-w) + 48px + 2 * var(--feed-air) + 18px + 76px + 16px);
-  /* a panel: as tall as the stage allows (minus the two peeks), unless the width runs out first */
-  --feed-h: min(calc(var(--stage-h) - 2 * var(--peek)), calc((100vw - var(--side)) * 16 / 9));
+  /* a panel: as tall as the stage allows, unless the width runs out first */
+  --feed-h: min(var(--stage-h), calc((100vw - var(--side)) * 16 / 9));
   --feed-w: calc(var(--feed-h) * 9 / 16);
   display: grid;
   grid-template-columns: 92px minmax(0, 1fr) var(--upnext-w);
@@ -345,15 +342,18 @@
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   min-height: 0;
 }
-/* the clip window: the whole column's height, the panels' width plus air for their shadow */
+/* the clip window: exactly one panel tall (the neighbours show only while the track moves),
+   the panel's width plus air for its shadow */
 .wide .feed {
-  flex: 1 1 auto;
+  flex: 0 0 auto;
+  height: var(--feed-h);
   width: calc(var(--feed-w) + 2 * var(--feed-air));
   background: none;
 }
-/* the panels: 9:16, rounded, stacked with no gap; the one in view is centred by feed.ts */
+/* the panels: 9:16, rounded, stacked with no gap */
 .wide .item {
   height: var(--feed-h);
   width: var(--feed-w);
@@ -362,10 +362,6 @@
   box-shadow:
     0 30px 80px rgba(0, 0, 0, 0.55),
     0 0 0 1px rgba(255, 255, 255, 0.06);
-}
-/* the previous / next panel showing above / below: click it to go there */
-.wide .item:not(.active) {
-  cursor: pointer;
 }
 /* the caption no longer shares the picture with the action column */
 .wide .item .info {
@@ -503,6 +499,10 @@
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
+  /* free, phone-like scrolling: momentum on touch, and feed.ts only nudges the current row into view */
+  touch-action: pan-y;
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
   scrollbar-width: none;
   display: flex;
   flex-direction: column;

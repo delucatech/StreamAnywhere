@@ -875,6 +875,7 @@ async function refreshSession(announce = false, recheck = false): Promise<Sessio
 }
 
 async function openSessionPanel(): Promise<void> {
+  hideLoading(); // the panel says what is going on from here
   el.session.classList.remove('hidden');
   syncOverlayPause();
   await refreshSession();
@@ -1040,6 +1041,26 @@ ${sec} s so far – still working`;
   render();
   void askServer();
 }
+/**
+ * Platforms that serve nobody signed out (Instagram): before anything can load, the server checks
+ * the saved sign-in, which can take a while (a browser start on a small VM). Shown until the feed
+ * starts loading or the sign-in panel opens.
+ */
+function startSessionCheckStatus(): void {
+  clearInterval(loadingTicker);
+  const t0 = Date.now();
+  const render = (): void => {
+    const sec = Math.round((Date.now() - t0) / 1000);
+    let detail = `Checking your ${P.name} sign-in on the server`;
+    if (sec >= 6) detail = `The server is checking the saved ${P.name} sign-in…
+(a fresh browser start on the server can take up to a minute)`;
+    if (sec >= 10) detail += `
+${sec} s so far – still working`;
+    showLoading(`Opening ${P.name}…`, detail, true);
+  };
+  render();
+  loadingTicker = window.setInterval(render, 1000);
+}
 function showRetryStatus(delayMs: number): void {
   clearInterval(loadingTicker);
   const until = Date.now() + delayMs;
@@ -1104,56 +1125,86 @@ function addItems(items: FeedItem[]): number {
 }
 
 // ---------- wide screens: the Up next queue ----------
-/** Rows of the queue: the video before the active one, the active one and this many after it. */
+/** Rows of the queue: this many videos before the active one, the active one and this many after it. */
+const QUEUE_BEHIND = 12;
 const QUEUE_AHEAD = 12;
+/** The rows by video id: kept across updates, so the list keeps its scroll position and momentum. */
+const queueRows = new Map<string, { row: HTMLElement; now: HTMLElement; who: HTMLElement; desc: HTMLElement }>();
+/** The video whose row was last brought into view. */
+let queueShownId = '';
+/** When the viewer last scrolled the list; the current row does not pull it back for a while after that. */
+let queueScrolledAt = 0;
+for (const type of ['wheel', 'touchstart', 'pointerdown'] as const) el.upnextList.addEventListener(type, () => (queueScrolledAt = Date.now()), { passive: true });
 function renderQueue(): void {
   const i = state.active;
-  const rows: HTMLElement[] = [];
-  const from = Math.max(0, i - 1);
+  const from = Math.max(0, i - QUEUE_BEHIND);
   const to = Math.min(state.entries.length, Math.max(i, 0) + QUEUE_AHEAD + 1);
+  const keep = new Set<string>();
+  const list = el.upnextList;
+  let pos = 0;
   for (let k = from; k < to; k++) {
-    const item = state.entries[k].item;
-    const row = document.createElement('button');
-    row.type = 'button';
-    row.className = k === i ? 'q-row current' : k < i ? 'q-row past' : 'q-row';
-    if (k === i) row.setAttribute('aria-current', 'true');
-    // A thin listing (YouTube's hashtag pages) names the channel only once the video is resolved
-    const name = item.author.uniqueId || item.author.nickname;
-    const author = name ? `@${name}` : '';
-    row.title = k === i ? `Playing ${author || 'this video'}` : `Play ${author || 'this video'}`;
-    const thumb = document.createElement(item.cover ? 'img' : 'span');
-    thumb.className = 'q-thumb';
-    if (thumb instanceof HTMLImageElement) {
-      thumb.src = item.cover!;
-      thumb.alt = '';
-      thumb.loading = 'lazy';
-      thumb.decoding = 'async';
-      thumb.draggable = false;
-    }
-    const text = document.createElement('span');
-    text.className = 'q-text';
-    if (k === i) {
+    const entry = state.entries[k];
+    const item = entry.item;
+    keep.add(item.id);
+    let q = queueRows.get(item.id);
+    if (!q) {
+      const row = document.createElement('button');
+      row.type = 'button';
+      const thumb = document.createElement(item.cover ? 'img' : 'span');
+      thumb.className = 'q-thumb';
+      if (thumb instanceof HTMLImageElement) {
+        thumb.src = item.cover!;
+        thumb.alt = '';
+        thumb.loading = 'lazy';
+        thumb.decoding = 'async';
+        thumb.draggable = false;
+      }
+      const text = document.createElement('span');
+      text.className = 'q-text';
       const now = document.createElement('span');
       now.className = 'q-now';
       now.textContent = 'NOW PLAYING';
-      text.appendChild(now);
+      const who = document.createElement('span');
+      who.className = 'q-author';
+      const desc = document.createElement('span');
+      desc.className = 'q-desc';
+      text.append(now, who, desc);
+      row.append(thumb, text);
+      row.addEventListener('click', () => {
+        if (!state.started) start();
+        const at = state.entries.indexOf(entry);
+        if (at >= 0 && at !== state.active) goTo(at);
+      });
+      q = { row, now, who, desc };
+      queueRows.set(item.id, q);
     }
-    const who = document.createElement('span');
-    who.className = 'q-author';
-    who.textContent = author;
-    const desc = document.createElement('span');
-    desc.className = 'q-desc';
-    desc.textContent = item.desc || (k < i ? 'Watched' : '');
-    text.append(who, desc);
-    row.append(thumb, text);
-    row.addEventListener('click', () => {
-      if (!state.started) start();
-      if (k !== state.active) goTo(k);
-    });
-    rows.push(row);
+    // the parts that change: the state (now / watched / next) and the name once the video is resolved
+    q.row.className = k === i ? 'q-row current' : k < i ? 'q-row past' : 'q-row';
+    if (k === i) q.row.setAttribute('aria-current', 'true');
+    else q.row.removeAttribute('aria-current');
+    // A thin listing (YouTube's hashtag pages) names the channel only once the video is resolved
+    const name = item.author.uniqueId || item.author.nickname;
+    const author = name ? `@${name}` : '';
+    q.row.title = k === i ? `Playing ${author || 'this video'}` : `Play ${author || 'this video'}`;
+    q.now.hidden = k !== i;
+    q.who.textContent = author;
+    q.desc.textContent = item.desc || (k < i ? 'Watched' : '');
+    // into place without emptying the list (an empty list would lose its scroll position)
+    if (list.children[pos] !== q.row) list.insertBefore(q.row, list.children[pos] ?? null);
+    pos++;
   }
-  el.upnextList.replaceChildren(...rows);
-  el.upnextList.scrollTop = 0;
+  while (list.children.length > pos) list.lastElementChild!.remove();
+  for (const id of [...queueRows.keys()]) if (!keep.has(id)) queueRows.delete(id);
+  // The current row comes into view when the video changes, unless the viewer is browsing the list.
+  const curId = state.entries[i]?.item.id ?? '';
+  if (curId !== queueShownId) {
+    queueShownId = curId;
+    const cur = queueRows.get(curId)?.row;
+    if (cur && Date.now() - queueScrolledAt > 2500) {
+      const top = cur.getBoundingClientRect().top - list.getBoundingClientRect().top + list.scrollTop - 8;
+      list.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+    }
+  }
 }
 
 /** The next batch for the current mode: the source, or the continuation of a play list. */
@@ -2030,9 +2081,13 @@ void (async () => {
     // A sign-in was pending when the page was last open: show the panel right away, in the right step.
     el.session.classList.remove('hidden');
     el.sessionText.innerHTML = `<b>Resuming your ${esc(P.name)} sign-in…</b>\nChecking where it stands on the server.`;
+  } else if (P.loginRequired) {
+    // Nothing loads until the account is known: say so, with the time it takes, instead of a black screen.
+    startSessionCheckStatus();
   }
   const s = await refreshSession();
   if (s?.state === 'login_pending') {
+    hideLoading();
     el.session.classList.remove('hidden');
     pollSession();
     if (s.qrState === 'verify' && s.verifyStep === 'code') toast('Your sign-in is waiting for the e-mailed code', false, 5000);
