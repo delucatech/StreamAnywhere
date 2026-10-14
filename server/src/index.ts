@@ -583,7 +583,12 @@ export async function buildServer() {
     if (fs.existsSync(dist)) {
       const fastifyStatic = (await import('@fastify/static')).default;
       // The launcher (home.html) is the landing page; the lab player stays at /index.html.
-      await app.register(fastifyStatic, { root: dist, prefix: '/', index: ['home.html'] });
+      // Built assets carry a content hash in their name: cache them for good, so opening an app does not
+      // revalidate every script and stylesheet over the car's mobile link. Pages keep revalidating.
+      const setHeaders = (res: { setHeader(name: string, value: string): void }, filePath: string): void => {
+        if (/[\\/]assets[\\/]/.test(filePath)) res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      };
+      await app.register(fastifyStatic, { root: dist, prefix: '/', index: ['home.html'], setHeaders });
       app.log.info({ dist }, 'serving built client');
     } else {
       app.log.warn({ dist }, 'SERVE_CLIENT is set but client/dist does not exist (run npm run build)');

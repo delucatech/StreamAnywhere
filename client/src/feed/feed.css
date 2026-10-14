@@ -39,6 +39,54 @@ body {
 .hidden {
   display: none !important;
 }
+
+/* The home screen's zoom splash, continued (feed.html); matches home.css .zoom-icon / .zoom-status */
+.splash {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  pointer-events: none;
+  transition: opacity 0.3s ease;
+}
+.splash.leaving {
+  opacity: 0;
+}
+.splash-icon {
+  position: absolute;
+  left: calc(50% - 75px);
+  top: calc(50% - 75px);
+  width: 150px;
+  height: 150px;
+  display: grid;
+  place-items: center;
+}
+.splash-icon svg {
+  width: 62%;
+  height: 62%;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.35));
+}
+.splash-status {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(50% + 96px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  color: #fff;
+  font-size: 15px;
+  font-weight: 600;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+}
+.splash-spinner {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  animation: spin 0.8s linear infinite;
+}
 button {
   font-family: inherit;
 }
@@ -124,13 +172,13 @@ button {
 .chip {
   flex: 0 0 auto;
   border: 1px solid rgba(255, 255, 255, 0.35);
-  background: rgba(0, 0, 0, 0.35);
+  /* no backdrop blur over the playing video (recomputed every frame) */
+  background: rgba(0, 0, 0, 0.5);
   color: #fff;
   border-radius: 999px;
   padding: 5px 12px;
   font-size: 13px;
   cursor: pointer;
-  backdrop-filter: blur(4px);
 }
 .chip.active {
   background: #fff;
@@ -349,13 +397,13 @@ button {
   width: 46px;
   height: 46px;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.14);
+  /* no backdrop blur: over a playing video it is recomputed every frame, which the car's GPU feels */
+  background: rgba(40, 40, 46, 0.55);
   display: grid;
   place-items: center;
   /* the icon is an SVG; text only while a download shows its progress */
   font-size: 13px;
   font-weight: 700;
-  backdrop-filter: blur(6px);
 }
 .act .ico svg {
   width: 24px;

@@ -1994,6 +1994,15 @@ el.homeLink.addEventListener('click', () => {
   }
 });
 
+// Opened from the home screen: its splash (feed.html) fades into the page now that everything is set up.
+{
+  const splash = document.getElementById('splash');
+  if (splash && !splash.classList.contains('hidden')) {
+    window.setTimeout(() => splash.classList.add('leaving'), 30);
+    window.setTimeout(() => splash.remove(), 400);
+  }
+}
+
 // Debug handle (console / automated checks): the state plus the two navigation entry points, so the
 // feed can be driven where scrolling and IntersectionObserver do not run (hidden or occluded tabs).
 (window as unknown as { streamAnywhereFeed: unknown }).streamAnywhereFeed = Object.assign(state, { setActive, goTo });

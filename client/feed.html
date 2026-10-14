@@ -11,6 +11,27 @@
     <link rel="stylesheet" href="/src/feed/theater.css" />
   </head>
   <body class="feed-body">
+    <!-- Opened from the home screen: the launcher's zoom splash continues here (same tile, same 150 px
+         icon) from the very first paint, and feed.ts fades it out once the page is set up. -->
+    <div id="splash" class="splash hidden" aria-hidden="true">
+      <div id="splashIcon" class="splash-icon"></div>
+      <div class="splash-status"><span class="splash-spinner"></span><span id="splashText"></span></div>
+    </div>
+    <script>
+      try {
+        var launch = JSON.parse(sessionStorage.getItem('streamanywhere.launch') || 'null');
+        sessionStorage.removeItem('streamanywhere.launch');
+        if (launch && launch.tile && launch.icon) {
+          var splash = document.getElementById('splash');
+          splash.style.background = launch.tile;
+          document.getElementById('splashIcon').innerHTML = launch.icon;
+          document.getElementById('splashText').textContent = 'Opening ' + launch.name + '…';
+          splash.classList.remove('hidden');
+        }
+      } catch (e) {
+        /* no splash */
+      }
+    </script>
     <div id="app" class="app">
       <!-- Wide screens (the car): the left rail with the apps (the one in use is marked) and the sections.
            Phones use the top bar + bottom bar instead; the rail's buttons act through the same handlers. -->

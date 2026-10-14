@@ -66,38 +66,72 @@ for (const app of APPS) el.grid.appendChild(makeIcon(app, false));
 for (const app of APPS) if (app.platform) el.dock.appendChild(makeIcon(app, true));
 
 let opening = false;
-/** Zoom the tapped tile up to the whole screen, then navigate. */
-function open(app: App, tile: HTMLElement): void {
-  if (opening) return;
-  opening = true;
-  rememberApp(app.id);
-  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
-  if (reduced) {
-    location.href = app.url;
-    return;
-  }
-  const r = tile.getBoundingClientRect();
-  const z = el.zoom;
-  z.style.background = app.tile;
-  z.innerHTML = app.icon;
-  z.classList.remove('hidden');
-  Object.assign(z.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px`, borderRadius: '22.37%', opacity: '1' });
-  el.screen.classList.add('launching');
-  // Grow from the tile's rectangle to the viewport (transform keeps it on the compositor).
+
+/**
+ * The zoom surface: the tile's colour (a plain box, scaled to fill the screen) and the app's icon
+ * on its own layer at its final size (scaled down to the tile at the start), so the icon never
+ * stretches with the screen's shape and stays sharp. Below it, a spinner and "Opening …" fade in
+ * while the app loads; feed.html shows the same splash until the feed is set up, so the hand-over
+ * from this page to the app is seamless.
+ */
+const ZOOM_ICON = 150;
+const zoomBg = document.createElement('div');
+zoomBg.className = 'zoom-bg';
+const zoomIcon = document.createElement('div');
+zoomIcon.className = 'zoom-icon';
+const zoomStatus = document.createElement('div');
+zoomStatus.className = 'zoom-status';
+zoomStatus.innerHTML = '<span class="zoom-spinner" aria-hidden="true"></span><span class="zoom-label"></span>';
+el.zoom.append(zoomBg, zoomIcon, zoomStatus);
+
+/** Puts the zoom layers on the tile; returns the two "full screen" transforms. */
+function prepareZoom(app: App, r: DOMRect): { bgFull: string; iconAtTile: string } {
+  el.zoom.classList.remove('hidden', 'waiting');
+  zoomBg.style.background = app.tile;
+  Object.assign(zoomBg.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+  zoomIcon.innerHTML = app.icon;
+  zoomStatus.querySelector('.zoom-label')!.textContent = `Opening ${app.name}…`;
   const sx = innerWidth / r.width;
   const sy = innerHeight / r.height;
   const dx = innerWidth / 2 - (r.left + r.width / 2);
   const dy = innerHeight / 2 - (r.top + r.height / 2);
-  const anim = z.animate(
+  return {
+    bgFull: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`,
+    // the icon layer is centred on the screen at ZOOM_ICON px; at the tile it is moved back and shrunk
+    iconAtTile: `translate(${-dx}px, ${-dy}px) scale(${r.width / ZOOM_ICON})`,
+  };
+}
+
+/** Zoom the tapped tile up to the whole screen while the app's page is already being fetched. */
+function open(app: App, tile: HTMLElement): void {
+  if (opening) return;
+  opening = true;
+  rememberApp(app.id);
+  // feed.html continues this splash until the feed is set up (its inline script reads this)
+  try {
+    sessionStorage.setItem('streamanywhere.launch', JSON.stringify({ tile: app.tile, icon: app.icon, name: app.name }));
+  } catch {
+    /* storage unavailable: the app opens without the splash */
+  }
+  const go = () => location.assign(app.url);
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return go();
+  const t = prepareZoom(app, tile.getBoundingClientRect());
+  el.screen.classList.add('launching');
+  const timing: KeyframeAnimationOptions = { duration: 320, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)', fill: 'forwards' };
+  // transform and opacity only: both run on the compositor, smooth even while the next page loads
+  zoomBg.animate(
     [
       { transform: 'translate(0, 0) scale(1)', borderRadius: '22.37%' },
-      { transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`, borderRadius: '0%' },
+      { transform: t.bgFull, borderRadius: '0%' },
     ],
-    { duration: 340, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)', fill: 'forwards' },
+    timing,
   );
-  const go = () => (location.href = app.url);
-  anim.addEventListener('finish', go);
-  window.setTimeout(go, 500); // in case 'finish' never fires (hidden tab)
+  zoomIcon.animate([{ transform: t.iconAtTile }, { transform: 'translate(0, 0) scale(1)' }], timing);
+  // the spinner fades in (CSS, delayed) in case the app takes a moment
+  el.zoom.classList.add('waiting');
+  // Ask for the page right away (the zoom is mostly done by the time the first bytes arrive),
+  // instead of waiting for the animation to end.
+  window.setTimeout(go, 120);
 }
 
 /** Coming back from an app: the full-screen tile shrinks back into its icon. */
@@ -112,25 +146,25 @@ function playReturn(): void {
   const app = APPS.find((a) => a.id === from);
   const tile = app && el.grid.querySelector<HTMLElement>(`.app[data-app="${app.id}"] .tile`);
   if (!app || !tile || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-  const r = tile.getBoundingClientRect();
-  const z = el.zoom;
-  z.style.background = app.tile;
-  z.innerHTML = app.icon;
-  z.classList.remove('hidden');
-  Object.assign(z.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px`, borderRadius: '22.37%' });
-  const sx = innerWidth / r.width;
-  const sy = innerHeight / r.height;
-  const dx = innerWidth / 2 - (r.left + r.width / 2);
-  const dy = innerHeight / 2 - (r.top + r.height / 2);
-  const anim = z.animate(
+  const t = prepareZoom(app, tile.getBoundingClientRect());
+  const timing: KeyframeAnimationOptions = { duration: 360, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)', fill: 'forwards' };
+  const anim = zoomBg.animate(
     [
-      { transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`, borderRadius: '0%', opacity: 1 },
-      { transform: 'translate(0, 0) scale(1)', borderRadius: '22.37%', opacity: 1 },
-      { transform: 'translate(0, 0) scale(1)', borderRadius: '22.37%', opacity: 0 },
+      { transform: t.bgFull, borderRadius: '0%', opacity: 1, offset: 0 },
+      { transform: 'translate(0, 0) scale(1)', borderRadius: '22.37%', opacity: 1, offset: 0.8 },
+      { transform: 'translate(0, 0) scale(1)', borderRadius: '22.37%', opacity: 0, offset: 1 },
     ],
-    { duration: 380, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)', fill: 'forwards' },
+    timing,
   );
-  const done = () => z.classList.add('hidden');
+  zoomIcon.animate(
+    [
+      { transform: 'translate(0, 0) scale(1)', opacity: 1, offset: 0 },
+      { transform: t.iconAtTile, opacity: 1, offset: 0.8 },
+      { transform: t.iconAtTile, opacity: 0, offset: 1 },
+    ],
+    timing,
+  );
+  const done = () => el.zoom.classList.add('hidden');
   anim.addEventListener('finish', done);
   window.setTimeout(done, 600);
 }
@@ -140,6 +174,7 @@ window.addEventListener('pageshow', (e) => {
   if (e.persisted) {
     opening = false;
     el.screen.classList.remove('launching');
+    el.zoom.classList.remove('waiting');
     el.zoom.classList.add('hidden');
   }
 });
@@ -179,6 +214,30 @@ document.addEventListener('keydown', (e) => {
   e.preventDefault();
 });
 
+/**
+ * While the home screen idles, fetch the app page's scripts and styles into the browser cache (the
+ * server marks them immutable), so tapping an icon only has to wait for the page itself.
+ */
+function warmAppPage(): void {
+  const page = new URL('feed.html', location.href);
+  fetch(page.href, { credentials: 'same-origin' })
+    .then((r) => (r.ok ? r.text() : ''))
+    .then((html) => {
+      const seen = new Set<string>();
+      for (const m of html.matchAll(/(?:src|href)="([^"]*assets\/[^"]+\.(?:js|css))"/g)) {
+        const href = new URL(m[1], page).href;
+        if (seen.has(href)) continue;
+        seen.add(href);
+        const link = document.createElement('link');
+        link.rel = 'prefetch';
+        link.href = href;
+        document.head.appendChild(link);
+      }
+    })
+    .catch(() => undefined);
+}
+
 playReturn();
+window.setTimeout(warmAppPage, 1200);
 void refreshBadges();
 window.setInterval(() => void refreshBadges(), 30_000);

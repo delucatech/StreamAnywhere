@@ -398,9 +398,8 @@
   gap: 8px;
   padding: 5px 12px 5px 5px;
   border-radius: 999px;
-  background: rgba(10, 11, 15, 0.55);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  /* solid, not a backdrop blur: it sits on the playing video */
+  background: rgba(10, 11, 15, 0.7);
   font-size: 12px;
   font-weight: 700;
   pointer-events: none;
