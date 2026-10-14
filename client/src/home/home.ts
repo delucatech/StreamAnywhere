@@ -132,6 +132,27 @@ function open(app: App, tile: HTMLElement): void {
   // Ask for the page right away (the zoom is mostly done by the time the first bytes arrive),
   // instead of waiting for the animation to end.
   window.setTimeout(go, 120);
+  // Still here long after the tap (the app's page never arrived): never hang on "Opening …".
+  clearTimeout(stuckTimer);
+  stuckTimer = window.setTimeout(() => launchStuck(app), 15_000);
+}
+
+/** The app's page has not replaced this one 15 s after the tap: say so, tap to try again, tell the server. */
+let stuckTimer = 0;
+function launchStuck(app: App): void {
+  zoomStatus.querySelector('.zoom-label')!.textContent = `Opening ${app.name} is taking too long. Tap to try again.`;
+  el.zoom.classList.add('stuck');
+  el.zoom.onclick = () => location.assign(app.url);
+  void api.report({
+    kind: 'launch stuck',
+    ok: false,
+    connection: 'proxy',
+    renderer: 'none',
+    platform: app.platform?.id,
+    detail: `still on the home screen 15 s after tapping ${app.name} (${app.url}); readyState ${document.readyState}, ${navigator.onLine ? 'online' : 'offline'}`,
+    page: location.pathname,
+    ua: navigator.userAgent,
+  });
 }
 
 /** Coming back from an app: the full-screen tile shrinks back into its icon. */
@@ -173,8 +194,10 @@ function playReturn(): void {
 window.addEventListener('pageshow', (e) => {
   if (e.persisted) {
     opening = false;
+    clearTimeout(stuckTimer);
+    el.zoom.onclick = null;
     el.screen.classList.remove('launching');
-    el.zoom.classList.remove('waiting');
+    el.zoom.classList.remove('waiting', 'stuck');
     el.zoom.classList.add('hidden');
   }
 });

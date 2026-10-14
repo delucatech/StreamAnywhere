@@ -31,6 +31,61 @@
       } catch (e) {
         /* no splash */
       }
+      // The page must never hang on "Opening …": if feed.ts has not finished setting up after 15 s
+      // (its script did not load, or failed on this browser before it could report), the splash says
+      // so, a tap reloads, and the server hears what this device saw (/api/log: "client problem: page stuck").
+      // Errors are collected from here on, so even one thrown before feed.ts is running is known.
+      var bootErrors = [];
+      window.addEventListener(
+        'error',
+        function (e) {
+          var t = e.target;
+          var what = t && t !== window && (t.src || t.href) ? 'failed to load ' + (t.src || t.href) : (e.message || 'error') + ' @ ' + (e.filename || '?') + ':' + (e.lineno || 0);
+          if (!window.streamAnywhereReady && bootErrors.length < 4) bootErrors.push(what);
+        },
+        true,
+      );
+      window.addEventListener('unhandledrejection', function (e) {
+        if (!window.streamAnywhereReady && bootErrors.length < 4) bootErrors.push('rejection: ' + ((e.reason && e.reason.message) || e.reason));
+      });
+      setTimeout(function () {
+        if (window.streamAnywhereReady) return;
+        var platform = (location.search.match(/[?&]platform=([\w-]+)/) || [])[1] || '';
+        var name = (launch && launch.name) || 'the app';
+        try {
+          fetch('/api/report', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            credentials: 'same-origin',
+            keepalive: true,
+            body: JSON.stringify({
+              kind: 'page stuck',
+              ok: false,
+              connection: 'proxy',
+              renderer: 'none',
+              platform: platform || undefined,
+              detail:
+                'feed page not set up after 15 s: script ' + (window.streamAnywhereStarted ? 'started, did not finish' : 'never ran') +
+                '; readyState ' + document.readyState + (bootErrors.length ? '; ' + bootErrors.join(' | ') : '; no error seen'),
+              page: location.pathname + location.search,
+              ua: navigator.userAgent,
+            }),
+          }).catch(function () {});
+        } catch (e) {
+          /* nothing to tell it with */
+        }
+        var s = document.getElementById('splash');
+        if (!s) return;
+        if (s.classList.contains('hidden')) {
+          s.style.background = '#000';
+          s.classList.remove('hidden');
+        }
+        s.classList.add('stuck');
+        document.getElementById('splashText').textContent = 'Opening ' + name + ' is taking too long. Tap to try again.';
+        s.addEventListener('click', function () {
+          location.reload();
+        });
+      }, 15000);
     </script>
     <div id="app" class="app">
       <!-- Wide screens (the car): the left rail with the apps (the one in use is marked) and the sections.

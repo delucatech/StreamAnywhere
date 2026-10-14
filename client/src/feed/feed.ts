@@ -32,6 +32,9 @@ import { currentPlatform, PLATFORMS, rememberApp } from '../platforms';
 import { FeedPlayer, feedPlayerMode } from './player';
 import { closeTopPanel, initSocial, openInbox, openProfile, openSearch, panelOpen, reopenPlayList, type PlayList } from './social';
 
+// feed.html's failsafe reports whether this script ran at all
+(window as unknown as { streamAnywhereStarted: boolean }).streamAnywhereStarted = true;
+
 /** The platform this page plays (feed.html?platform=…, set by the launcher); it colours and labels the page. */
 const P = currentPlatform();
 rememberApp(P.id);
@@ -2148,6 +2151,8 @@ el.homeLink.addEventListener('click', () => {
 });
 
 // Opened from the home screen: its splash (feed.html) fades into the page now that everything is set up.
+// (Also after feed.html's 15 s failsafe showed it: a slow load that got there after all.)
+(window as unknown as { streamAnywhereReady: boolean }).streamAnywhereReady = true;
 {
   const splash = document.getElementById('splash');
   if (splash && !splash.classList.contains('hidden')) {

@@ -213,6 +213,11 @@ body {
   z-index: 10;
   pointer-events: none;
 }
+/* the app's page did not arrive in time (home.ts launchStuck): a tap tries again */
+.zoom.stuck {
+  pointer-events: auto;
+  cursor: pointer;
+}
 .zoom-bg {
   position: fixed;
   transform-origin: center;

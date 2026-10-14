@@ -51,6 +51,11 @@ body {
 .splash.leaving {
   opacity: 0;
 }
+/* the app did not set up in time (feed.html's failsafe): a tap reloads */
+.splash.stuck {
+  pointer-events: auto;
+  cursor: pointer;
+}
 .splash-icon {
   position: absolute;
   left: calc(50% - 75px);
