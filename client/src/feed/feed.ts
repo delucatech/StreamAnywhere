@@ -148,6 +148,8 @@ interface Entry {
   /** Canvas player; exists only while the item is active or a neighbour of the active one */
   player?: FeedPlayer;
   progress: HTMLElement;
+  /** The lighter line behind the progress: how much of the video has been downloaded */
+  downloaded: HTMLElement;
   err: HTMLElement;
   /** Which URL the player currently uses */
   src?: SourceCandidate;
@@ -268,6 +270,7 @@ function toast(msg: string, isError = false, ms = 3500): void {
   toastTimer = window.setTimeout(() => el.toast.classList.add('hidden'), ms);
 }
 const fmtCount = (n?: number): string => (n === undefined ? '' : n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : String(n));
+const fmtBytes = (n: number): string => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
 const errMsg = (e: unknown): string => (e instanceof ApiError ? `${e.message} (HTTP ${e.status})` : (e as Error)?.message || String(e));
 /** Tells the server what went wrong on this device (it lands in /api/log, tagged client) - at most one report every 2 s per kind. */
 const reportedAt = new Map<string, number>();
@@ -1568,8 +1571,9 @@ function makeEntry(item: FeedItem): Entry {
   // the player is seeked at most every SEEK_THROTTLE_MS plus once more on release.
   const progress = document.createElement('div');
   progress.className = 'progress';
+  const downloaded = document.createElement('b');
   const bar = document.createElement('i');
-  progress.appendChild(bar);
+  progress.append(downloaded, bar);
   root.appendChild(progress);
   let seeking = false;
   let lastSeekAt = 0;
@@ -1626,7 +1630,7 @@ function makeEntry(item: FeedItem): Entry {
   waitEl.append(waitSpin, waitText);
   root.appendChild(waitEl);
 
-  const entry: Entry = { item, root, canvas, progress: bar, err, triedProxy: false, failed: false, isSeeking: () => seeking, waitEl, waitText, buffering: false, retrying: false };
+  const entry: Entry = { item, root, canvas, progress: bar, downloaded, err, triedProxy: false, failed: false, isSeeking: () => seeking, waitEl, waitText, buffering: false, retrying: false };
 
   // Tap/click on the picture (poster or canvas) = pause/resume; on the edge of the previous / next
   // video showing above / below (wide screens) = go there. The info block and progress bar handle
@@ -1671,6 +1675,8 @@ function ensurePlayer(entry: Entry): FeedPlayer {
     },
     onTime: (t, d) => {
       if (!entry.isSeeking()) entry.progress.style.width = `${(100 * t) / d}%`;
+      const dl = player.download();
+      if (dl.fraction >= 0) entry.downloaded.style.width = `${Math.round(dl.fraction * 1000) / 10}%`;
       // Reopened page: back to where the viewer was in this video (once, when it is playing)
       if (entry.resumeAt !== undefined && !player.paused) {
         const at = entry.resumeAt;
@@ -1698,6 +1704,7 @@ function releasePlayer(entry: Entry): void {
   entry.src = undefined;
   entry.root.classList.remove('has-frame', 'paused');
   entry.progress.style.width = '0%';
+  entry.downloaded.style.width = '0%';
   entry.buffering = false;
 }
 
@@ -1910,6 +1917,10 @@ function renderWait(): void {
   if (ms < WAIT_SHOW_MS) return e.waitEl.classList.add('hidden');
   const sec = Math.floor(ms / 1000);
   let text = waitPhase === 'resolve' ? `Getting the video from ${P.name}…` : waitPhase === 'retry' ? 'Trying another connection…' : waitPhase === 'buffer' ? 'Buffering…' : 'Loading video…';
+  // Bytes are moving: how much of the video is here (the file size once the server has said it)
+  const dl = waitPhase === 'resolve' ? undefined : e.player?.download();
+  if (dl && dl.fraction >= 0) text += ` ${Math.floor(dl.fraction * 100)}%`;
+  if (dl && dl.loaded > 0) text += dl.total ? `\n${fmtBytes(dl.loaded)} of ${fmtBytes(dl.total)}` : `\n${fmtBytes(dl.loaded)} received`;
   if (sec >= 6) text += `\n${sec} s – slow connection, still loading`;
   if (e.waitText.textContent !== text) e.waitText.textContent = text;
   e.waitEl.classList.remove('hidden');

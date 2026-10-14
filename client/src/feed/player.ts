@@ -10,7 +10,7 @@
  * Adds what the feed needs on top of the Renderer interface: loop, a time ticker for the progress
  * bar, "paused" bookkeeping and a muted flag (volume 0/1).
  */
-import type { LoadSource, PlayerState, Renderer, RendererEvents } from '../renderers/types';
+import type { DownloadProgress, LoadSource, PlayerState, Renderer, RendererEvents } from '../renderers/types';
 import { VideoElementRenderer } from '../renderers/videoElementRenderer';
 import { WebCodecsRenderer, webCodecsSupported } from '../renderers/webcodecsRenderer';
 
@@ -89,6 +89,10 @@ export class FeedPlayer {
   }
   get state(): PlayerState {
     return this.renderer.state;
+  }
+  /** How much of the video has been downloaded (for the loading text and the buffer bar) */
+  download(): DownloadProgress {
+    return this.renderer.download?.() ?? { loaded: 0, total: 0, fraction: -1 };
   }
 
   private onState(s: PlayerState): void {

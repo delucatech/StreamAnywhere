@@ -7,7 +7,7 @@
  * without the attribute is made (browser "no-cors" media load): playback may work, but the
  * canvas becomes tainted (getImageData is blocked) – which the stats report explicitly.
  */
-import { emptyStats, FpsCounter, type LoadSource, type PlayerState, type PlayerStats, type Renderer, type RendererEvents } from './types';
+import { emptyStats, FpsCounter, type DownloadProgress, type LoadSource, type PlayerState, type PlayerStats, type Renderer, type RendererEvents } from './types';
 
 type VideoWithRvfc = HTMLVideoElement & {
   requestVideoFrameCallback?: (cb: (now: number, meta: { presentedFrames: number; mediaTime: number; width: number; height: number }) => void) => number;
@@ -216,6 +216,16 @@ export class VideoElementRenderer implements Renderer {
   }
   setVolume(v: number): void {
     this.video.volume = v;
+  }
+
+  /** A <video> element tells time ranges, not bytes: the share of the duration buffered from the playhead on. */
+  download(): DownloadProgress {
+    const v = this.video;
+    const d = this.duration;
+    if (!(d > 0)) return { loaded: 0, total: 0, fraction: -1 };
+    let end = 0;
+    for (let i = 0; i < v.buffered.length; i++) if (v.buffered.start(i) <= v.currentTime + 0.5) end = Math.max(end, v.buffered.end(i));
+    return { loaded: 0, total: 0, fraction: Math.min(1, end / d) };
   }
 
   stats(): PlayerStats {

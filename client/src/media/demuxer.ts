@@ -33,6 +33,8 @@ export interface DemuxerCallbacks {
 export interface DemuxerStats {
   bytesLoaded: number;
   totalBytes: number;
+  /** How far into the file the current download has got (every byte received, merged or not) */
+  downloadedTo: number;
   rangeSupported: boolean | undefined;
   isProgressive: boolean | undefined;
   restarts: number;
@@ -59,6 +61,7 @@ export class Mp4Demuxer {
   readonly stats: DemuxerStats = {
     bytesLoaded: 0,
     totalBytes: 0,
+    downloadedTo: 0,
     rangeSupported: undefined,
     isProgressive: undefined,
     restarts: 0,
@@ -245,6 +248,7 @@ export class Mp4Demuxer {
         // Asked for bytes at or past EOF: there is nothing left to download.
         this.cb.onLog(`range at EOF (${offset}/${this.stats.totalBytes}); download already complete`);
         this.ended = true;
+        this.stats.downloadedTo = this.stats.totalBytes;
         this.file.flush();
         this.cb.onEnd();
         return;
@@ -269,6 +273,7 @@ export class Mp4Demuxer {
       if (!res.body) throw new Error('Response has no body stream');
       const reader = res.body.getReader();
       this.filePos = offset;
+      this.stats.downloadedTo = offset;
       let pending: Uint8Array[] = [];
       let pendingBytes = 0;
       const flushPending = (): boolean => {
@@ -308,6 +313,7 @@ export class Mp4Demuxer {
           if (!flushPending()) return;
           this.ended = true;
           if (!this.stats.totalBytes || this.filePos > this.stats.totalBytes) this.stats.totalBytes = this.filePos;
+          this.stats.downloadedTo = this.stats.totalBytes;
           this.file.flush();
           this.cb.onLog(`download complete: ${this.stats.bytesLoaded} bytes`);
           this.cb.onEnd();
@@ -324,6 +330,7 @@ export class Mp4Demuxer {
         }
         pending.push(chunk);
         pendingBytes += chunk.byteLength;
+        this.stats.downloadedTo = this.filePos + pendingBytes;
         if (pendingBytes >= CHUNK_MERGE_TARGET) {
           if (!flushPending()) return;
         }

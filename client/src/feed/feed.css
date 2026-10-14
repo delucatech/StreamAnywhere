@@ -347,10 +347,25 @@ button {
   background: #fff;
   transition: height 0.12s;
 }
+/* behind the played part: how much of the video has been downloaded (like YouTube's grey bar) */
+.item .progress b {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  display: block;
+  height: 3px;
+  width: 0;
+  background: rgba(255, 255, 255, 0.45);
+  transition:
+    height 0.12s,
+    width 0.3s linear;
+}
 .item .progress:hover::before,
 .item .progress:hover i,
+.item .progress:hover b,
 .item.seeking .progress::before,
-.item.seeking .progress i {
+.item.seeking .progress i,
+.item.seeking .progress b {
   height: 6px;
 }
 .item.seeking .progress i::after {

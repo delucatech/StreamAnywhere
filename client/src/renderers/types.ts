@@ -60,8 +60,20 @@ export interface RendererEvents {
   onError(err: Error): void;
 }
 
+/** How much of the media has been downloaded (the feed's loading text and buffer bar). */
+export interface DownloadProgress {
+  /** Bytes received so far (0 when the renderer cannot tell, e.g. a <video> element) */
+  loaded: number;
+  /** File size in bytes; 0 when not known (yet) */
+  total: number;
+  /** 0..1, or -1 when unknown */
+  fraction: number;
+}
+
 export interface Renderer {
   readonly name: string;
+  /** Cheap enough to call several times a second (unlike stats()) */
+  download?(): DownloadProgress;
   load(src: LoadSource): Promise<void>;
   play(): Promise<void>;
   pause(): void;

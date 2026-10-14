@@ -13,7 +13,7 @@ import type { Sample } from 'mp4box';
 import { AudioSink, WallClock, type PlaybackClock } from '../media/audioOutput';
 import { shortCodecName, type TrackInfo } from '../media/codecConfig';
 import { Mp4Demuxer } from '../media/demuxer';
-import { emptyStats, FpsCounter, type LoadSource, type PlayerState, type PlayerStats, type Renderer, type RendererEvents } from './types';
+import { emptyStats, FpsCounter, type DownloadProgress, type LoadSource, type PlayerState, type PlayerStats, type Renderer, type RendererEvents } from './types';
 
 const TARGET_DECODED_FRAMES = 12; // frames kept decoded ahead of the playhead
 const MAX_DECODE_QUEUE = 8; // chunks in flight inside the decoder
@@ -469,6 +469,17 @@ export class WebCodecsRenderer implements Renderer {
   setVolume(v: number): void {
     this.volume = v;
     this.audio?.setVolume(v);
+  }
+
+  /** Picture file plus the separate sound file when there is one (YouTube); the sound counts once its size is known. */
+  download(): DownloadProgress {
+    const v = this.demuxer?.stats;
+    if (!v) return { loaded: 0, total: 0, fraction: -1 };
+    const a = this.audioDemuxer?.stats;
+    const withAudio = !!a && a.totalBytes > 0;
+    const loaded = v.downloadedTo + (withAudio ? a.downloadedTo : 0);
+    const total = v.totalBytes ? v.totalBytes + (withAudio ? a.totalBytes : 0) : 0;
+    return { loaded, total, fraction: total ? Math.min(1, loaded / total) : -1 };
   }
 
   stats(): PlayerStats {
