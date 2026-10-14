@@ -26,7 +26,7 @@
 import type { FeedItem, FeedSource, LoginMode, MediaFormat, SessionInputRequest, SessionStatus } from '../../../shared/types';
 import { api, ApiError, apiUrl } from '../api';
 import { pressed } from '../busy';
-import { currentPlatform, rememberApp } from '../platforms';
+import { currentPlatform, PLATFORMS, rememberApp } from '../platforms';
 import { FeedPlayer, feedPlayerMode } from './player';
 import { closeTopPanel, initSocial, openInbox, openProfile, openSearch, panelOpen, reopenPlayList, type PlayList } from './social';
 
@@ -110,6 +110,28 @@ const el = {
   loading: $('loading'),
   loadingTitle: $('loadingTitle'),
   loadingDetail: $('loadingDetail'),
+  // wide-screen layout (the car): rail, header title, peeks, Up next
+  railLauncher: $<HTMLButtonElement>('railLauncher'),
+  railApps: $('railApps'),
+  railFriends: $<HTMLButtonElement>('railFriends'),
+  railInbox: $<HTMLButtonElement>('railInbox'),
+  railProfile: $<HTMLButtonElement>('railProfile'),
+  railProfileLabel: $('railProfileLabel'),
+  appName: $('appName'),
+  appSub: $('appSub'),
+  searchLabel: $('searchLabel'),
+  peekPrev: $<HTMLButtonElement>('peekPrev'),
+  peekNext: $<HTMLButtonElement>('peekNext'),
+  upnextAuto: $<HTMLButtonElement>('upnextAuto'),
+  upnextList: $('upnextList'),
+};
+
+/** Stroke icons of the action column (the mute and save icons change, so they are set from here). */
+const icon = (paths: string): string => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+const ICON = {
+  sound: icon('<path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4 4 0 0 1 0 6"/><path d="M18 6.5a7.5 7.5 0 0 1 0 11"/>'),
+  muted: icon('<path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M16 9.5l5 5M21 9.5l-5 5"/>'),
+  save: icon('<path d="M12 4v11"/><path d="M7.5 10.5L12 15l4.5-4.5"/><path d="M5 19.5h14"/>'),
 };
 
 interface Entry {
@@ -246,6 +268,10 @@ function renderSourceUi(): void {
   el.contextBack.title = back;
   el.contextBack.setAttribute('aria-label', back);
   for (const c of el.chips.querySelectorAll<HTMLButtonElement>('.chip')) c.classList.toggle('active', Number(c.dataset.id) === prefs.category);
+  // Wide-screen header: the app's name, then what plays (tab · category, or the search / account)
+  const tabName = prefs.source === 'foryou' ? P.tabs.foryou : P.tabs.explore;
+  const cat = prefs.source === 'explore' && prefs.category !== P.defaultCategory ? P.categories.find((c) => c.id === prefs.category) : undefined;
+  el.appSub.textContent = listMode ? el.contextLabel.textContent || '' : cat ? `${tabName} · ${cat.label}` : tabName;
 }
 async function setSource(src: FeedSource, announce = true): Promise<void> {
   if ((src === 'foryou' || P.loginRequired) && state.session?.state !== 'logged_in') {
@@ -314,6 +340,8 @@ el.tabs.addEventListener('click', (e) => {
   if (b?.dataset.source) pressed(b, () => setSource(b.dataset.source as FeedSource));
 });
 el.searchBtn.addEventListener('click', () => openSearch());
+el.searchLabel.textContent = P.searchPlaceholder;
+el.appName.textContent = P.name;
 renderSourceUi();
 
 // ---------- actions column + bottom bar ----------
@@ -340,6 +368,43 @@ el.navInbox.addEventListener('click', () => (P.social ? pressed(el.navInbox, () 
 el.actAuthor.addEventListener('click', () => {
   const cur = activeEntry();
   if (cur?.item.author.uniqueId) void openProfile(cur.item.author.uniqueId);
+});
+// Wide screens: the rail lists every app with the one in use marked; tapping another one switches to
+// its feed, tapping the one in use goes back to the first video (like Home). The section buttons act
+// through the bottom bar's handlers (the bottom bar is hidden there).
+for (const p of PLATFORMS) {
+  const inUse = p.id === P.id;
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = inUse ? 'rail-app active' : 'rail-app';
+  b.title = inUse ? `${p.name} (in use): back to the first video` : `Switch to ${p.name}`;
+  b.setAttribute('aria-label', inUse ? `${p.name}, in use` : `Switch to ${p.name}`);
+  if (inUse) b.setAttribute('aria-current', 'page');
+  b.style.setProperty('--app-accent', p.accent);
+  const tile = document.createElement('span');
+  tile.className = 'rail-tile';
+  tile.style.background = p.tile;
+  tile.innerHTML = p.icon;
+  const name = document.createElement('span');
+  name.className = 'rail-name';
+  name.textContent = p.short;
+  b.append(tile, name);
+  b.addEventListener('click', () => (inUse ? el.navHome.click() : location.assign(p.url)));
+  el.railApps.appendChild(b);
+}
+el.railLauncher.addEventListener('click', () => el.homeLink.click());
+el.railFriends.addEventListener('click', () => el.navFriends.click());
+el.railInbox.addEventListener('click', () => el.navInbox.click());
+el.railProfile.addEventListener('click', () => el.navProfile.click());
+el.upnextAuto.addEventListener('click', () => toggleAutoscroll());
+el.peekPrev.addEventListener('click', () => {
+  userScrollAt = Date.now();
+  goTo(state.active - 1);
+});
+el.peekNext.addEventListener('click', () => {
+  if (!state.started) start();
+  userScrollAt = Date.now();
+  goTo(state.active + 1);
 });
 initSocial({ play: playList, toast, isLoggedIn: () => state.session?.state === 'logged_in', openSessionPanel, fmtCount, platform: P, onPanelsChange: syncOverlayPause });
 el.navProfile.addEventListener('click', () => pressed(el.navProfile, () => openSessionPanel()));
@@ -548,10 +613,13 @@ el.start.addEventListener('click', (e) => {
 });
 
 function syncActionButtons(): void {
-  el.actMuteIco.textContent = prefs.muted ? '🔇' : '🔊';
+  el.actMuteIco.innerHTML = prefs.muted ? ICON.muted : ICON.sound;
   el.actAuto.classList.toggle('on', prefs.autoscroll);
   el.actAutoLabel.textContent = prefs.autoscroll ? 'Auto on' : 'Auto off';
+  el.upnextAuto.classList.toggle('on', prefs.autoscroll);
+  el.upnextAuto.setAttribute('aria-checked', String(prefs.autoscroll));
 }
+el.actDownloadIco.innerHTML = ICON.save;
 syncActionButtons();
 
 function toggleAutoscroll(): void {
@@ -678,6 +746,7 @@ function renderSession(): void {
     /* storage unavailable */
   }
   el.navProfileLabel.textContent = s.state === 'logged_in' ? `@${(s.username || 'me').slice(0, 12)}` : s.state === 'login_pending' ? 'Signing in…' : 'Profile';
+  el.railProfileLabel.textContent = el.navProfileLabel.textContent;
   el.navProfile.classList.toggle('active', s.state === 'logged_in');
 }
 const SIGNIN_KEY = P.id === 'tiktok' ? 'streamanywhere.feed.signin' : `streamanywhere.feed.${P.id}.signin`;
@@ -974,6 +1043,7 @@ async function reload(preloaded?: FeedItem[], startIndex = 0): Promise<void> {
   state.wantNext = false;
   el.feed.innerHTML = '';
   el.feed.scrollTop = 0;
+  renderQueue();
   if (preloaded?.length) {
     // A play list (search results / an account's videos): show it at once, from the tapped video.
     addItems(preloaded);
@@ -996,7 +1066,68 @@ function addItems(items: FeedItem[]): number {
     state.entries.push(makeEntry(item));
     added++;
   }
+  if (added) renderQueue();
   return added;
+}
+
+// ---------- wide screens: the edges of the previous / next videos + the Up next queue ----------
+/** Rows of the queue: the video before the active one, the active one and this many after it. */
+const QUEUE_AHEAD = 12;
+const cssUrl = (u: string): string => `url("${u.replace(/["\\\n\r]/g, (c) => encodeURIComponent(c))}")`;
+function renderQueue(): void {
+  const i = state.active;
+  const prev = state.entries[i - 1];
+  const next = state.entries[i + 1];
+  el.peekPrev.disabled = !prev;
+  el.peekPrev.style.backgroundImage = prev?.item.cover ? cssUrl(prev.item.cover) : '';
+  el.peekNext.style.backgroundImage = next?.item.cover ? cssUrl(next.item.cover) : '';
+  const rows: HTMLElement[] = [];
+  const from = Math.max(0, i - 1);
+  const to = Math.min(state.entries.length, Math.max(i, 0) + QUEUE_AHEAD + 1);
+  for (let k = from; k < to; k++) {
+    const item = state.entries[k].item;
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = k === i ? 'q-row current' : k < i ? 'q-row past' : 'q-row';
+    if (k === i) row.setAttribute('aria-current', 'true');
+    // A thin listing (YouTube's hashtag pages) names the channel only once the video is resolved
+    const name = item.author.uniqueId || item.author.nickname;
+    const author = name ? `@${name}` : '';
+    row.title = k === i ? `Playing ${author || 'this video'}` : `Play ${author || 'this video'}`;
+    const thumb = document.createElement(item.cover ? 'img' : 'span');
+    thumb.className = 'q-thumb';
+    if (thumb instanceof HTMLImageElement) {
+      thumb.src = item.cover!;
+      thumb.alt = '';
+      thumb.loading = 'lazy';
+      thumb.decoding = 'async';
+      thumb.draggable = false;
+    }
+    const text = document.createElement('span');
+    text.className = 'q-text';
+    if (k === i) {
+      const now = document.createElement('span');
+      now.className = 'q-now';
+      now.textContent = 'NOW PLAYING';
+      text.appendChild(now);
+    }
+    const who = document.createElement('span');
+    who.className = 'q-author';
+    who.textContent = author;
+    const desc = document.createElement('span');
+    desc.className = 'q-desc';
+    desc.textContent = item.desc || (k < i ? 'Watched' : '');
+    text.append(who, desc);
+    row.append(thumb, text);
+    row.addEventListener('click', () => {
+      if (!state.started) start();
+      userScrollAt = Date.now();
+      if (k !== state.active) goTo(k);
+    });
+    rows.push(row);
+  }
+  el.upnextList.replaceChildren(...rows);
+  el.upnextList.scrollTop = 0;
 }
 
 /** The next batch for the current mode: the source, or the continuation of a play list. */
@@ -1137,6 +1268,16 @@ function makeEntry(item: FeedItem): Entry {
   canvas.setAttribute('role', 'img');
   canvas.setAttribute('aria-label', label);
   root.appendChild(canvas);
+
+  // Wide screens: the app the video comes from, on the picture
+  const srcBadge = document.createElement('div');
+  srcBadge.className = 'src-badge';
+  const srcTile = document.createElement('span');
+  srcTile.className = 'src-tile';
+  srcTile.style.background = P.tile;
+  srcTile.innerHTML = P.icon;
+  srcBadge.append(srcTile, P.name);
+  root.appendChild(srcBadge);
 
   const badge = document.createElement('div');
   badge.className = 'pause-badge';
@@ -1340,6 +1481,7 @@ function ensureFormats(entry: Entry): Promise<boolean> {
             });
           }
           if (activeEntry() === entry) el.actAuthor.disabled = false;
+          renderQueue();
         }
         if (!item.duration && r.duration) item.duration = r.duration;
         return true;
@@ -1385,6 +1527,7 @@ function setActive(idx: number): void {
   else el.actAuthorImg.removeAttribute('src');
   el.actAuthor.disabled = !cur.item.author.uniqueId;
   void playEntry(cur);
+  renderQueue();
   // Warm the neighbours (their players fetch and decode the first frames, then idle on
   // backpressure), release the rest so decoders and audio contexts do not pile up.
   state.entries.forEach((e, i) => {
@@ -1493,7 +1636,7 @@ async function download(entry: Entry): Promise<void> {
     el.actDownload.disabled = false;
     el.actDownload.classList.remove('busy');
     if (small) small.textContent = smallText;
-    el.actDownloadIco.textContent = '⬇';
+    el.actDownloadIco.innerHTML = ICON.save;
   }
 }
 

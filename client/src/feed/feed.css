@@ -352,8 +352,14 @@ button {
   background: rgba(255, 255, 255, 0.14);
   display: grid;
   place-items: center;
-  font-size: 21px;
+  /* the icon is an SVG; text only while a download shows its progress */
+  font-size: 13px;
+  font-weight: 700;
   backdrop-filter: blur(6px);
+}
+.act .ico svg {
+  width: 24px;
+  height: 24px;
 }
 .act:hover .ico {
   background: rgba(255, 255, 255, 0.26);

@@ -1,0 +1,632 @@
+/* =====================================================================================
+   Wide screens (the car's display, tablets, desktops): the "theater rail" layout.
+   Loaded after feed.css, which it overrides only inside the media queries below.
+   Left: a rail with every app (the one in use marked) and the sections. Middle: header,
+   categories and the feed as a 9:16 column with the edges of the previous / next videos
+   above and below it, the actions beside it. Right (when there is room): Up next.
+   The feed itself (scroll-snap, swipe, drag, wheel, keys, seek) is the same element as on
+   phones, only sized differently; its items still fill it exactly (index × clientHeight).
+   ===================================================================================== */
+
+/* Phones: the wide-only parts are hidden, and the stage wrappers drop out of the layout */
+.rail,
+.upnext,
+.peek,
+.app-title,
+.search-label,
+.item .src-badge {
+  display: none;
+}
+.stage,
+.feed-col {
+  display: contents;
+}
+
+@media (min-width: 900px) and (min-aspect-ratio: 5/4) {
+  .app {
+    --vh: 100vh;
+    /* rows: header 72 + categories 52; the stage keeps 12 px below the feed column */
+    --stage-h: calc(var(--vh) - 136px);
+    /* the feed column: the stage minus the two peeks (14 px) and their gaps (8 px) */
+    --feed-h: calc(var(--stage-h) - 44px);
+    --feed-w: calc(var(--feed-h) * 9 / 16);
+    display: grid;
+    grid-template-columns: 92px minmax(0, 1fr);
+    grid-template-rows: 72px 52px minmax(0, 1fr);
+    grid-template-areas:
+      'rail top'
+      'rail chips'
+      'rail stage';
+    background: #0a0b0f;
+  }
+  @supports (height: 100dvh) {
+    .app {
+      --vh: 100dvh;
+    }
+  }
+
+  /* ---- rail ---- */
+  .rail {
+    grid-area: rail;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    min-height: 0;
+    overflow-y: auto;
+    scrollbar-width: none;
+    padding: calc(16px + var(--safe-t)) 0 calc(14px + var(--safe-b));
+    background: #0e0f15;
+    border-right: 1px solid rgba(255, 255, 255, 0.07);
+  }
+  .rail::-webkit-scrollbar {
+    display: none;
+  }
+  .rail-launcher {
+    flex: 0 0 auto;
+    width: 48px;
+    height: 48px;
+    border-radius: 14px;
+    border: 0;
+    background: rgba(255, 255, 255, 0.06);
+    color: #e6e8ee;
+    display: grid;
+    place-items: center;
+    cursor: pointer;
+  }
+  .rail-launcher:hover {
+    background: rgba(255, 255, 255, 0.12);
+  }
+  .rail-rule {
+    flex: 0 0 auto;
+    width: 40px;
+    height: 1px;
+    background: rgba(255, 255, 255, 0.1);
+    margin: 10px 0 8px;
+  }
+  .rail-heading {
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.14em;
+    color: #8d93a3;
+  }
+  .rail-apps {
+    align-self: stretch;
+    display: flex;
+    flex-direction: column;
+  }
+  .rail-app {
+    position: relative;
+    border: 0;
+    background: transparent;
+    color: #8d93a3;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 0;
+    font-size: 11px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  /* the bar at the rail's edge next to the app in use */
+  .rail-app::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 14px;
+    width: 4px;
+    height: 36px;
+    border-radius: 0 4px 4px 0;
+    background: var(--app-accent);
+    opacity: 0;
+  }
+  .rail-tile {
+    width: 48px;
+    height: 48px;
+    border-radius: 14px;
+    display: grid;
+    place-items: center;
+    opacity: 0.45;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+    transition:
+      opacity 0.15s,
+      transform 0.15s;
+  }
+  .rail-tile svg {
+    width: 62%;
+    height: 62%;
+  }
+  .rail-app:hover .rail-tile {
+    opacity: 0.85;
+  }
+  .rail-app.active {
+    color: #fff;
+  }
+  .rail-app.active::before {
+    opacity: 1;
+  }
+  .rail-app.active .rail-tile {
+    opacity: 1;
+    transform: scale(1.06);
+    box-shadow:
+      0 0 0 2px #0e0f15,
+      0 0 0 4px var(--app-accent);
+  }
+  .rail-spacer {
+    flex: 1 1 auto;
+    min-height: 12px;
+  }
+  .rail-sec {
+    flex: 0 0 auto;
+    width: 74px;
+    border: 0;
+    border-radius: 12px;
+    background: transparent;
+    color: #c9ced8;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 8px 0;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .rail-sec svg {
+    width: 24px;
+    height: 24px;
+  }
+  .rail-sec span {
+    max-width: 70px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .rail-sec:hover {
+    color: #fff;
+    background: rgba(255, 255, 255, 0.06);
+  }
+
+  /* ---- header: app name + what plays, source tabs, search ---- */
+  .topbar {
+    grid-area: top;
+    position: relative;
+    height: auto;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    align-items: center;
+    gap: 16px;
+    padding: var(--safe-t) 28px 0;
+    background: none;
+    pointer-events: auto;
+  }
+  .topbar .brand {
+    display: none;
+  }
+  .app-title {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    min-width: 0;
+  }
+  .app-name {
+    font-size: 24px;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    white-space: nowrap;
+  }
+  .app-sub {
+    min-width: 0;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .tabs {
+    gap: 4px;
+    padding: 4px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+  }
+  .tab {
+    padding: 9px 20px;
+    border-radius: 999px;
+    font-size: 15px;
+    font-weight: 700;
+    color: #c9ced8;
+    text-shadow: none;
+  }
+  .tab:hover {
+    color: #fff;
+  }
+  .tab.active {
+    background: #fff;
+    color: #0a0b0f;
+  }
+  .tab.active::after {
+    display: none;
+  }
+  .search-btn {
+    justify-self: end;
+    width: min(260px, 100%);
+    height: 44px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 16px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.04);
+    color: #a7adbb;
+    filter: none;
+  }
+  .search-btn svg {
+    flex: 0 0 auto;
+    width: 18px;
+    height: 18px;
+  }
+  .search-btn:hover {
+    color: #fff;
+    background: rgba(255, 255, 255, 0.08);
+  }
+  .search-label {
+    display: block;
+    min-width: 0;
+    font-size: 14px;
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* ---- categories / the search-or-account pill (never both) ---- */
+  .chips,
+  .context {
+    grid-area: chips;
+    position: relative;
+    top: auto;
+    left: auto;
+    right: auto;
+    align-self: center;
+  }
+  .chips {
+    padding: 6px 28px;
+    background: none;
+    -webkit-mask-image: linear-gradient(90deg, #000 88%, transparent);
+    mask-image: linear-gradient(90deg, #000 88%, transparent);
+  }
+  .chip {
+    padding: 7px 14px;
+    font-weight: 600;
+    background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(255, 255, 255, 0.14);
+    color: #e6e8ee;
+    backdrop-filter: none;
+  }
+  .chip:hover {
+    border-color: rgba(255, 255, 255, 0.4);
+  }
+  .chip.active {
+    background: #fff;
+    color: #0a0b0f;
+    border-color: #fff;
+  }
+  .context {
+    justify-content: flex-start;
+    padding: 0 28px;
+  }
+  .context span {
+    max-width: 50vw;
+  }
+
+  /* ---- stage: peeks + feed + actions ---- */
+  .stage {
+    grid-area: stage;
+    display: flex;
+    align-items: stretch;
+    justify-content: center;
+    gap: 18px;
+    min-height: 0;
+    padding: 0 24px 12px;
+  }
+  .feed-col {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    min-height: 0;
+  }
+  .feed {
+    flex: 0 0 auto;
+    height: var(--feed-h);
+    width: var(--feed-w);
+    max-width: calc(100vw - 92px - 170px);
+    border-radius: 22px;
+    background: #000;
+    box-shadow:
+      0 30px 80px rgba(0, 0, 0, 0.55),
+      0 0 0 1px rgba(255, 255, 255, 0.06);
+  }
+  .peek {
+    display: block;
+    flex: 0 0 14px;
+    width: calc(var(--feed-w) - 40px);
+    max-width: calc(100vw - 92px - 210px);
+    padding: 0;
+    border: 0;
+    background: #1a1d26 center / cover no-repeat;
+    opacity: 0.5;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .peek.prev {
+    border-radius: 0 0 14px 14px;
+    background-position: center bottom;
+  }
+  .peek.next {
+    border-radius: 14px 14px 0 0;
+    background-position: center top;
+  }
+  .peek:hover {
+    opacity: 0.85;
+  }
+  .peek:disabled {
+    opacity: 0.12;
+    background-image: none;
+    cursor: default;
+  }
+  /* the caption no longer shares the picture with the action column */
+  .item .info {
+    right: 18px;
+    left: 18px;
+  }
+  .item .src-badge {
+    position: absolute;
+    left: 14px;
+    top: 14px;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 12px 5px 5px;
+    border-radius: 999px;
+    background: rgba(10, 11, 15, 0.55);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    font-size: 12px;
+    font-weight: 700;
+    pointer-events: none;
+  }
+  .src-tile {
+    width: 24px;
+    height: 24px;
+    border-radius: 7px;
+    display: grid;
+    place-items: center;
+  }
+  .src-tile svg {
+    width: 68%;
+    height: 68%;
+  }
+  .actions {
+    position: static;
+    align-self: center;
+    gap: 8px;
+    padding: 10px 4px;
+    border-radius: 36px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+  }
+  .act {
+    width: 66px;
+    filter: none;
+  }
+  .act .ico {
+    width: 52px;
+    height: 52px;
+    background: rgba(255, 255, 255, 0.08);
+  }
+  .act .ico.avatar {
+    border-color: var(--accent);
+  }
+  .act small {
+    color: #c9ced8;
+  }
+
+  /* ---- phones' bottom bar: replaced by the rail ---- */
+  .bottombar {
+    display: none;
+  }
+  .toast {
+    bottom: 24px;
+  }
+  .loading.compact {
+    top: 84px;
+    right: 24px;
+  }
+
+  /* ---- W / Esc ("only the video"): the feed takes the whole screen, as on phones ---- */
+  .app.fullwindow {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    grid-template-areas: 'stage';
+  }
+  .app.fullwindow .rail,
+  .app.fullwindow .upnext,
+  .app.fullwindow .peek {
+    display: none;
+  }
+  .app.fullwindow .stage {
+    padding: 0;
+  }
+  .app.fullwindow .feed {
+    width: 100%;
+    max-width: none;
+    height: var(--vh);
+    border-radius: 0;
+    box-shadow: none;
+  }
+}
+
+/* ---- Up next: only when there is room for it beside the feed ---- */
+@media (min-width: 1180px) and (min-aspect-ratio: 5/4) {
+  .app {
+    grid-template-columns: 92px minmax(0, 1fr) 300px;
+    grid-template-areas:
+      'rail top upnext'
+      'rail chips upnext'
+      'rail stage upnext';
+  }
+  .feed {
+    max-width: calc(100vw - 392px - 170px);
+  }
+  .peek {
+    max-width: calc(100vw - 392px - 210px);
+  }
+  .loading.compact {
+    right: 324px;
+  }
+  .upnext {
+    grid-area: upnext;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    min-height: 0;
+    padding: calc(22px + var(--safe-t)) 14px calc(14px + var(--safe-b)) 18px;
+    background: #0e0f15;
+    border-left: 1px solid rgba(255, 255, 255, 0.07);
+  }
+  .upnext-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-right: 4px;
+  }
+  .upnext-title {
+    font-size: 16px;
+    font-weight: 800;
+  }
+  .upnext-auto {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 0;
+    border: 0;
+    background: transparent;
+    color: #c9ced8;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .upnext-auto i {
+    position: relative;
+    width: 30px;
+    height: 18px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.18);
+    transition: background 0.15s;
+  }
+  .upnext-auto i::after {
+    content: '';
+    position: absolute;
+    left: 2px;
+    top: 2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #fff;
+    transition: transform 0.15s;
+  }
+  .upnext-auto.on i {
+    background: var(--accent);
+  }
+  .upnext-auto.on i::after {
+    transform: translateX(12px);
+  }
+  .upnext-list {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: none;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    -webkit-mask-image: linear-gradient(180deg, #000 86%, transparent);
+    mask-image: linear-gradient(180deg, #000 86%, transparent);
+  }
+  .upnext-list::-webkit-scrollbar {
+    display: none;
+  }
+  .q-row {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 12px;
+    padding: 8px;
+    border: 0;
+    border-radius: 14px;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .q-row:hover {
+    background: rgba(255, 255, 255, 0.05);
+  }
+  .q-row.past {
+    opacity: 0.5;
+  }
+  .q-row.current {
+    background: rgba(255, 255, 255, 0.07);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+    cursor: default;
+  }
+  .q-thumb {
+    flex: 0 0 auto;
+    display: block;
+    width: 54px;
+    height: 96px;
+    border-radius: 9px;
+    object-fit: cover;
+    background: #1a1d26;
+  }
+  .q-text {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding-top: 4px;
+  }
+  .q-now {
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    color: var(--accent);
+  }
+  .q-author {
+    font-size: 13px;
+    font-weight: 700;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .q-desc {
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--muted);
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .q-author:empty,
+  .q-desc:empty {
+    display: none;
+  }
+}

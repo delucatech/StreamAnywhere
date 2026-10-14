@@ -8,20 +8,45 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="stylesheet" href="/src/feed/feed.css" />
+    <link rel="stylesheet" href="/src/feed/theater.css" />
   </head>
   <body class="feed-body">
     <div id="app" class="app">
-      <!-- transparent top bar over the video, like the app -->
+      <!-- Wide screens (the car): the left rail with the apps (the one in use is marked) and the sections.
+           Phones use the top bar + bottom bar instead; the rail's buttons act through the same handlers. -->
+      <nav class="rail" id="rail" aria-label="Apps and sections">
+        <button class="rail-launcher" id="railLauncher" type="button" title="Home screen (all apps)" aria-label="Home screen (all apps)">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="6.5" height="6.5" rx="1.6" /><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.6" /><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.6" /><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.6" /></svg>
+        </button>
+        <div class="rail-rule" aria-hidden="true"></div>
+        <div class="rail-heading" aria-hidden="true">APPS</div>
+        <!-- one button per platform, filled in by feed.ts -->
+        <div class="rail-apps" id="railApps"></div>
+        <div class="rail-spacer"></div>
+        <button class="rail-sec" id="railFriends" type="button" title="Coming later">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3.5" /><path d="M2.5 20c0-3.5 2.9-5.5 6.5-5.5s6.5 2 6.5 5.5" /><path d="M16 4.5a3.5 3.5 0 0 1 0 7" /><path d="M18 14.8c2.2.6 3.5 2.4 3.5 5.2" /></svg><span>Friends</span>
+        </button>
+        <button class="rail-sec" id="railInbox" type="button" title="Messages">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 5h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-9l-5 4v-4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z" /></svg><span>Inbox</span>
+        </button>
+        <button class="rail-sec" id="railProfile" type="button" title="Sign in / account">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="4" /><path d="M4 21c0-4 3.6-6.5 8-6.5s8 2.5 8 6.5" /></svg><span id="railProfileLabel">Profile</span>
+        </button>
+      </nav>
+
+      <!-- transparent top bar over the video, like the app (wide screens: the header of the middle column) -->
       <header class="topbar" id="topbar">
         <a class="top-icon brand" id="homeLink" href="./home.html" title="Home screen (all apps)" aria-label="Home screen">
           <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M3 3h8v8H3zm10 0h8v8h-8zM3 13h8v8H3zm10 0h8v8h-8z" /></svg>
         </a>
+        <div class="app-title" id="appTitle"><span class="app-name" id="appName"></span><span class="app-sub" id="appSub"></span></div>
         <nav class="tabs" id="tabs" aria-label="Feed source">
           <button class="tab" data-source="explore" type="button">Explore</button>
           <button class="tab" data-source="foryou" type="button">For You</button>
         </nav>
-        <button class="top-icon" id="searchBtn" type="button" title="Search (/)" aria-label="Search">
+        <button class="top-icon search-btn" id="searchBtn" type="button" title="Search (/)" aria-label="Search">
           <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" d="M10.5 4a6.5 6.5 0 1 1 0 13 6.5 6.5 0 0 1 0-13zm5.3 11.3L20 19.5" /></svg>
+          <span class="search-label" id="searchLabel">Search</span>
         </button>
       </header>
       <div class="chips hidden" id="chips" aria-label="Explore categories"></div>
@@ -32,15 +57,33 @@
         <button id="contextClose" class="context-close" type="button" aria-label="Back to the feed">✕</button>
       </div>
 
-      <main id="feed" class="feed" tabindex="0" aria-label="Video feed"></main>
+      <!-- The stage. Phones: both wrappers are display: contents, so the feed fills the screen as before.
+           Wide screens: the feed is a 9:16 column with the edges of the previous / next videos above and
+           below it, and the actions beside it instead of over the picture. -->
+      <div class="stage" id="stage">
+        <div class="feed-col">
+          <button class="peek prev" id="peekPrev" type="button" aria-label="Previous video" title="Previous video (↑)"></button>
+          <main id="feed" class="feed" tabindex="0" aria-label="Video feed"></main>
+          <button class="peek next" id="peekNext" type="button" aria-label="Next video" title="Next video (↓)"></button>
+        </div>
 
-      <!-- right-hand action column (acts on the video in view) -->
-      <aside class="actions" id="actions">
-        <button class="act" id="actAuthor" type="button" title="Who posted this video (P)"><span class="ico avatar"><img id="actAuthorImg" alt="" draggable="false" /></span><small>Profile</small></button>
-        <button class="act" id="actMute" type="button" title="Sound on/off (M)"><span class="ico" id="actMuteIco">🔊</span><small>Sound</small></button>
-        <button class="act" id="actDownload" type="button" title="Download this video (D)"><span class="ico" id="actDownloadIco">⬇</span><small>Save</small></button>
-        <button class="act" id="actAuto" type="button" title="Auto-scroll to the next video when one ends (A)"><span class="ico">⏭</span><small id="actAutoLabel">Auto</small></button>
-        <button class="act" id="actFull" type="button" title="Fullscreen (F)"><span class="ico">⛶</span><small>Full</small></button>
+        <!-- right-hand action column (acts on the video in view) -->
+        <aside class="actions" id="actions">
+          <button class="act" id="actAuthor" type="button" title="Who posted this video (P)"><span class="ico avatar"><img id="actAuthorImg" alt="" draggable="false" /></span><small>Profile</small></button>
+          <button class="act" id="actMute" type="button" title="Sound on/off (M)"><span class="ico" id="actMuteIco"></span><small>Sound</small></button>
+          <button class="act" id="actDownload" type="button" title="Download this video (D)"><span class="ico" id="actDownloadIco"></span><small>Save</small></button>
+          <button class="act" id="actAuto" type="button" title="Auto-scroll to the next video when one ends (A)"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 6l9 6-9 6z" /><path d="M18 6v12" /></svg></span><small id="actAutoLabel">Auto</small></button>
+          <button class="act" id="actFull" type="button" title="Fullscreen (F)"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5" /><path d="M20 9V4h-5" /><path d="M4 15v5h5" /><path d="M20 15v5h-5" /></svg></span><small>Full</small></button>
+        </aside>
+      </div>
+
+      <!-- Wide screens: the loaded videos as a queue around the one playing; tap a row to jump there. -->
+      <aside class="upnext" id="upnext" aria-label="Up next">
+        <div class="upnext-head">
+          <span class="upnext-title">Up next</span>
+          <button class="upnext-auto" id="upnextAuto" type="button" role="switch" aria-checked="true" title="Auto-scroll to the next video when one ends (A)"><i aria-hidden="true"></i>Auto-scroll</button>
+        </div>
+        <div class="upnext-list" id="upnextList"></div>
       </aside>
 
       <!-- bottom bar with icons, like the app -->
