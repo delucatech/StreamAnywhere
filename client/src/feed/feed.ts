@@ -155,6 +155,37 @@ interface Entry {
 const playerMode = feedPlayerMode();
 let playerModeAnnounced = false;
 
+// ---------- layout: phone (full-screen video + bars) or wide (the theater rail, theater.css) ----------
+// Wide whenever the window has room for the rail, the 9:16 column and Up next side by side and is
+// not taller than wide: the car (its browser window is close to square beside the car panel),
+// tablets and desktops in landscape. Phones, also turned sideways (too short), keep the phone layout.
+// ?layout=wide|phone|auto overrides that and is remembered on this device.
+const LAYOUT_KEY = 'streamanywhere.layout';
+const layoutPick = ((): 'auto' | 'wide' | 'phone' => {
+  let v: string | null = null;
+  try {
+    v = new URLSearchParams(location.search).get('layout');
+    if (v === 'auto' || v === 'wide' || v === 'phone') localStorage.setItem(LAYOUT_KEY, v);
+    else v = localStorage.getItem(LAYOUT_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+  return v === 'wide' || v === 'phone' ? v : 'auto';
+})();
+function applyLayout(): boolean {
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  const wide = layoutPick === 'wide' || (layoutPick === 'auto' && w >= 760 && h >= 480 && w >= h);
+  el.app.classList.toggle('wide', wide);
+  return wide;
+}
+window.addEventListener('resize', applyLayout);
+{
+  const wide = applyLayout();
+  // The screen this page runs on, once per load (server log): sizes the layout rules for the car.
+  void api.report({ kind: 'screen', ok: true, connection: 'local', renderer: playerMode.mode, platform: P.id, detail: `${window.innerWidth}x${window.innerHeight} css px, dpr ${window.devicePixelRatio}, screen ${screen.width}x${screen.height}, layout ${wide ? 'wide' : 'phone'} (${layoutPick})`, page: location.pathname + location.search, ua: navigator.userAgent });
+}
+
 /** Preferences are kept per platform (the TikTok key predates the launcher) */
 const PREFS_KEY = P.id === 'tiktok' ? 'streamanywhere.feed' : `streamanywhere.feed.${P.id}`;
 interface Prefs {
