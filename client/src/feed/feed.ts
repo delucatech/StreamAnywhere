@@ -996,11 +996,33 @@ function sourceLabel(): string {
   const cat = P.categories.find((c) => c.id === prefs.category);
   return `${P.tabs.explore}${cat && cat.id !== P.defaultCategory ? ' · ' + cat.label : ''}`;
 }
-function showLoading(title: string, detail: string, centered: boolean): void {
+function showLoading(title: string, detail: string, centered: boolean, done = false): void {
+  // centred on the video panel (on wide screens that is the middle column, not the whole window)
+  const f = el.feed.getBoundingClientRect();
+  const a = el.app.getBoundingClientRect();
+  if (f.width > 0) {
+    el.loading.style.setProperty('--feed-cx', `${f.left - a.left + f.width / 2}px`);
+    el.loading.style.setProperty('--feed-cy', `${f.top - a.top + f.height / 2}px`);
+    el.loading.style.setProperty('--feed-top', `${f.top - a.top}px`);
+  }
   el.loading.classList.remove('hidden');
   el.loading.classList.toggle('compact', !centered);
+  el.loading.classList.toggle('done', done);
   el.loadingTitle.textContent = title;
   el.loadingDetail.textContent = detail;
+}
+const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
+/** Unplayed videos after the one in view. */
+const aheadCount = (): number => Math.max(0, state.entries.length - 1 - Math.max(state.active, 0));
+/** A batch arrived while watching: say what it brought for a moment. */
+function flashAdded(added: number): void {
+  clearInterval(loadingTicker);
+  const ahead = aheadCount();
+  showLoading(`+${plural(added, 'new video')}`, `${state.entries.length} loaded · ${ahead} still to watch`, false, true);
+  const t = window.setTimeout(() => {
+    if (loadingTicker === t) hideLoading();
+  }, 2500);
+  loadingTicker = t;
 }
 function hideLoading(): void {
   clearInterval(loadingTicker);
@@ -1029,16 +1051,28 @@ function startLoadingStatus(): void {
   function render(): void {
     const sec = Math.round((Date.now() - t0) / 1000);
     const first = state.entries.length === 0;
-    let title = first ? `Loading ${sourceLabel()}…` : 'Loading more videos…';
+    if (sec >= 2 && sec % 2 === 0) void askServer();
+    if (!first) {
+      // Watching while the next batch comes: how much is loaded, how much is left, what the server is on.
+      const ahead = aheadCount();
+      const title = state.wantNext || ahead === 0 ? 'Fetching the next video…' : `${state.entries.length} videos loaded · getting more`;
+      let step = 'Asking the server for the next batch';
+      if (sec >= 4) step = `The server is fetching new videos from ${P.name}`;
+      if (sec >= 12) step = `${P.name} is slow to answer, still trying`;
+      if (serverStep) step = serverStep.split('\n')[0];
+      const left = ahead ? `${ahead} still to watch` : 'none left to watch yet';
+      showLoading(title, `${step}${sec >= 3 ? ` · ${sec} s` : ''}\n${left}`, waiting());
+      return;
+    }
+    let title = `Loading ${sourceLabel()}…`;
     let detail = 'Asking the server for the next videos';
     if (sec >= 5) detail = `The server is fetching from ${P.name}…`;
     if (sec >= 12) detail = prefs.source === 'foryou' ? `Reading your feed from the signed-in ${P.name} session
 (a fresh browser start can take up to a minute)` : `${P.name} is slow to answer; the server is retrying…`;
     if (serverStep) detail = serverStep;
-    if (sec >= 2 && sec % 2 === 0) void askServer();
     if (sec >= 40 || serverStep) detail += `
 ${sec} s so far – still working`;
-    if (state.emptyBatches > 0 && first) title = `Still loading ${sourceLabel()}…`;
+    if (state.emptyBatches > 0) title = `Still loading ${sourceLabel()}…`;
     showLoading(title, detail, waiting());
   }
   render();
@@ -1071,9 +1105,12 @@ function showRetryStatus(delayMs: number): void {
     const left = Math.max(0, Math.ceil((until - Date.now()) / 1000));
     const waiting = state.entries.length === 0 || state.wantNext || state.active >= state.entries.length - 1;
     if (!waiting) return hideLoading();
+    const n = state.entries.length;
     showLoading(
-      state.entries.length ? 'No new videos yet' : `${P.name} returned no videos for ${sourceLabel()}`,
-      `Retrying in ${left} s… (${P.name} limits how fast it hands out videos)`,
+      n ? `${n} videos loaded · no new ones yet` : `${P.name} returned no videos for ${sourceLabel()}`,
+      n
+        ? `${P.name} limits how fast it hands out videos · next try in ${left} s\n${aheadCount() ? `${aheadCount()} still to watch` : 'none left to watch yet'}`
+        : `Retrying in ${left} s… (${P.name} limits how fast it hands out videos)`,
       true,
     );
     if (left <= 0) clearInterval(loadingTicker);
@@ -1246,9 +1283,11 @@ async function loadMore(): Promise<number> {
   const gen = state.generation;
   startLoadingStatus();
   let added = 0;
+  let before = 0;
   try {
     const r = await fetchBatch();
     if (gen !== state.generation) return 0;
+    before = state.entries.length;
     added = addItems(r.items);
     for (const w of r.warnings) console.warn('[feed]', w);
     if (!added) {
@@ -1288,6 +1327,7 @@ async function loadMore(): Promise<number> {
     state.wantNext = false;
     goTo(state.active + 1);
   }
+  if (added && before) flashAdded(added);
   scheduleMoreIfNeeded();
   return added;
 }

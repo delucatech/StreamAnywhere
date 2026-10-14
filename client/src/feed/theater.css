@@ -429,8 +429,7 @@
   bottom: 24px;
 }
 .wide .loading.compact {
-  top: 84px;
-  right: calc(var(--upnext-w) + 24px);
+  top: calc(var(--feed-top, 84px) + 14px);
 }
 
 /* ---- Up next ---- */

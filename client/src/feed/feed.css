@@ -571,10 +571,11 @@ button {
 .toast.error {
   color: var(--err);
 }
+/* centred on the video panel: feed.ts sets --feed-cx / --feed-cy / --feed-top from the feed's box */
 .loading {
   position: absolute;
-  left: 50%;
-  top: 50%;
+  left: var(--feed-cx, 50%);
+  top: var(--feed-cy, 50%);
   transform: translate(-50%, -50%);
   z-index: 9; /* above the "Tap to start" veil so the first-load status is readable */
   display: grid;
@@ -590,29 +591,40 @@ button {
   text-align: center;
   pointer-events: none;
 }
+/* while a video plays: a small card at the top centre of the video, spinner beside two lines */
 .loading.compact {
-  left: auto;
   top: calc(60px + var(--safe-t));
-  right: 12px;
-  transform: none;
-  grid-auto-flow: column;
+  transform: translateX(-50%);
+  grid-template-columns: auto auto;
+  justify-items: start;
   align-items: center;
-  gap: 8px;
+  column-gap: 10px;
+  row-gap: 2px;
   min-width: 0;
-  padding: 6px 10px;
-  border-radius: 999px;
-}
-.loading.compact .loading-detail {
-  display: none;
+  max-width: min(92vw, 420px);
+  padding: 8px 14px;
+  border-radius: 14px;
+  text-align: left;
 }
 .loading.compact .spinner {
-  width: 16px;
-  height: 16px;
+  grid-row: span 2;
+  width: 18px;
+  height: 18px;
   border-width: 2px;
 }
 .loading.compact .loading-title {
-  font-size: 12px;
-  color: var(--muted);
+  font-size: 13px;
+}
+.loading.compact .loading-detail {
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+/* a batch just arrived: no spinner */
+.loading.done .spinner {
+  display: none;
+}
+.loading.compact.done {
+  grid-template-columns: auto;
 }
 .spinner {
   width: 34px;
