@@ -99,16 +99,42 @@ let running = 0;
 const queue: (() => void)[] = [];
 
 /**
+ * Waits in `line` until woken or `ms` elapse (then it leaves the line). The caller checks again
+ * either way: a wake-up is a hint that something was freed, not a reservation.
+ */
+function waitInLine(line: (() => void)[], ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const wake = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      const i = line.indexOf(wake);
+      if (i >= 0) line.splice(i, 1);
+      resolve();
+    }, Math.max(0, ms));
+    line.push(wake);
+  });
+}
+
+const busyError = (waitedMs: number): Error => new Error(`yt-dlp is busy with other videos (waited ${Math.round(waitedMs / 1000)} s for a turn)`);
+
+/**
  * Runs yt-dlp with `args` and returns its stdout; throws with yt-dlp's last ERROR line otherwise.
- * At most MAX_PARALLEL run concurrently, the rest wait their turn.
+ * At most MAX_PARALLEL run concurrently, the rest wait their turn; `timeoutMs` covers the wait too.
  */
 export async function ytdlp(args: string[], timeoutMs = 90_000): Promise<string> {
+  const t0 = Date.now();
+  const deadline = t0 + timeoutMs;
   const det = await detectYtDlp();
   if (!det.available || !cached) throw new Error(`yt-dlp unavailable: ${det.error}`);
-  if (running >= MAX_PARALLEL) await new Promise<void>((resolve) => queue.push(resolve));
+  while (running >= MAX_PARALLEL) {
+    if (Date.now() >= deadline) throw busyError(Date.now() - t0);
+    await waitInLine(queue, deadline - Date.now());
+  }
   running++;
   try {
-    const r = await run(cached.c, ['--no-warnings', ...args], timeoutMs);
+    const r = await run(cached.c, ['--no-warnings', ...args], Math.max(1, deadline - Date.now()));
     if (r.code !== 0 || !r.stdout.trim()) {
       const err = r.stderr.split(/\r?\n/).filter((l) => /ERROR/i.test(l)).pop() || r.stderr.trim().slice(-300) || `exit ${r.code}`;
       throw new Error(`yt-dlp failed: ${err.replace(/^ERROR:\s*/, '')}`);
@@ -136,19 +162,35 @@ export interface InfoRequest {
 }
 
 const DAEMONS = Math.max(1, Number(process.env.YTDLP_DAEMONS) || 2);
+/**
+ * An extraction running this long is taken as stuck: its daemon is restarted. A caller whose own
+ * deadline comes sooner (it waited in line, or wants a quick answer) gives up at that deadline,
+ * but the extraction may finish within this limit and keep its warm daemon (a restart costs ~20 s
+ * of CPU on the e2-micro).
+ */
+const STUCK_MS = 30_000;
 const DAEMON_SCRIPT = findUp(path.join('server', 'scripts', 'ytdlp-daemon.py')) || findUp(path.join('server', 'scripts', 'ytdlp-daemon.py'), process.cwd());
 
 interface Pending {
   id: number;
   resolve: (info: any) => void;
   reject: (e: Error) => void;
+  /** the caller's deadline */
   timer: NodeJS.Timeout;
+  /** the extraction's limit (>= the caller's): restarts the daemon */
+  killTimer: NodeJS.Timeout;
 }
 
-/** A Python process with yt_dlp imported; handles one request at a time. */
+/**
+ * A Python process with yt_dlp imported; handles one request at a time. `claimed` is set by
+ * acquire() in the same tick it picks the daemon: callers that arrive together (the feed asks for
+ * a few videos at once) must not pick the same idle one, or the second request would replace the
+ * first one's `pending` and the first would never settle (seen 2026-10-14: resolves hanging 3+ min).
+ */
 class Daemon {
   proc?: ChildProcess;
   pending?: Pending;
+  claimed = false;
   version = '';
   /** Resolves true when the process answered its hello line */
   readonly ready: Promise<boolean>;
@@ -160,7 +202,7 @@ class Daemon {
   }
 
   get busy(): boolean {
-    return Boolean(this.pending);
+    return this.claimed || Boolean(this.pending);
   }
   get alive(): boolean {
     return Boolean(this.proc) && !this.dead;
@@ -217,23 +259,39 @@ class Daemon {
         const p = this.pending;
         if (!p || p.id !== msg.id) return;
         clearTimeout(p.timer);
+        clearTimeout(p.killTimer);
         this.pending = undefined;
+        // (a no-op for a caller that already gave up)
         if (msg.ok) p.resolve(msg.info);
         else p.reject(new Error(`yt-dlp failed: ${msg.error || 'unknown error'}`));
+        this.claimed = false;
+        waiters.shift()?.();
       });
     });
   }
 
-  request(req: InfoRequest, timeoutMs: number): Promise<any> {
+  /**
+   * Runs one extraction on this (claimed) daemon; the claim ends when the extraction does. The
+   * promise rejects after `timeoutMs`; the extraction itself is stopped (the daemon restarted)
+   * after max(timeoutMs, STUCK_MS). `limitMs` is the caller's whole limit, for the message.
+   */
+  request(req: InfoRequest, timeoutMs: number, limitMs = timeoutMs): Promise<any> {
     return new Promise((resolve, reject) => {
       if (!this.proc || this.dead) return reject(new Error('yt-dlp daemon is not running'));
+      if (this.pending) return reject(new Error('yt-dlp daemon is busy'));
       const id = this.nextId++;
+      const tooSlow = (): Error => new Error(`yt-dlp timed out after ${Math.round(limitMs / 1000)} s`);
+      const runMs = Math.max(timeoutMs, STUCK_MS);
       const timer = setTimeout(() => {
-        // A stuck extraction takes the process with it; the pool starts a fresh one next time.
-        this.onLog(`daemon request ${id} timed out after ${timeoutMs} ms; restarting the daemon`);
-        this.die(new Error(`yt-dlp timed out after ${Math.round(timeoutMs / 1000)} s`));
+        if (runMs > timeoutMs) this.onLog(`daemon request ${id}: the caller gave up after ${timeoutMs} ms; the extraction may run ${runMs} ms`);
+        reject(tooSlow());
       }, timeoutMs);
-      this.pending = { id, resolve, reject, timer };
+      const killTimer = setTimeout(() => {
+        // A stuck extraction takes the process with it; the pool starts a fresh one.
+        this.onLog(`daemon request ${id} still running after ${runMs} ms; restarting the daemon`);
+        this.die(tooSlow());
+      }, runMs);
+      this.pending = { id, resolve, reject, timer, killTimer };
       const body: Record<string, unknown> = { id, url: req.url, flat: Boolean(req.flat), noplaylist: Boolean(req.noplaylist) };
       if (req.playlistItems) body.playlist_items = req.playlistItems;
       if (req.cookieFile) body.cookiefile = req.cookieFile;
@@ -248,9 +306,12 @@ class Daemon {
     this.pending = undefined;
     if (p) {
       clearTimeout(p.timer);
+      clearTimeout(p.killTimer);
       p.reject(err);
     }
     this.kill();
+    // someone waiting for a turn can start a replacement now
+    waiters.shift()?.();
   }
 
   kill(): void {
@@ -305,20 +366,28 @@ async function probeDaemon(): Promise<void> {
   await daemonProbe;
 }
 
-async function acquire(): Promise<Daemon> {
+/** A daemon for the caller alone (claimed); throws once `deadline` passes without one. */
+async function acquire(deadline: number): Promise<Daemon> {
+  const t0 = Date.now();
   for (;;) {
     for (let i = pool.length - 1; i >= 0; i--) if (!pool[i].alive) pool.splice(i, 1);
     const free = pool.find((d) => !d.busy);
-    if (free) return free;
+    if (free) {
+      free.claimed = true;
+      return free;
+    }
+    if (Date.now() >= deadline) throw busyError(Date.now() - t0);
     if (pool.length < DAEMONS) {
       const d = new Daemon(daemonPython!, daemonLog);
+      d.claimed = true;
       pool.push(d);
       if (await d.ready) return d;
       continue;
     }
-    await new Promise<void>((r) => waiters.push(r));
+    await waitInLine(waiters, deadline - Date.now());
   }
 }
+
 
 export const daemonStatus = (): { enabled: boolean; python?: string; running: number; busy: number; version?: string } => ({
   enabled: Boolean(daemonPython),
@@ -330,24 +399,24 @@ export const daemonStatus = (): { enabled: boolean; python?: string; running: nu
 
 /**
  * One extraction as parsed JSON, through a warm daemon when there is one, else the CLI.
- * Daemon requests are serialised per process (DAEMONS of them, default 2).
+ * Daemon requests are serialised per process (DAEMONS of them, default 2). `timeoutMs` counts
+ * from the call, the wait for a free daemon included, so a queue behind slow lookups fails in
+ * time too; an extraction running longer than max(its share, STUCK_MS) takes its daemon down.
  */
 export async function ytdlpInfo(req: InfoRequest, timeoutMs = 150_000): Promise<any> {
+  const deadline = Date.now() + timeoutMs;
   await probeDaemon();
   if (daemonPython) {
-    const d = await acquire();
-    try {
-      return await d.request(req, timeoutMs);
-    } finally {
-      waiters.shift()?.();
-    }
+    // the daemon frees itself when the extraction ends (which may be after this caller's deadline)
+    const d = await acquire(deadline);
+    return d.request(req, Math.max(1, deadline - Date.now()), timeoutMs);
   }
   const args = req.flat ? ['--flat-playlist', '-J'] : ['-j'];
   if (req.noplaylist) args.push('--no-playlist');
   if (req.playlistItems) args.push('--playlist-items', req.playlistItems);
   if (req.cookieFile) args.push('--cookies', req.cookieFile);
   args.push(req.url);
-  const out = await ytdlp(args, timeoutMs);
+  const out = await ytdlp(args, Math.max(1, deadline - Date.now()));
   return JSON.parse(out.trim().split(/\r?\n/).pop()!);
 }
 

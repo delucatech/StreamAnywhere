@@ -53,9 +53,21 @@ function toLoginOn401(res: Response, body?: unknown): void {
   if (res.status === 401 && !apiBase && (body === undefined || typeof login === 'string')) location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search);
 }
 
-async function post<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(apiUrl(path), { method: 'POST', mode: 'cors', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-  const text = await res.text();
+/** `timeoutMs`: give up (ApiError 504) when the answer takes longer, the body included. */
+async function post<T>(path: string, body: unknown, timeoutMs?: number): Promise<T> {
+  const ctl = timeoutMs ? new AbortController() : undefined;
+  const timer = ctl ? window.setTimeout(() => ctl.abort(), timeoutMs) : undefined;
+  let res: Response;
+  let text: string;
+  try {
+    res = await fetch(apiUrl(path), { method: 'POST', mode: 'cors', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: ctl?.signal });
+    text = await res.text();
+  } catch (e) {
+    if (ctl?.signal.aborted) throw new ApiError(`no answer from the server in ${Math.round(timeoutMs! / 1000)} s`, 504);
+    throw e;
+  } finally {
+    window.clearTimeout(timer);
+  }
   let json: unknown;
   try {
     json = text ? JSON.parse(text) : undefined;
@@ -76,7 +88,7 @@ export const api = {
     if (!res.ok) throw new ApiError(`health ${res.status}`, res.status);
     return res.json();
   },
-  resolve: (req: ResolveRequest): Promise<ResolveResponse> => post('/api/resolve', req),
+  resolve: (req: ResolveRequest, timeoutMs?: number): Promise<ResolveResponse> => post('/api/resolve', req, timeoutMs),
   probe: (url: string): Promise<ServerProbe> => post('/api/probe', { url, origin: location.origin }),
   report: (req: ReportRequest): Promise<void> => post('/api/report', req).then(() => undefined, () => undefined),
   feed: (req: FeedRequest): Promise<FeedResponse> => post('/api/feed', req),

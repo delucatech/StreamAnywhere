@@ -1756,6 +1756,13 @@ function onPlayerError(entry: Entry, e: Error): void {
 }
 
 /**
+ * How long the feed waits for a video's play URLs before it counts the video as failed (and skips
+ * it with auto-scroll on). The server gives a YouTube lookup 30 s; this leaves room for the trip.
+ * Other platforms may start a browser on the server for their first lookup, so they get longer.
+ */
+const RESOLVE_LIMIT_MS = P.id === 'youtube' ? 40_000 : 100_000;
+
+/**
  * Items from a guest search carry no play URLs: ask the resolver for them (same formats as the feed)
  * before the player is attached. False when TikTok has nothing playable for it.
  */
@@ -1763,7 +1770,7 @@ function ensureFormats(entry: Entry): Promise<boolean> {
   if (entry.item.formats.length) return Promise.resolve(true);
   if (!entry.resolving) {
     entry.resolving = api
-      .resolve({ url: entry.item.canonicalUrl, probe: false })
+      .resolve({ url: entry.item.canonicalUrl, probe: false }, RESOLVE_LIMIT_MS)
       .then((r) => {
         entry.item.formats = r.formats.filter((f) => f.directUrl || f.proxyUrl);
         if (!entry.item.formats.length) throw new Error(r.warnings[0] || 'no playable format');

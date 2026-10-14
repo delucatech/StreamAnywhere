@@ -5,6 +5,7 @@
  *  2. TikTok URL parsing (offline)
  *  3. Proxy Range relay against a public CORS-enabled MP4 (network)
  *  4. Live TikTok resolution + cookie / CORS behaviour of each URL kind (network, TIKTOK_TEST_URL)
+ *  5. Concurrent yt-dlp lookups through the warm daemons (network, skipped without yt-dlp)
  *
  * Network checks are skipped (not failed) when SKIP_NETWORK=1.
  */
@@ -21,6 +22,7 @@ import { Reservoir, expiredSoon } from '../reservoir';
 import type { FeedItem } from '../../../shared/types';
 import type { FeedResponse } from '../../../shared/types';
 import { openUpstream } from '../http';
+import { daemonStatus, detectYtDlp, shutdownYtDlp, ytdlpInfo } from '../ytdlp';
 import type { ResolveResponse } from '../../../shared/types';
 
 const TEST_MP4 = 'https://mdn.github.io/learning-area/html/multimedia-and-embedding/video-and-audio-content/rabbit320.mp4';
@@ -481,10 +483,39 @@ async function network(): Promise<void> {
   }
 }
 
+/**
+ * Lookups that arrive together each get a daemon of their own (or wait for one): before 2026-10-14
+ * they could all land on the same idle daemon and all but the last never settled.
+ */
+async function ytdlpChecks(): Promise<void> {
+  console.log('\n== 5. yt-dlp lookups at the same time');
+  if (!(await detectYtDlp()).available) {
+    console.log('(skipped: no yt-dlp on this machine)');
+    return;
+  }
+  const ids = ['dQw4w9WgXcQ', 'jNQXAC9IVRw', '9bZkp7q19f0', 'kJQP7kiw5Fk'];
+  const t0 = Date.now();
+  const settled = await Promise.race([
+    Promise.allSettled(ids.map((id) => ytdlpInfo({ url: `https://www.youtube.com/watch?v=${id}`, noplaylist: true }, 30_000))),
+    new Promise<undefined>((r) => setTimeout(() => r(undefined), 45_000)),
+  ]);
+  check('every concurrent lookup settles within its limit', Boolean(settled), { ms: Date.now() - t0, daemons: daemonStatus() });
+  const ok = (settled || []).map((r, i) => (r.status === 'fulfilled' && r.value?.id === ids[i] ? 'ok' : r.status === 'rejected' ? String(r.reason?.message).slice(0, 80) : 'wrong id'));
+  check('each lookup got its own video', ok.length === ids.length && ok.every((x) => x === 'ok'), ok);
+  // A wait for a turn counts against the limit: a queue behind busy daemons fails in time.
+  const t1 = Date.now();
+  const quick = await Promise.allSettled(ids.concat(ids).map((id) => ytdlpInfo({ url: `https://www.youtube.com/watch?v=${id}`, noplaylist: true }, 1_500)));
+  check('a short limit holds while waiting in line', Date.now() - t1 < 4_000 && quick.some((r) => r.status === 'rejected'), { ms: Date.now() - t1 });
+  shutdownYtDlp();
+}
+
 (async () => {
   await offline();
   if (skipNetwork) console.log('\n(network checks skipped: SKIP_NETWORK=1)');
-  else await network();
+  else {
+    await network();
+    await ytdlpChecks();
+  }
   console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : failures + ' CHECK(S) FAILED'}`);
   process.exit(failures ? 1 : 0);
 })().catch((e) => {

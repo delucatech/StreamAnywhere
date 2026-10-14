@@ -19,9 +19,16 @@ import { YOUTUBE_CATEGORIES } from '../../shared/types';
 import { defaultExpiry, registerMedia } from './mediaStore';
 import { ytdlpInfo } from './ytdlp';
 
-/** The e2-micro needs 10-20 s of CPU per extraction; the limits leave room for a busy moment. */
+/**
+ * Listings keep a long limit (a page of a busy hashtag can take a while on the e2-micro). A single
+ * video resolves in 1-5 s through a warm daemon (VM and PC, 2026-10), so its whole lookup (the wait
+ * for a free daemon and the retry with the account's cookies included) gets 30 s: the viewer is
+ * waiting on it, and the feed skips a video that fails.
+ */
 const LIST_TIMEOUT_MS = 150_000;
-const RESOLVE_TIMEOUT_MS = 180_000;
+const RESOLVE_TIMEOUT_MS = 30_000;
+/** The cookies retry is skipped when less than this is left of RESOLVE_TIMEOUT_MS. */
+const RETRY_MIN_MS = 5_000;
 
 export class YouTubeError extends Error {
   constructor(message: string, public readonly status = 502) {
@@ -201,15 +208,17 @@ function classify(msg: string): YouTubeError {
 
 async function resolveUncached(id: string, inputUrl: string, log: (m: string) => void, cookieFile?: string): Promise<ResolveResponse> {
   const t0 = Date.now();
+  const deadline = t0 + RESOLVE_TIMEOUT_MS;
   let info: any;
   try {
     info = await ytdlpInfo({ url: `https://www.youtube.com/watch?v=${id}`, noplaylist: true }, RESOLVE_TIMEOUT_MS);
   } catch (e) {
     const guestErr = classify((e as Error).message);
-    if (!cookieFile) throw guestErr;
-    log(`youtube ${id}: guest extraction refused (${guestErr.message.slice(0, 120)}); retrying with the account's cookies`);
+    log(`youtube ${id}: guest extraction failed after ${Date.now() - t0} ms (${guestErr.message.slice(0, 120)})`);
+    if (!cookieFile || deadline - Date.now() < RETRY_MIN_MS) throw guestErr;
+    log(`youtube ${id}: retrying with the account's cookies`);
     try {
-      info = await ytdlpInfo({ url: `https://www.youtube.com/watch?v=${id}`, noplaylist: true, cookieFile }, RESOLVE_TIMEOUT_MS);
+      info = await ytdlpInfo({ url: `https://www.youtube.com/watch?v=${id}`, noplaylist: true, cookieFile }, deadline - Date.now());
     } catch (e2) {
       throw classify((e2 as Error).message);
     }
