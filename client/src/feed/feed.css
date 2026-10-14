@@ -571,10 +571,10 @@ button {
 .toast.error {
   color: var(--err);
 }
-/* centred on the video panel: feed.ts sets --feed-cx / --feed-cy / --feed-top from the feed's box */
+/* centred across the whole page, at the height of the video's middle (feed.ts sets --feed-cy / --feed-cx) */
 .loading {
   position: absolute;
-  left: var(--feed-cx, 50%);
+  left: 50%;
   top: var(--feed-cy, 50%);
   transform: translate(-50%, -50%);
   z-index: 9; /* above the "Tap to start" veil so the first-load status is readable */
@@ -590,6 +590,9 @@ button {
   backdrop-filter: blur(8px);
   text-align: center;
   pointer-events: none;
+}
+.loading.below-start {
+  top: calc(var(--feed-cy, 50%) + 150px);
 }
 /* while a video plays: a small card at the top centre of the video, spinner beside two lines */
 .loading.compact {

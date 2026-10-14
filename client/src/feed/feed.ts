@@ -164,6 +164,11 @@ interface Entry {
   buffering: boolean;
   /** The direct URL failed; the proxy is being tried */
   retrying: boolean;
+  /** Came from the saved feed (see resume): its play URLs may have expired, so a failure re-resolves once */
+  restored?: boolean;
+  reresolved?: boolean;
+  /** Where the viewer was in this video when the page closed; applied once it plays */
+  resumeAt?: number;
 }
 
 const playerMode = feedPlayerMode();
@@ -936,6 +941,14 @@ async function startLogin(mode: LoginMode, cookies?: string): Promise<void> {
 function onSignedIn(): void {
   signedOutPanelShown = false;
   closeSessionPanel();
+  // The saved feed restored at boot already is the account's feed: keep playing it.
+  const keep = restoredSource !== undefined && (restoredSource === 'foryou' || P.loginRequired) && state.mode.kind === 'source' && state.entries.length > 0;
+  restoredSource = undefined;
+  if (keep) {
+    state.exhausted = false;
+    scheduleMoreIfNeeded();
+    return;
+  }
   toast(`Signed in as @${state.session?.username || '?'} – loading your ${P.tabs.foryou} feed`);
   prefs.source = 'foryou';
   prefs.pick = 'auto';
@@ -1021,6 +1034,8 @@ function showLoading(title: string, detail: string, centered: boolean, done = fa
   el.loading.classList.remove('hidden');
   el.loading.classList.toggle('compact', !centered);
   el.loading.classList.toggle('done', done);
+  // "Tap to start" sits in the middle too: the card goes below it, not over it
+  el.loading.classList.toggle('below-start', centered && !el.start.classList.contains('hidden'));
   el.loadingTitle.textContent = title;
   el.loadingDetail.textContent = detail;
 }
@@ -1133,8 +1148,115 @@ function showRetryStatus(delayMs: number): void {
   loadingTicker = window.setInterval(render, 1000);
 }
 
+// ---------- resume: each app's feed survives the browser closing ----------
+// The car's browser closes the page whenever another app opens. Each app keeps its feed here: the
+// video in view (and the one before it), the next ones already loaded, which tab / category, and
+// how far into the video the viewer was, so reopening plays on from there while new videos load
+// behind it. Forgotten after RESUME_MAX_AGE, or when the viewer picks another tab / category
+// (that feed is saved instead). Play URLs older than RESUME_KEEP_URLS are dropped and fetched
+// again when the video comes up; younger ones are kept, and re-fetched if they fail.
+const RESUME_KEY = `streamanywhere.resume.${P.id}`;
+const RESUME_AT_KEY = `${RESUME_KEY}.at`;
+const RESUME_MAX_AGE = 12 * 3600_000;
+const RESUME_KEEP_URLS = 2 * 3600_000;
+const RESUME_BEHIND = 1;
+const RESUME_AHEAD = 30;
+interface Resume {
+  v: 1;
+  savedAt: number;
+  source: FeedSource;
+  category: number;
+  items: FeedItem[];
+  /** The video in view, as an index into items */
+  index: number;
+}
+/** The source a restored feed came from, until the boot sequence has settled (see onSignedIn) */
+let restoredSource: FeedSource | undefined;
+let resumeTimer = 0;
+function clearResume(): void {
+  clearTimeout(resumeTimer);
+  try {
+    localStorage.removeItem(RESUME_KEY);
+    localStorage.removeItem(RESUME_AT_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+}
+/** Saves the feed (debounced unless `now`): only the platform's own feed, not a search / account play list. */
+function saveResume(now = false): void {
+  clearTimeout(resumeTimer);
+  if (!now) {
+    resumeTimer = window.setTimeout(() => saveResume(true), 1500);
+    return;
+  }
+  const cur = activeEntry();
+  if (state.mode.kind !== 'source' || !cur) return;
+  const from = Math.max(0, state.active - RESUME_BEHIND);
+  const kept = state.entries.slice(from, state.active + RESUME_AHEAD + 1).filter((e) => e === cur || !e.failed);
+  // the diagnostics-only fields are big and useless later
+  const items = kept.map((e) => ({ ...e.item, formats: e.item.formats.map(({ cookieBoundUrl: _c, serverProbe: _s, ...f }) => f) }));
+  const r: Resume = { v: 1, savedAt: Date.now(), source: prefs.source, category: prefs.category, items, index: kept.indexOf(cur) };
+  try {
+    localStorage.setItem(RESUME_KEY, JSON.stringify(r));
+  } catch {
+    clearResume(); // full: better nothing than half
+  }
+  saveResumePosition();
+}
+/** How far into the video in view the viewer is (cheap; written every few seconds while playing). */
+function saveResumePosition(): void {
+  const cur = activeEntry();
+  if (state.mode.kind !== 'source' || !cur?.player || !state.started) return;
+  try {
+    localStorage.setItem(RESUME_AT_KEY, JSON.stringify({ id: cur.item.id, t: Math.round(cur.player.currentTime * 10) / 10 }));
+  } catch {
+    /* storage unavailable */
+  }
+}
+function loadResume(): Resume | undefined {
+  try {
+    const r = JSON.parse(localStorage.getItem(RESUME_KEY) || 'null') as Resume | null;
+    if (!r || r.v !== 1 || !Array.isArray(r.items) || !r.items.length || Date.now() - r.savedAt > RESUME_MAX_AGE) return undefined;
+    if (r.source !== 'explore' && r.source !== 'foryou') return undefined;
+    if (Date.now() - r.savedAt > RESUME_KEEP_URLS) for (const it of r.items) it.formats = [];
+    r.index = Math.max(0, Math.min(r.items.length - 1, Number(r.index) || 0));
+    return r;
+  } catch {
+    return undefined;
+  }
+}
+/** Puts the saved feed back on screen, on the video the viewer was watching. */
+function restoreFeed(r: Resume): boolean {
+  prefs.source = r.source;
+  if (P.categories.some((c) => c.id === r.category)) prefs.category = r.category;
+  renderSourceUi();
+  const added = addItems(r.items);
+  if (!added) return false;
+  restoredSource = r.source;
+  for (const e of state.entries) e.restored = true;
+  const id = r.items[r.index]?.id;
+  const idx = Math.max(0, state.entries.findIndex((e) => e.item.id === id));
+  try {
+    const at = JSON.parse(localStorage.getItem(RESUME_AT_KEY) || 'null') as { id?: string; t?: number } | null;
+    if (at && at.id === id && Number(at.t) > 0) state.entries[idx].resumeAt = Number(at.t);
+  } catch {
+    /* no position */
+  }
+  jumpTo(idx);
+  setActive(idx);
+  const ahead = state.entries.length - 1 - idx;
+  toast(`Picking up where you left off · ${ahead ? `${plural(ahead, 'more video')} ready` : 'loading more'}`, false, 4000);
+  return true;
+}
+window.setInterval(saveResumePosition, 4000);
+document.addEventListener('visibilitychange', () => document.visibilityState === 'hidden' && saveResume(true));
+window.addEventListener('pagehide', () => saveResume(true));
+
 // ---------- feed loading ----------
 async function reload(preloaded?: FeedItem[], startIndex = 0): Promise<void> {
+  // a new feed (another tab / category, a sign-in, a play list): the saved one no longer applies
+  if (!preloaded) clearResume();
+  restoredSource = undefined;
   state.generation++;
   clearTimeout(state.retryTimer);
   for (const e of state.entries) releasePlayer(e);
@@ -1342,6 +1464,7 @@ async function loadMore(): Promise<number> {
     goTo(state.active + 1);
   }
   if (added && before) flashAdded(added);
+  if (added) saveResume();
   scheduleMoreIfNeeded();
   return added;
 }
@@ -1548,6 +1671,12 @@ function ensurePlayer(entry: Entry): FeedPlayer {
     },
     onTime: (t, d) => {
       if (!entry.isSeeking()) entry.progress.style.width = `${(100 * t) / d}%`;
+      // Reopened page: back to where the viewer was in this video (once, when it is playing)
+      if (entry.resumeAt !== undefined && !player.paused) {
+        const at = entry.resumeAt;
+        entry.resumeAt = undefined;
+        if (at > t + 1 && at < d - 2) player.seek(at);
+      }
     },
   });
   player.loop = !prefs.autoscroll;
@@ -1594,6 +1723,20 @@ function onPlayerError(entry: Entry, e: Error): void {
     entry.retrying = true;
     attachSource(entry, 'proxy');
     if (activeEntry() === entry && state.started) void playEntry(entry);
+    syncWait();
+    return;
+  }
+  if (entry.restored && !entry.reresolved && entry.item.canonicalUrl) {
+    // A video from the saved feed: its play URLs have probably expired. Fresh ones from its page, once.
+    entry.reresolved = true;
+    entry.triedProxy = false;
+    entry.item.formats = [];
+    entry.resolving = undefined;
+    releasePlayer(entry);
+    entry.retrying = true;
+    console.warn(`[feed] saved video ${entry.item.id} failed (${detail}); getting fresh play URLs`);
+    if (activeEntry() === entry && state.started) void playEntry(entry);
+    else if (Math.abs(state.entries.indexOf(entry) - state.active) === 1) void ensureFormats(entry).then((ok) => ok && attachSource(entry));
     syncWait();
     return;
   }
@@ -1694,6 +1837,7 @@ function setActive(idx: number): void {
     }
   });
   scheduleMoreIfNeeded();
+  saveResume();
 }
 
 function goTo(idx: number): void {
@@ -2122,12 +2266,19 @@ document.addEventListener('visibilitychange', syncOverlayPause);
 void (async () => {
   const wanted: FeedSource = wantsForYou() ? 'foryou' : 'explore';
   const savedForYou = prefs.source === 'foryou';
-  if (savedForYou) {
+  // The page was closed (the car's browser does that when another app opens): the saved feed of the
+  // tab this visit would show plays on at once, without waiting for the server or the session check.
+  // Explore is what shows first anyway (For You follows once the server confirms the account), and on a
+  // sign-in-only platform either tab needs the account, so those restore too.
+  const saved = loadResume();
+  const restored = !!saved && (saved.source === wanted || saved.source === 'explore' || P.loginRequired) && restoreFeed(saved);
+  const restoredFrom = restored ? saved!.source : undefined;
+  if (savedForYou && !restored) {
     prefs.source = 'explore';
     renderSourceUi();
   }
   // A platform that serves nobody signed out has nothing to load until the account is known.
-  const feedReady: Promise<unknown> = P.loginRequired ? Promise.resolve() : loadMore();
+  const feedReady: Promise<unknown> = P.loginRequired || restored ? Promise.resolve() : loadMore();
   let resuming = false;
   try {
     resuming = localStorage.getItem(SIGNIN_KEY) === '1';
@@ -2138,7 +2289,7 @@ void (async () => {
     // A sign-in was pending when the page was last open: show the panel right away, in the right step.
     el.session.classList.remove('hidden');
     el.sessionText.innerHTML = `<b>Resuming your ${esc(P.name)} sign-in…</b>\nChecking where it stands on the server.`;
-  } else if (P.loginRequired) {
+  } else if (P.loginRequired && !restored) {
     // Nothing loads until the account is known: say so, with the time it takes, instead of a black screen.
     startSessionCheckStatus();
   }
@@ -2160,8 +2311,13 @@ void (async () => {
     }
   }
   booting = false;
+  // A restored feed is the feed: a confirmed sign-in only lets it go on loading (no reload). Kept
+  // while the check still runs, so the switch to the account's feed (onSignedIn) knows it too.
+  if (!state.session?.probing) restoredSource = undefined;
   if (P.loginRequired) {
-    if (state.session?.state === 'logged_in') {
+    if (state.session?.state === 'logged_in' && restored) {
+      savePrefs();
+    } else if (state.session?.state === 'logged_in') {
       prefs.source = wanted;
       savePrefs();
       renderSourceUi();
@@ -2174,7 +2330,9 @@ void (async () => {
       void openSessionPanel();
     }
   } else if (wanted === 'foryou') {
-    if (state.session?.state === 'logged_in') {
+    if (state.session?.state === 'logged_in' && restoredFrom === 'foryou') {
+      savePrefs();
+    } else if (state.session?.state === 'logged_in') {
       prefs.source = 'foryou';
       savePrefs();
       renderSourceUi();
@@ -2191,6 +2349,12 @@ void (async () => {
       // No session on the server: Explore for this visit. The saved preference is not touched, so a
       // server that is restarting (unreachable right now) cannot pin the account to Explore.
       toast(`Sign in (Profile) to see your ${P.tabs.foryou} feed; showing ${P.tabs.explore} meanwhile.`, false, 5000);
+      if (restoredFrom === 'foryou') {
+        // the saved For You videos cannot go on loading without the account
+        prefs.source = 'explore';
+        renderSourceUi();
+        void reload();
+      }
     }
   }
 })();
