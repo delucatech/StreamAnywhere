@@ -51,6 +51,17 @@ const CATALOG_TTL_MS = 6 * 60 * 60 * 1000;
 /** Pause between two profile page loads, and the most loads per hour: the block came after ~100 in 4 minutes. */
 const PROFILE_GAP_MS = 3000;
 const PROFILE_BUDGET_PER_HOUR = 40;
+/**
+ * A profile page on the 1 GB VM: 50-70 s from start to the listed Reels (2026-10-14), and DOMContentLoaded
+ * alone ran past 40 s now and then. The navigation is given this long, then the Reels are waited for...
+ */
+const PROFILE_NAV_MS = 60_000;
+/** ...for at most this long. */
+const PROFILE_READ_MS = 30_000;
+/** Background re-listing of Explore accounts: the pause after one page load before the next... */
+const REFRESH_GAP_MS = 45_000;
+/** ...and only while an Explore feed was asked for within this window. */
+const REFRESH_IDLE_MS = 3 * 60 * 1000;
 /** After Instagram redirected a profile to the login page: no profile loads for this long (doubling per repeat, up to the cap). */
 const BLOCK_MS = 10 * 60 * 1000;
 const BLOCK_MAX_MS = 60 * 60 * 1000;
@@ -735,9 +746,26 @@ async function scrapeProfile(handle: string, want: number, log: (m: string) => v
     lastProfileAt = Date.now();
     profileLoads.push(Date.now());
     const t0 = Date.now();
-    await p.goto(`${ORIGIN}/${encodeURIComponent(handle)}/reels/`, { waitUntil: 'domcontentloaded', timeout: 40_000 });
-    let st: ProfileState = (await p.evaluate(PROFILE_STATE_JS)) as ProfileState;
-    for (let i = 0; i < 40; i++) {
+    const secs = (): number => Math.round((Date.now() - t0) / 1000);
+    try {
+      await p.goto(`${ORIGIN}/${encodeURIComponent(handle)}/reels/`, { waitUntil: 'domcontentloaded', timeout: PROFILE_NAV_MS });
+    } catch (e) {
+      const msg = (e as Error).message.split('\n')[0];
+      // DOMContentLoaded can come late on the starved VM although the profile is there and rendering:
+      // read it anyway. (A login redirect is handled by the loop below.)
+      const here = safePath(p.url()).toLowerCase();
+      if (!/timeout/i.test(msg) || !(here.startsWith(`/${handle.toLowerCase()}/`) || sentAway(p.url()))) {
+        await p.goto(`${ORIGIN}/robots.txt`, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => undefined);
+        throw /timeout/i.test(msg)
+          ? new InstagramError(`@${handle}'s profile page did not load in ${secs()} s (the server is busy)`, 504, 'instagram_timeout')
+          : new InstagramError(`@${handle}'s profile page failed to load (${msg})`, 502, 'instagram_error');
+      }
+      log(`instagram @${handle}: the profile page is still loading after ${secs()} s; reading it anyway`);
+    }
+    const readState = async (): Promise<ProfileState> => ((await p.evaluate(PROFILE_STATE_JS).catch(() => undefined)) as ProfileState | undefined) || { path: safePath(p.url()), title: '', codes: [], text: '', desc: '', image: '', ogTitle: '' };
+    let st = await readState();
+    const readUntil = Date.now() + PROFILE_READ_MS;
+    while (Date.now() < readUntil) {
       if (/^\/accounts\/login/.test(st.path)) {
         const pause = Math.min(BLOCK_MAX_MS, BLOCK_MS * 2 ** blockStreak);
         blockStreak++;
@@ -750,7 +778,7 @@ async function scrapeProfile(handle: string, want: number, log: (m: string) => v
       if (/This account is private/i.test(st.text)) throw new InstagramError(`@${handle} is a private account`, 403, 'instagram_private');
       if (st.codes.length) break;
       await sleep(400);
-      st = (await p.evaluate(PROFILE_STATE_JS)) as ProfileState;
+      st = await readState();
     }
     // A signed-in profile keeps loading Reels as the page is scrolled; a guest's 12 are all there is.
     if (signedIn() && st.codes.length >= 12 && want > st.codes.length) {
@@ -784,7 +812,7 @@ async function accountReels(handle: string, want: number, log: (m: string) => vo
   try {
     return await scrapeProfile(handle, want, log);
   } catch (e) {
-    if (hit && e instanceof InstagramError && (e.status === 429 || e.status === 502)) {
+    if (hit && e instanceof InstagramError && (e.status === 429 || e.status === 502 || e.status === 504)) {
       log(`instagram @${handle}: ${e.message} - using the saved listing from ${new Date(hit.at).toLocaleString()}`);
       return hit;
     }
@@ -822,47 +850,119 @@ function accountOrder(catId: number): string[] {
   return o;
 }
 
+export interface ExplorePlan {
+  /** Accounts whose saved listing is used by this fill, in rotation order */
+  use: { handle: string; codes: string[] }[];
+  /** Accounts to list again: no listing yet, or one older than the catalog TTL */
+  refresh: string[];
+  /** The rotation position after this fill */
+  cursor: number;
+}
+
 /**
- * One reservoir fill of a category: the next few accounts of its rotation, their Reels interleaved
- * (so the feed never shows a dozen from one account in a row) and resolved through the embed pages.
+ * Which accounts one Explore fill takes its Reels from: the next ones of the rotation that have a
+ * listing, however old (a listing only names the posts; the playable files come fresh from the embed
+ * pages), until `want` Reels are together. Missing and outdated listings are named for a re-listing.
+ */
+export function planExploreFill(order: string[], cursor: number, listing: (key: string) => { at: number; codes: string[] } | undefined, want: number, now: number): ExplorePlan {
+  const use: ExplorePlan['use'] = [];
+  const refresh: string[] = [];
+  let collected = 0;
+  let i = 0;
+  for (; i < order.length && collected < want; i++) {
+    const handle = order[(cursor + i) % order.length];
+    const e = listing(handle.toLowerCase());
+    if (!e || now - e.at >= CATALOG_TTL_MS) refresh.push(handle);
+    if (e?.codes.length) {
+      use.push({ handle, codes: e.codes.slice(0, 12) });
+      collected += Math.min(12, e.codes.length);
+    }
+  }
+  return { use, refresh, cursor: cursor + i };
+}
+
+/**
+ * Explore accounts waiting to be listed (again), one profile page at a time in the background, so a
+ * viewer never waits for a profile page (50-70 s each on the VM, 2026-10-14) while any listing exists.
+ */
+const refreshQueue: string[] = [];
+let refreshing = false;
+let refreshTimer: NodeJS.Timeout | undefined;
+let lastRefreshEnd = 0;
+let lastExploreAt = 0;
+
+function queueRefresh(handles: string[], log: (m: string) => void): void {
+  lastExploreAt = Date.now();
+  for (const h of handles) if (!refreshQueue.includes(h)) refreshQueue.push(h);
+  scheduleRefresh(log);
+}
+
+function scheduleRefresh(log: (m: string) => void): void {
+  if (refreshing || refreshTimer || !refreshQueue.length) return;
+  refreshTimer = setTimeout(() => {
+    refreshTimer = undefined;
+    // Nobody is watching Explore any more (or the sign-in is gone): the browser may close.
+    if (Date.now() - lastExploreAt > REFRESH_IDLE_MS || !signedIn()) {
+      refreshQueue.length = 0;
+      return;
+    }
+    const handle = refreshQueue.shift() as string;
+    const e = loadCatalog().get(handle.toLowerCase());
+    if (e && Date.now() - e.at < CATALOG_TTL_MS) {
+      scheduleRefresh(log);
+      return;
+    }
+    refreshing = true;
+    void scrapeProfile(handle, 12, log)
+      .catch((err: Error) => {
+        log(`instagram @${handle}: background listing failed (${err.message})`);
+        // Limited or over the hourly budget: the next fills queue the accounts again.
+        if (err instanceof InstagramError && err.status === 429) refreshQueue.length = 0;
+      })
+      .finally(() => {
+        refreshing = false;
+        lastRefreshEnd = Date.now();
+        scheduleRefresh(log);
+      });
+  }, Math.max(0, lastRefreshEnd + REFRESH_GAP_MS - Date.now()));
+  refreshTimer.unref?.();
+}
+
+/**
+ * One reservoir fill of a category: the next accounts of its rotation, their Reels interleaved (so the
+ * feed never shows a dozen from one account in a row) and resolved through the embed pages. Saved
+ * listings are used at once; only when there is none at all does the fill wait for a profile page.
  */
 export async function exploreInstagram(catId: number, want: number, log: (m: string) => void): Promise<{ items: FeedItem[]; warnings: string[] }> {
   requireSignedIn();
   const order = accountOrder(catId);
   const warnings: string[] = [];
-  const lists: string[][] = [];
-  let collected = 0;
-  let loaded = 0;
+  const plan = planExploreFill(order, cursors.get(catId) || 0, (k) => loadCatalog().get(k), want, Date.now());
+  cursors.set(catId, plan.cursor);
+  const lists = plan.use.map((u) => u.codes);
   let failure: InstagramError | undefined;
-  for (let tried = 0; tried < order.length && collected < want && loaded < 3; tried++) {
-    const cur = cursors.get(catId) || 0;
-    cursors.set(catId, cur + 1);
-    const handle = order[cur % order.length];
-    const fresh = loadCatalog().get(handle.toLowerCase());
-    // Profile pages are limited: until they are allowed again only the accounts already listed can be used.
-    if (failure && !fresh) continue;
-    const cached = Boolean(fresh && Date.now() - fresh.at < CATALOG_TTL_MS);
-    try {
-      const acc = await accountReels(handle, 12, log);
-      if (!cached) loaded++;
-      if (acc.codes.length) {
+  if (!lists.length) {
+    // Nothing listed yet (a new server): this fill waits for a profile page, a second one if the first fails.
+    for (const handle of plan.refresh.slice(0, 2)) {
+      try {
+        const acc = await scrapeProfile(handle, 12, log);
         lists.push(acc.codes.slice(0, 12));
-        collected += Math.min(12, acc.codes.length);
-      }
-    } catch (e) {
-      if (!(e instanceof InstagramError)) throw e;
-      if (e.status === 429) {
+        plan.refresh.splice(plan.refresh.indexOf(handle), 1);
+        break;
+      } catch (e) {
+        if (!(e instanceof InstagramError)) throw e;
         failure = e;
-        continue;
+        if (e.status === 429) break;
+        warnings.push(`@${handle}: ${e.message}`);
       }
-      warnings.push(`@${handle}: ${e.message}`);
     }
   }
+  queueRefresh(plan.refresh, log);
   const codes: string[] = [];
   for (let i = 0; lists.some((l) => i < l.length); i++) for (const l of lists) if (i < l.length && !codes.includes(l[i])) codes.push(l[i]);
-  if (!codes.length) throw failure || new InstagramError('Instagram showed no Reels for the accounts tried' + (warnings.length ? ` (${warnings.join('; ')})` : ''), 502, 'instagram_empty');
-  if (failure) warnings.push(`${failure.message} (showing Reels listed earlier)`);
+  if (!codes.length) throw failure?.status === 429 ? failure : new InstagramError('Instagram showed no Reels for the accounts tried' + (warnings.length ? ` (${warnings.join('; ')})` : ''), 502, 'instagram_empty');
   const items = await itemsFor(codes.slice(0, Math.max(want, 24)), log);
+  log(`instagram explore: ${items.length} videos from ${lists.length} accounts (${plan.use.filter((u) => plan.refresh.includes(u.handle)).length} listings older than ${CATALOG_TTL_MS / 3600_000} h), ${refreshQueue.length} queued for re-listing`);
   return { items, warnings };
 }
 

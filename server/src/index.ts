@@ -147,7 +147,7 @@ function instagramReservoir(categoryId: number, log: (m: string) => void): Reser
   let r = instagramReservoirs.get(categoryId);
   if (!r) {
     const cat = instagramCategory(categoryId);
-    r = new Reservoir(`instagram ${cat.label}`, ({ count }) => exploreInstagram(cat.id, count, log), { log, batch: 30, target: 45, low: 25, gapMs: 4000, waitMs: 45_000 });
+    r = new Reservoir(`instagram ${cat.label}`, ({ count }) => exploreInstagram(cat.id, count, log), { log, batch: 30, target: 45, low: 25, gapMs: 4000, waitMs: 110_000 });
     instagramReservoirs.set(categoryId, r);
   }
   return r;

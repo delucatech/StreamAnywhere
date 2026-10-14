@@ -15,7 +15,7 @@ import { parseTikTokUrl } from '../tiktok';
 import { itemToFeedItem } from '../feed';
 import { entryToFeedItem, isYouTubeUrl, pickAudio, youTubeVideoId } from '../youtube';
 import { accountFromMenu, parseCookiesText, sapisidHash, toNetscape, YouTubeSessionError } from '../youtubeSession';
-import { accountFromAnswer, bodyHint, collectCodes, embedToFeedItem, handleFromQuery, instagramCode, isInstagramUrl, parseCount, parseProfileMeta, sentAway, uaMetadata, urlExpiry } from '../instagram';
+import { accountFromAnswer, bodyHint, collectCodes, embedToFeedItem, handleFromQuery, instagramCode, isInstagramUrl, parseCount, parseProfileMeta, planExploreFill, sentAway, uaMetadata, urlExpiry } from '../instagram';
 import { cleanUserAgent, cookiesLookSignedIn, InstagramSessionError, parseInstagramCookies } from '../instagramSession';
 import { INSTAGRAM_CATEGORIES } from '../../../shared/types';
 import { Reservoir, expiredSoon } from '../reservoir';
@@ -228,6 +228,17 @@ async function offline(): Promise<void> {
   check('account answer: checkpoint flagged, not signed out', !cp.ok && cp.checkpoint === true, cp);
   check('body hint strips markup and folds space', bodyHint('<html><head><style>a{}</style><script>var x=1;</script></head><body> <p>Please   wait</p>\n<b>now</b></body></html>') === 'Please wait now' && bodyHint('x'.repeat(200)).length === 141);
   check('sent away: login / rate-limit flag / checkpoint / neither', sentAway('https://www.instagram.com/accounts/login/?next=%2Freels%2F')?.kind === 'login' && sentAway('https://www.instagram.com/accounts/login/?next=%2Fnatgeo%2Freels%2F&is_from_rle')?.kind === 'limited' && sentAway('https://www.instagram.com/challenge/action/AX/')?.kind === 'checkpoint' && sentAway('https://www.instagram.com/accounts/suspended/')?.kind === 'checkpoint' && sentAway('https://www.instagram.com/reels/DecPSQfoaRe/') === undefined && sentAway('not a url') === undefined);
+  const H = 3600_000;
+  const now = 100 * H;
+  const cat: Record<string, { at: number; codes: string[] }> = {
+    a: { at: now - H, codes: Array.from({ length: 12 }, (_, i) => 'aaaaa' + i) },
+    b: { at: now - 30 * H, codes: Array.from({ length: 12 }, (_, i) => 'bbbbb' + i) },
+    d: { at: now - 2 * H, codes: Array.from({ length: 12 }, (_, i) => 'ddddd' + i) },
+  };
+  const plan = planExploreFill(['A', 'b', 'c', 'd', 'e'], 0, (k) => cat[k], 30, now);
+  check('explore plan: old listings used at once, missing and old ones queued, stops at want', plan.use.map((u) => u.handle).join() === 'A,b,d' && plan.refresh.join() === 'b,c' && plan.cursor === 4, plan);
+  const cold = planExploreFill(['x', 'y'], 5, () => undefined, 30, now);
+  check('explore plan: nothing listed walks one lap and queues every account', cold.use.length === 0 && cold.refresh.join() === 'y,x' && cold.cursor === 7, cold);
   const chromeUa = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.7390.55 Safari/537.36';
   const m = uaMetadata(chromeUa);
   check('ua metadata: windows chrome brands/platform/full versions', m?.platform === 'Windows' && m.brands.some((b) => b.brand === 'Google Chrome' && b.version === '141') && m.fullVersion === '141.0.7390.55' && m.fullVersionList.some((b) => b.brand === 'Google Chrome' && b.version === '141.0.7390.55') && m.bitness === '64' && m.mobile === false, m);
