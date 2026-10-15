@@ -617,7 +617,7 @@
   display: none;
 }
 
-/* ---- W / Esc ("only the video"): the feed takes the whole screen, as on phones ---- */
+/* ---- full screen (the Full action / F / W): the feed takes all of the window ---- */
 .app.wide.fullwindow {
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
@@ -629,9 +629,16 @@
 }
 .app.wide.fullwindow .stage {
   padding: 0;
+  gap: 0;
+}
+.app.wide.fullwindow .feed-col {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .app.wide.fullwindow .feed {
+  flex: 1 1 auto;
   width: 100%;
+  height: 100%;
 }
 .app.wide.fullwindow .item {
   width: 100%;

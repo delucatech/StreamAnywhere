@@ -149,9 +149,14 @@
           <button class="act" id="actMute" type="button" title="Sound on/off (M)"><span class="ico" id="actMuteIco"></span><small>Sound</small></button>
           <button class="act" id="actDownload" type="button" title="Download this video (D)"><span class="ico" id="actDownloadIco"></span><small>Save</small></button>
           <button class="act" id="actAuto" type="button" title="Auto-scroll to the next video when one ends (A)"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 6l9 6-9 6z" /><path d="M18 6v12" /></svg></span><small id="actAutoLabel">Auto</small></button>
-          <button class="act" id="actFull" type="button" title="Fullscreen (F)"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5" /><path d="M20 9V4h-5" /><path d="M4 15v5h5" /><path d="M20 15v5h-5" /></svg></span><small>Full</small></button>
+          <button class="act" id="actFull" type="button" title="Full screen (F)"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5" /><path d="M20 9V4h-5" /><path d="M4 15v5h5" /><path d="M20 15v5h-5" /></svg></span><small>Full</small></button>
         </aside>
       </div>
+
+      <!-- Full screen (the Full action / F): the only control left over the video; leaves full screen -->
+      <button class="fs-exit" id="fsExit" type="button" title="Exit full screen (F / Esc)" aria-label="Exit full screen">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4v5H4" /><path d="M15 4v5h5" /><path d="M9 20v-5H4" /><path d="M15 20v-5h5" /></svg><span>Exit full screen</span>
+      </button>
 
       <!-- Wide screens: the loaded videos as a queue around the one playing; tap a row to jump there. -->
       <aside class="upnext" id="upnext" aria-label="Up next">
@@ -306,7 +311,7 @@
       </div>
       <div id="start" class="start">
         <button id="startBtn" class="start-btn" type="button">Tap to start</button>
-        <p class="start-hint">Swipe or drag up/down for the next video · tap to pause · swipe right to go back · F for fullscreen</p>
+        <p class="start-hint">Swipe or drag up/down for the next video · tap to pause · swipe right to go back · F for full screen</p>
       </div>
 
       <div id="toast" class="toast hidden"></div>

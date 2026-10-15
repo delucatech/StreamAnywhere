@@ -71,6 +71,7 @@ const el = {
   actAuto: $<HTMLButtonElement>('actAuto'),
   actAutoLabel: $('actAutoLabel'),
   actFull: $<HTMLButtonElement>('actFull'),
+  fsExit: $<HTMLButtonElement>('fsExit'),
   navHome: $<HTMLButtonElement>('navHome'),
   navFriends: $<HTMLButtonElement>('navFriends'),
   navApp: $<HTMLButtonElement>('navApp'),
@@ -404,6 +405,7 @@ el.actDownload.addEventListener('click', () => {
 });
 el.actAuto.addEventListener('click', () => toggleAutoscroll());
 el.actFull.addEventListener('click', () => toggleFullscreen());
+el.fsExit.addEventListener('click', () => setFullscreen(false));
 el.navHome.addEventListener('click', () => {
   if (state.active > 0) goTo(0);
   else pressed(el.navHome, () => reload());
@@ -673,15 +675,30 @@ function toggleAutoscroll(): void {
   toast(prefs.autoscroll ? 'Auto-scroll on: next video plays when this one ends' : 'Auto-scroll off: videos loop');
 }
 
+// Full screen: the video takes all the room the window has (no bars, rail, Up next or actions;
+// .fullwindow in feed.css / theater.css), with an "Exit full screen" button over it. The browser's
+// own fullscreen is asked for as well where it is allowed; where it is refused (the car's browser)
+// the page still fills the window. Leaving the browser's fullscreen (its Esc) leaves ours too.
+function isFullscreen(): boolean {
+  return el.app.classList.contains('fullwindow');
+}
+function setFullscreen(on: boolean): void {
+  if (on === isFullscreen()) return;
+  el.app.classList.toggle('fullwindow', on);
+  el.actFull.setAttribute('aria-pressed', String(on));
+  const root = document.documentElement;
+  if (on) {
+    if (!document.fullscreenElement && root.requestFullscreen) root.requestFullscreen().catch(() => undefined);
+    toast('Full screen: tap "Exit full screen" (or F / Esc) to leave');
+  } else if (document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
+  layout();
+}
 function toggleFullscreen(): void {
-  if (document.fullscreenElement) void document.exitFullscreen();
-  else void el.app.requestFullscreen().catch((e) => toast(`Fullscreen refused: ${(e as Error).message}`, true));
+  setFullscreen(!isFullscreen());
 }
-
-function toggleBars(): void {
-  const on = el.app.classList.toggle('fullwindow');
-  if (on) toast('Bars hidden. Press W or Esc to show them again');
-}
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement) setFullscreen(false);
+});
 
 function start(): void {
   state.started = true;
@@ -2055,10 +2072,13 @@ document.addEventListener('keydown', (e) => {
       break;
     case 'w':
     case 'W':
-      toggleBars();
+      toggleFullscreen();
       break;
     case 'Escape':
-      if (el.app.classList.contains('fullwindow')) toggleBars();
+      if (isFullscreen()) {
+        setFullscreen(false);
+        break;
+      }
       if (!el.session.classList.contains('hidden') && el.sessionClose.classList.contains('hidden') === false) closeSessionPanel();
       else backToPanel();
       break;

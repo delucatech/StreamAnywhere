@@ -232,7 +232,8 @@ Open **`/feed.html`** (from the launcher; `?platform=youtube` for YouTube). It i
 - One video per screen, scroll-snap. The video that fills the viewport plays; the others pause.
   Mouse wheel, touch, ↑/↓, J/K, PageUp/PageDown move between videos.
 - **Tap/click the video to pause and resume** (Space does the same). **M** mutes, **D** downloads.
-- **Fullscreen** (⛶ / **F**) and **Full window** (hides the top bar; **W** or Esc brings it back).
+- **Full screen** (the Full action / **F** / **W**): the video fills the whole window (bars, rail and Up next
+  hidden; the browser's fullscreen too where it allows it). **Exit full screen** (top right), **F** or Esc leaves it.
 - **Auto-scroll** (checkbox / **A**): when on, a finished video advances to the next one; when off,
   videos loop.
 - **⬇ Download** fetches the cookie-free CDN URL as a blob (progress on the button) and saves it as
