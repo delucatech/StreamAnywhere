@@ -1540,16 +1540,6 @@ function makeEntry(item: FeedItem): Entry {
   canvas.setAttribute('aria-label', label);
   root.appendChild(canvas);
 
-  // Wide screens: the app the video comes from, on the picture
-  const srcBadge = document.createElement('div');
-  srcBadge.className = 'src-badge';
-  const srcTile = document.createElement('span');
-  srcTile.className = 'src-tile';
-  srcTile.style.background = P.tile;
-  srcTile.innerHTML = P.icon;
-  srcBadge.append(srcTile, P.name);
-  root.appendChild(srcBadge);
-
   const badge = document.createElement('div');
   badge.className = 'pause-badge';
   badge.textContent = '▶';

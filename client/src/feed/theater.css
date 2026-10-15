@@ -13,8 +13,7 @@
 .rail,
 .upnext,
 .app-title,
-.search-label,
-.item .src-badge {
+.search-label {
   display: none;
 }
 .stage,
@@ -373,33 +372,6 @@
 .wide .item .info {
   right: 18px;
   left: 18px;
-}
-.wide .item .src-badge {
-  position: absolute;
-  left: 14px;
-  top: 14px;
-  z-index: 2;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 12px 5px 5px;
-  border-radius: 999px;
-  /* solid, not a backdrop blur: it sits on the playing video */
-  background: rgba(10, 11, 15, 0.7);
-  font-size: 12px;
-  font-weight: 700;
-  pointer-events: none;
-}
-.wide .src-tile {
-  width: 24px;
-  height: 24px;
-  border-radius: 7px;
-  display: grid;
-  place-items: center;
-}
-.wide .src-tile svg {
-  width: 68%;
-  height: 68%;
 }
 .wide .actions {
   position: static;
