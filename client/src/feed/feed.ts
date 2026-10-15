@@ -125,8 +125,6 @@ const el = {
   railProfileLabel: $('railProfileLabel'),
   appName: $('appName'),
   appSub: $('appSub'),
-  topbar: $('topbar'),
-  appTitle: $('appTitle'),
   searchLabel: $('searchLabel'),
   upnextAuto: $<HTMLButtonElement>('upnextAuto'),
   upnextList: $('upnextList'),
@@ -200,11 +198,6 @@ function applyLayout(): boolean {
   const h = window.innerHeight;
   const wide = layoutPick === 'wide' || (layoutPick === 'auto' && w >= 760 && h >= 480 && w >= h);
   el.app.classList.toggle('wide', wide);
-  // Wide: the categories / the search-or-account pill sit in the header beside the tabs (in the place
-  // of the app's title), so the video starts right under the header, level with Up next's list.
-  // Phones: back under the top bar, over the video.
-  if (wide && el.chips.parentElement !== el.topbar) el.appTitle.after(el.chips, el.context);
-  else if (!wide && el.chips.parentElement === el.topbar) el.topbar.after(el.chips, el.context);
   return wide;
 }
 window.addEventListener('resize', applyLayout);
@@ -330,8 +323,6 @@ function renderSourceUi(): void {
   const tabName = prefs.source === 'foryou' ? P.tabs.foryou : P.tabs.explore;
   const cat = prefs.source === 'explore' && prefs.category !== P.defaultCategory ? P.categories.find((c) => c.id === prefs.category) : undefined;
   el.appSub.textContent = listMode ? el.contextLabel.textContent || '' : cat ? `${tabName} · ${cat.label}` : tabName;
-  // wide screens: the categories or the pill take the title's place in the header (theater.css)
-  el.topbar.classList.toggle('has-strip', listMode || (!el.chips.classList.contains('hidden') && el.chips.childElementCount > 0));
 }
 async function setSource(src: FeedSource, announce = true): Promise<void> {
   if ((src === 'foryou' || P.loginRequired) && state.session?.state !== 'logged_in') {
