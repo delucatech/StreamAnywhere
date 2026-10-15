@@ -63,6 +63,7 @@ const el = {
   searchBtn: $<HTMLButtonElement>('searchBtn'),
   actAuthor: $<HTMLButtonElement>('actAuthor'),
   actAuthorImg: $<HTMLImageElement>('actAuthorImg'),
+  actAuthorLabel: $('actAuthorLabel'),
   actMute: $<HTMLButtonElement>('actMute'),
   actMuteIco: $('actMuteIco'),
   actDownload: $<HTMLButtonElement>('actDownload'),
@@ -1787,7 +1788,7 @@ function ensureFormats(entry: Entry): Promise<boolean> {
               void openProfile(r.author!);
             });
           }
-          if (activeEntry() === entry) el.actAuthor.disabled = false;
+          if (activeEntry() === entry) syncAuthor(entry);
           renderQueue();
         }
         if (!item.duration && r.duration) item.duration = r.duration;
@@ -1821,6 +1822,16 @@ async function playEntry(entry: Entry): Promise<void> {
   }
 }
 
+/** The author button beside the video: its avatar, and its @name under it ("Profile" until it is known). */
+function syncAuthor(entry: Entry): void {
+  const a = entry.item.author;
+  if (a.avatar) el.actAuthorImg.src = a.avatar;
+  else el.actAuthorImg.removeAttribute('src');
+  el.actAuthor.disabled = !a.uniqueId;
+  el.actAuthorLabel.textContent = a.uniqueId ? `@${a.uniqueId}` : a.nickname || 'Profile';
+  el.actAuthor.title = a.uniqueId ? `@${a.uniqueId}: who posted this video (P)` : 'Who posted this video (P)';
+}
+
 function setActive(idx: number): void {
   if (idx < 0 || idx >= state.entries.length) return;
   const prev = activeEntry();
@@ -1834,9 +1845,7 @@ function setActive(idx: number): void {
   state.userPaused = false;
   const cur = state.entries[idx];
   cur.root.classList.add('active');
-  if (cur.item.author.avatar) el.actAuthorImg.src = cur.item.author.avatar;
-  else el.actAuthorImg.removeAttribute('src');
-  el.actAuthor.disabled = !cur.item.author.uniqueId;
+  syncAuthor(cur);
   void playEntry(cur);
   syncWait();
   renderQueue();
