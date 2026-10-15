@@ -125,6 +125,8 @@ const el = {
   railProfileLabel: $('railProfileLabel'),
   appName: $('appName'),
   appSub: $('appSub'),
+  topbar: $('topbar'),
+  appTitle: $('appTitle'),
   searchLabel: $('searchLabel'),
   upnextAuto: $<HTMLButtonElement>('upnextAuto'),
   upnextList: $('upnextList'),
@@ -198,6 +200,11 @@ function applyLayout(): boolean {
   const h = window.innerHeight;
   const wide = layoutPick === 'wide' || (layoutPick === 'auto' && w >= 760 && h >= 480 && w >= h);
   el.app.classList.toggle('wide', wide);
+  // Wide: the categories / the search-or-account pill sit in the header beside the tabs (in the place
+  // of the app's title), so the video starts right under the header, level with Up next's list.
+  // Phones: back under the top bar, over the video.
+  if (wide && el.chips.parentElement !== el.topbar) el.appTitle.after(el.chips, el.context);
+  else if (!wide && el.chips.parentElement === el.topbar) el.topbar.after(el.chips, el.context);
   return wide;
 }
 window.addEventListener('resize', applyLayout);
@@ -323,6 +330,8 @@ function renderSourceUi(): void {
   const tabName = prefs.source === 'foryou' ? P.tabs.foryou : P.tabs.explore;
   const cat = prefs.source === 'explore' && prefs.category !== P.defaultCategory ? P.categories.find((c) => c.id === prefs.category) : undefined;
   el.appSub.textContent = listMode ? el.contextLabel.textContent || '' : cat ? `${tabName} · ${cat.label}` : tabName;
+  // wide screens: the categories or the pill take the title's place in the header (theater.css)
+  el.topbar.classList.toggle('has-strip', listMode || (!el.chips.classList.contains('hidden') && el.chips.childElementCount > 0));
 }
 async function setSource(src: FeedSource, announce = true): Promise<void> {
   if ((src === 'foryou' || P.loginRequired) && state.session?.state !== 'logged_in') {
@@ -414,7 +423,7 @@ el.navAppTile.style.background = P.tile;
 el.navAppTile.innerHTML = P.icon;
 el.navApp.title = `${P.name}: home screen (all apps)`;
 el.navApp.setAttribute('aria-label', `${P.name}: home screen`);
-el.navApp.addEventListener('click', () => el.homeLink.click());
+onHomeTap(el.navApp);
 el.navInbox.addEventListener('click', () => (P.social ? pressed(el.navInbox, () => openInbox()) : toast(`Messages are not available for ${P.name}`)));
 el.actAuthor.addEventListener('click', () => {
   const cur = activeEntry();
@@ -443,7 +452,7 @@ for (const p of PLATFORMS) {
   b.addEventListener('click', () => (inUse ? el.navHome.click() : location.assign(p.url)));
   el.railApps.appendChild(b);
 }
-el.railLauncher.addEventListener('click', () => el.homeLink.click());
+onHomeTap(el.railLauncher);
 el.railFriends.addEventListener('click', () => el.navFriends.click());
 el.railInbox.addEventListener('click', () => el.navInbox.click());
 el.railProfile.addEventListener('click', () => el.navProfile.click());
@@ -2378,12 +2387,46 @@ void (async () => {
 })();
 
 // Back to the launcher: the home screen plays the reverse of its open animation for this app.
-el.homeLink.addEventListener('click', () => {
+// It must answer the tap at once, also while a video plays on a slow device (the car): the
+// navigation goes out on the finger's release, not the click after it, and every player is stopped
+// first, so decoding, drawing and the video downloads no longer hold up the thread and the network
+// while the home screen loads.
+let leaving = false;
+function goHome(): void {
+  if (leaving) return;
+  leaving = true;
+  el.app.classList.add('leaving');
   try {
     sessionStorage.setItem('streamanywhere.returnFrom', P.id);
   } catch {
     /* ignore */
   }
+  saveResume(true); // the position too, while the player still knows it
+  for (const e of state.entries) releasePlayer(e);
+  location.assign(el.homeLink.href);
+}
+/** A home control: goes home on release of a press that began on it (and on click: keyboard, mouse). */
+function onHomeTap(b: HTMLElement): void {
+  let down = -1;
+  b.addEventListener('pointerdown', (e) => {
+    if (e.isPrimary && e.button === 0) down = e.pointerId;
+  });
+  b.addEventListener('pointerup', (e) => {
+    if (e.pointerId !== down) return;
+    down = -1;
+    e.preventDefault();
+    goHome();
+  });
+  b.addEventListener('pointercancel', () => (down = -1));
+  b.addEventListener('click', (e) => {
+    e.preventDefault();
+    goHome();
+  });
+}
+onHomeTap(el.homeLink);
+// Back from the home screen into a page kept in the back/forward cache: its players were stopped.
+window.addEventListener('pageshow', (e) => {
+  if (e.persisted && leaving) location.reload();
 });
 
 // Opened from the home screen: its splash (feed.html) fades into the page now that everything is set up.

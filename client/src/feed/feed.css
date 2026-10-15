@@ -1329,3 +1329,26 @@ button {
   padding: 6px 0;
   margin: 0;
 }
+
+/* ---------- going back to the home screen (feed.ts goHome) ---------- */
+/* the home controls answer the finger at once: no double-tap wait, a pressed look while held */
+#homeLink,
+#navApp,
+#railLauncher {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+#homeLink:active,
+#railLauncher:active {
+  transform: scale(0.9);
+  background: rgba(255, 255, 255, 0.18);
+}
+/* the players are stopped as the tap lands: the feed fades out while the home screen loads */
+.app.leaving .feed,
+.app.leaving .upnext-list {
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.app.leaving {
+  pointer-events: none;
+}

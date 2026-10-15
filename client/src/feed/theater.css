@@ -2,8 +2,9 @@
    The "theater rail" layout for big screens (the car's display, tablets, desktops).
    feed.ts puts the class `wide` on .app when the window is wide enough and not taller
    than wide (or when ?layout=wide asked for it); everything here applies only then.
-   Left: a rail with every app (the one in use marked) and the sections. Middle: header,
-   categories and the feed: a 9:16 rounded panel, the actions beside it. Right: Up next.
+   Left: a rail with every app (the one in use marked) and the sections. Middle: the header (the
+   categories or the search pill, the tabs, search) and the feed: a 9:16 rounded panel, the actions
+   beside it, from right under the header (level with Up next's list) to the bottom. Right: Up next.
    The feed itself (drag, swipe, wheel, keys, seek) is the same element as on phones: the clip
    window is exactly one panel, so the previous / next video shows only while the track moves
    (a drag, a snap), as on a phone.
@@ -25,8 +26,9 @@
 .app.wide {
   --vh: 100vh;
   --upnext-w: clamp(230px, 24vw, 300px);
-  /* rows: header 72 + categories 52; the stage keeps 12 px below the feed column */
-  --stage-h: calc(var(--vh) - 136px);
+  /* rows: the header 72 (the categories are in it); the stage keeps 12 px below the feed column */
+  --header-h: 72px;
+  --stage-h: calc(var(--vh) - var(--header-h) - 12px);
   /* room beside the panel inside the clip window, for its shadow */
   --feed-air: 32px;
   /* beside the feed: rail, Up next, the stage's padding, the air, the gap and the action column, some air */
@@ -36,10 +38,9 @@
   --feed-w: calc(var(--feed-h) * 9 / 16);
   display: grid;
   grid-template-columns: 92px minmax(0, 1fr) var(--upnext-w);
-  grid-template-rows: 72px 52px minmax(0, 1fr);
+  grid-template-rows: var(--header-h) minmax(0, 1fr);
   grid-template-areas:
     'rail top upnext'
-    'rail chips upnext'
     'rail stage upnext';
   background: #0a0b0f;
 }
@@ -192,13 +193,13 @@
   background: rgba(255, 255, 255, 0.06);
 }
 
-/* ---- header: app name + what plays, source tabs, search ---- */
+/* ---- header: app name + what plays (or the categories / the pill), source tabs, search ---- */
 .wide .topbar {
   grid-area: top;
   position: relative;
   height: auto;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 16px;
   padding: var(--safe-t) 24px 0;
@@ -207,6 +208,15 @@
 }
 .wide .topbar .brand {
   display: none;
+}
+.wide .topbar > .app-title,
+.wide .topbar > .chips,
+.wide .topbar > .context {
+  grid-column: 1;
+  grid-row: 1;
+}
+.wide .topbar.has-strip > .app-title {
+  visibility: hidden;
 }
 .wide .app-title {
   display: flex;
@@ -273,6 +283,14 @@
   width: 18px;
   height: 18px;
 }
+.wide .topbar.has-strip .search-btn {
+  width: 44px;
+  padding: 0;
+  justify-content: center;
+}
+.wide .topbar.has-strip .search-label {
+  display: none;
+}
 .wide .search-btn:hover {
   color: #fff;
   background: rgba(255, 255, 255, 0.08);
@@ -287,18 +305,18 @@
   text-overflow: ellipsis;
 }
 
-/* ---- categories / the search-or-account pill (never both) ---- */
+/* ---- categories / the search-or-account pill (never both), in the header ---- */
 .wide .chips,
 .wide .context {
-  grid-area: chips;
   position: relative;
   top: auto;
   left: auto;
   right: auto;
+  min-width: 0;
   align-self: center;
 }
 .wide .chips {
-  padding: 6px 24px;
+  padding: 6px 0;
   background: none;
   -webkit-mask-image: linear-gradient(90deg, #000 88%, transparent);
   mask-image: linear-gradient(90deg, #000 88%, transparent);
@@ -321,10 +339,11 @@
 }
 .wide .context {
   justify-content: flex-start;
-  padding: 0 24px;
+  padding: 0;
 }
 .wide .context span {
-  max-width: 40vw;
+  min-width: 0;
+  max-width: none;
 }
 
 /* ---- stage: peeks + feed + actions ---- */
@@ -478,11 +497,17 @@
   gap: 14px;
   min-width: 0;
   min-height: 0;
-  padding: calc(22px + var(--safe-t)) 12px calc(14px + var(--safe-b)) 16px;
+  padding: 0 12px calc(14px + var(--safe-b)) 16px;
   background: #0e0f15;
   border-left: 1px solid rgba(255, 255, 255, 0.07);
 }
+/* as tall as the header (the gap taken back), so "loading" / Now playing starts level with the video */
 .wide .upnext-head {
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  height: var(--header-h);
+  margin-bottom: -14px;
+  padding-top: var(--safe-t);
   display: flex;
   align-items: center;
   justify-content: space-between;
