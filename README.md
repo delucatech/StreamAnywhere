@@ -33,6 +33,7 @@ Windows 10 (see **Test results** for exactly what was measured):
 | **YouTube sign-in**: paste/upload the cookies of a signed-in browser (or a sign-in window on the server machine); **For You** = the account's recommendations | **Working mechanism** (built 2026-10-13; verified signed-out: cookie parsing, YouTube's account check, rejection paths. The signed-in feed itself awaits a real account) – see **YouTube** |
 | **Launcher** (`home.html`, the landing page): iPad-style icons that open each platform like an app | **Working** |
 | **YouTube, guest mode**: Shorts by hashtag, search, channels; picture + sound as two files played in sync | **Working** (Node server with yt-dlp) – see **YouTube** |
+| **Facebook** (built 2026-10-15): **Reels** = the latest reels of a rotation of public Pages, read from facebook.com's own pages over plain HTTPS (no browser, no yt-dlp, no sign-in); pasted reel links; **For You** = the account's Reels feed after a cookie sign-in; one progressive 720p MP4 per reel, fetched by the viewer itself (CORS `*`) | **Working** signed out (dev machine); the signed-in feed awaits a real account; untested from the VM's address – see **Facebook** |
 | **Instagram** (built 2026-10-13): **requires a sign-in** (Instagram serves nobody who is signed out): paste/upload the cookies of a signed-in browser (or a sign-in window on the server machine). **Reels** = the latest Reels of a rotation of big public accounts, **For You** = the account's Reels page, `@handle`/link/account search, profiles; one muxed MP4 per Reel | **Working mechanism, unverified signed in** (cookie parsing, rejection of bad cookies, the account rotation, embed resolving and playback are verified signed out; the signed-in feed awaits a real account) – see **Instagram** |
 
 ## Repository layout
@@ -49,7 +50,7 @@ client/   Vite 4 + TypeScript front end (no framework)
   src/diagnostics.ts              the six experiments (measured, with explanations)
   src/main.ts                     UI, source/renderer selection, direct-vs-proxy decision
   home.html + src/home/home.ts    the launcher: one app icon per platform (src/platforms.ts), zoom-open animation
-  feed.html + src/feed/feed.ts    the feed page (feed.html?platform=tiktok|youtube|instagram): stream that follows the finger / mouse and snaps one video at a time (TikTok-like drag), tap-to-pause, auto-scroll, download
+  feed.html + src/feed/feed.ts    the feed page (feed.html?platform=tiktok|youtube|instagram|facebook): stream that follows the finger / mouse and snaps one video at a time (TikTok-like drag), tap-to-pause, auto-scroll, download
 server/   Fastify 4 + TypeScript (Node 16 compatible)
   src/tiktok.ts                   native TikTok resolver (page JSON) + server-side CORS probe
   src/feed.ts                     Explore feed (unsigned TikTok API) + itemStruct → FeedItem conversion
@@ -57,6 +58,8 @@ server/   Fastify 4 + TypeScript (Node 16 compatible)
   src/youtube.ts                  YouTube guest mode through yt-dlp: hashtag Shorts, search, channels, two-file resolve
   src/instagram.ts                Instagram through a headless Chrome page: account catalog, embed-page resolver, explore/search/profile/For You
   src/instagramSession.ts         Instagram sign-in (cookies / window), account check
+  src/facebook.ts                 Facebook over plain HTTPS: Page listings (catalog), reel pages, explore/profile/search/For You
+  src/facebookSession.ts          Facebook sign-in (cookies / window), settings-page account check
   src/ytdlp.ts                    yt-dlp fallback resolver
   src/proxy.ts                    GET/HEAD /api/media/:id streaming relay with Range support
   src/ssrf.ts                     https-only, host allowlist, private-IP rejection
@@ -91,6 +94,8 @@ Configuration is optional. Copy `.env.example` to `server/.env` (or repo-root `.
 | `YOUTUBE_PROFILE_DIR` | `~/.streamanywhere/youtube-profile` | browser profile of the YouTube sign-in *window* (deleted at sign-out) |
 | `INSTAGRAM_COOKIES_FILE` | `~/.streamanywhere/instagram-cookies.txt` | the Instagram sign-in (Netscape cookies.txt; treat like a password); `…cookies.meta.json` next to it keeps the User-Agent the cookies came from |
 | `INSTAGRAM_PROFILE_DIR` / `INSTAGRAM_LOGIN_PROFILE_DIR` | `~/.streamanywhere/instagram-profile` / `…-login-profile` | profile of the headless Instagram browser / of the sign-in *window* (both deleted at sign-out) |
+| `FACEBOOK_COOKIES_FILE` | `~/.streamanywhere/facebook-cookies.txt` | the Facebook sign-in (Netscape cookies.txt; treat like a password); `…cookies.meta.json` next to it keeps the paste's User-Agent |
+| `FACEBOOK_CATALOG_FILE` | `~/.streamanywhere/facebook-catalog.json` | each Page's last listed reels (a cache; deleting it is harmless) |
 | `INSTAGRAM_CATALOG_FILE` | `~/.streamanywhere/instagram-catalog.json` | each account's last listed Reels (a cache; deleting it is harmless) |
 | `ENABLE_BROWSER_SESSION` | `1` | set `0` to disable the sign-in feature entirely |
 | `LOG_LEVEL` | `info` | `debug` adds per-request logs |
@@ -275,7 +280,7 @@ Docker) have no Chrome: the feed page then offers Explore only and says so.
 
 ## Launcher and platforms
 
-**`/`** (`home.html`) is an iPad-style home screen: one icon per platform (TikTok, YouTube, Instagram) plus the
+**`/`** (`home.html`) is an iPad-style home screen: one icon per platform (TikTok, YouTube, Instagram, Facebook) plus the
 lab player, a dock, and a zoom-from-icon animation into `feed.html?platform=…`; the feed's Home
 button (top left) zooms back. A green badge on an icon means that platform is signed in on the
 server. The page has a web-app manifest, so it can be added to a phone's or tablet's home screen
@@ -416,6 +421,48 @@ If the VM's address is on Instagram's datacenter list, no cookie fixes it: the p
 back 429 or go to the login page; only another egress address (a residential proxy) would. Automation
 on a real account can make Instagram ask for a checkpoint: the server is deliberately slow and sparse,
 but keep that in mind.
+
+## Facebook
+
+Built 2026-10-15. Facebook is the easy one: no browser on the server, no yt-dlp, everything is read
+from facebook.com's own pages over plain HTTPS (`server/src/facebook.ts`). Measured from the dev machine:
+
+- **A Page's Reels tab is public.** `facebook.com/<page>/reels/` answers a signed-out visitor with the
+  Page's latest 10 reels inside the page's JSON (`<script type="application/json">` blobs, Facebook's
+  Relay store): id, `browser_native_hd_url` (720p progressive H.264 + AAC) and `browser_native_sd_url`,
+  size, length, cover, caption, creation time, a rounded play count ("230K"), the comment count, the
+  owner's name / link / picture and the audio title. The HTML is big (2 MB compressed, 16 MB
+  decompressed - it embeds the reels' DASH manifests), so one listing is kept per Page for 4 hours
+  (`FACEBOOK_CATALOG_FILE`) and re-listed in the background while someone watches. Paging past the 10
+  would need a GraphQL doc id, so the **Reels** tab is a rotation over many public Pages
+  (`FACEBOOK_CATEGORIES` in `shared/types.ts`, each verified to list 10 reels to a guest), interleaved
+  so the stream never shows ten from one Page in a row.
+- **A single reel is public too**: `facebook.com/reel/<id>` carries the same records (plus the next
+  few reels of the viewer), so a pasted link resolves without a sign-in. `watch/?v=`, `/<page>/videos/…/<id>`,
+  `fb.watch` and share links are followed to the reel.
+- **Playback**: the CDN (`*.fbcdn.net`) sends `Access-Control-Allow-Origin: *` and honours Range, so the
+  viewer fetches the MP4 itself; the proxy is the fallback. URLs expire (`oe=`, about a day); a reel is
+  not served within 30 minutes of that and its Page is re-listed.
+- **The Reels feed needs a sign-in**: `/reel/` and `/reels/` send a guest to the login page, as does
+  search. **For You** loads `facebook.com/reel/` with the saved cookies and takes the reels embedded in
+  it (every load is a fresh sample; the stock's recent-id window drops repeats). **Search** is a Page
+  name (@page / link) that opens the Page, or a reel link that plays.
+- Not known yet: whether Facebook serves these pages to a datacenter address (the GCP VM). A guest
+  request that is sent to the login page is retried with the saved sign-in when there is one, and
+  guest Page loads pause for 10 minutes (doubling) after such a refusal. Rate limits were not
+  measured; Page loads are paced 2 s apart, 60 an hour.
+
+### Facebook sign-in (For You)
+
+Like YouTube and Instagram: **the cookies of a browser that is signed in** (paste / choose
+`cookies.txt`, or a sign-in window on the machine running the server); `c_user` and `xs` must be among
+them. The server keeps only facebook.com cookies in `FACEBOOK_COOKIES_FILE` (the paste's User-Agent next
+to it) and checks them at once with the settings page, which only a signed-in account gets (a guest is
+sent to `login.php`, verified; a `/checkpoint/` redirect means the account must confirm itself in your
+own browser first). Every page Facebook renders names the signed-in viewer (`CurrentUserInitialData`),
+so the first signed-in page the feed reads confirms the account, and a signed-in request that lands on
+the login page triggers a re-check; a conclusive "signed out" deletes the file. The signed-in half
+could not be tried without an account; `/api/session/log?platform=facebook` shows each step.
 
 ## Diagnostics without a shell
 

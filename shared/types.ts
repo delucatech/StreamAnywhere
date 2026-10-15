@@ -3,16 +3,16 @@
  * The client imports this file directly (Vite fs.allow covers ../shared).
  */
 
-export type SourceKind = 'tiktok' | 'youtube' | 'instagram' | 'mp4';
+export type SourceKind = 'tiktok' | 'youtube' | 'instagram' | 'facebook' | 'mp4';
 export type ResolverKind = 'native' | 'ytdlp' | 'passthrough';
 
 /**
  * A platform is one "app" on the launcher (home.html): its own feed, search and sign-in. The feed
  * page is shared; `platform` in a request tells the server which one it is asking about.
  */
-export type Platform = 'tiktok' | 'youtube' | 'instagram';
-export const PLATFORM_IDS: Platform[] = ['tiktok', 'youtube', 'instagram'];
-export const platformOf = (v: unknown): Platform => (v === 'youtube' ? 'youtube' : v === 'instagram' ? 'instagram' : 'tiktok');
+export type Platform = 'tiktok' | 'youtube' | 'instagram' | 'facebook';
+export const PLATFORM_IDS: Platform[] = ['tiktok', 'youtube', 'instagram', 'facebook'];
+export const platformOf = (v: unknown): Platform => (v === 'youtube' ? 'youtube' : v === 'instagram' ? 'instagram' : v === 'facebook' ? 'facebook' : 'tiktok');
 export type CodecFamily = 'h264' | 'h265' | 'av1' | 'vp9' | 'unknown';
 
 /** Result of a server-side HTTP probe of a media URL (what the *server* observed, not the browser). */
@@ -414,11 +414,38 @@ export const INSTAGRAM_CATEGORIES: InstagramCategory[] = [
   { id: 10, label: 'Cars', accounts: ['topgear', 'ferrari', 'porsche', 'lamborghini'] },
 ];
 
+/**
+ * Facebook "Reels" tab: like Instagram's, a rotation over big public Pages - but Facebook shows a
+ * signed-out visitor a Page's Reels tab (`facebook.com/<page>/reels/`, its latest 10 reels with
+ * their MP4 URLs in the page's own JSON), so no sign-in is needed for it. Pages verified 2026-10-15
+ * to list 10 reels to a guest. id 0 = All rotates through every category.
+ */
+export interface FacebookCategory {
+  id: number;
+  label: string;
+  /** Page slugs (facebook.com/<slug>) */
+  pages: string[];
+}
+export const FACEBOOK_CATEGORIES: FacebookCategory[] = [
+  { id: 0, label: 'All', pages: [] },
+  { id: 1, label: 'Funny', pages: ['9gag', 'LADbible', 'uniladmag', 'barstoolsports', 'ComedyCentral', 'JimmyFallon', 'FallonTonight', 'teamcoco', 'thelatelateshow', 'colbertlateshow', 'BuzzFeed', 'viralhog', 'DudePerfect', 'mrbeast', 'insider'] },
+  { id: 2, label: 'Animals', pages: ['AnimalPlanet', 'thedodosite', 'bbcearth', 'sharkweek', 'natgeo', 'NatGeoTV'] },
+  { id: 3, label: 'Sports', pages: ['ESPN', 'nba', 'bleacherreport', 'NFL', 'nflnetwork', 'ChampionsLeague', 'fifaworldcup', 'premierleague', 'foxsports', 'CBSSports', 'SkySports', 'mlb', 'NHL', 'PGATour', 'NASCAR', 'wwe', 'olympics', 'MotoGP'] },
+  { id: 4, label: 'Music', pages: ['Spotify', 'Billboard', 'MTV', 'RollingStone', 'TaylorSwift', 'arianagrande', 'billieeilish', 'shakira', 'eminem', 'rihanna', 'theweeknd', 'JustinBieber', 'katyperry', 'ladygaga'] },
+  { id: 5, label: 'Food', pages: ['buzzfeedtasty', 'FoodNetwork', 'gordonramsay', 'delish', 'nytcooking', 'jamieoliver', 'FirstWeFeast', 'Starbucks', 'OREO'] },
+  { id: 6, label: 'Travel', pages: ['BeautifulDestinations', 'lonelyplanet', 'natgeotravel', 'airbnb', 'earthpix', 'PassionPassport', 'RedBull', 'gopro'] },
+  { id: 7, label: 'Science', pages: ['NASAHubble', 'ScienceChannel', 'IFLScience', 'Discovery', 'Smithsonian'] },
+  { id: 8, label: 'Tech', pages: ['verge', 'MKBHD', 'wired', 'techcrunch', 'Google', 'Microsoft', 'cnet'] },
+  { id: 9, label: 'Gaming', pages: ['playstation', 'xbox', 'GameSpot', 'FortniteGame', 'minecraft', 'Pokemon', 'NintendoAmerica', 'ign', 'kotaku', 'polygon', 'Steam', 'epicgames', 'RiotGames', 'Blizzard', 'ubisoft'] },
+  { id: 10, label: 'Cars', pages: ['topgear', 'Ferrari', 'porsche', 'Lamborghini', 'BMW', 'MercedesBenz', 'toyota', 'RedBullMotorsports', 'redbullracing', 'MercedesAMGF1', 'ScuderiaFerrari'] },
+  { id: 11, label: 'Entertainment', pages: ['nickelodeon', 'Disney', 'DisneyPlus', 'Pixar', 'hbomax', 'PrimeVideo', 'Marvel', 'StarWars', 'GQ', 'Vogue', 'BBCOne', 'LEGO', 'adidas', 'PUMA'] },
+];
+
 export type SessionState = 'unsupported' | 'none' | 'login_pending' | 'logged_in' | 'error';
 
 /** 'qr' = TikTok's QR login rendered by a headless page and shown in the feed page (works on servers
  *  without a display); 'window' = a visible browser window on the server machine (every platform);
- *  'cookies' = YouTube / Instagram: the cookies of a browser that is signed in, pasted or uploaded (works everywhere). */
+ *  'cookies' = YouTube / Instagram / Facebook: the cookies of a browser that is signed in, pasted or uploaded (works everywhere). */
 export type LoginMode = 'qr' | 'window' | 'cookies';
 
 export interface SessionLoginRequest {

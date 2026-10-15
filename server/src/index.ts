@@ -22,6 +22,8 @@ import { channelVideos, exploreYouTube, isYouTubeUrl, recommendedYouTube, resolv
 import { exploreInstagram, forYouInstagram, instagramCategory, instagramStats, InstagramError, isInstagramUrl, pauseInstagramPages, profileInstagram, resolveInstagram, searchInstagram, setInstagramLogger, shutdownInstagram } from './instagram';
 import { instagramCancelLogin, instagramLogout, instagramSessionLog, ensureInstagramSession, instagramSessionLost, instagramSessionStatus, instagramSignedIn, instagramStartLogin, InstagramSessionError, setInstagramSessionLogger, shutdownInstagramSession } from './instagramSession';
 import { setYouTubeSessionLogger, shutdownYouTubeSession, youtubeCancelLogin, youtubeCookieFile, youtubeLogout, youtubeSessionLog, youtubeSessionLost, youtubeSessionStatus, youtubeStartLogin, YouTubeSessionError } from './youtubeSession';
+import { exploreFacebook, facebookCategory, facebookStats, FacebookError, forYouFacebook, isFacebookUrl, profileFacebook, resolveFacebook, searchFacebook, setFacebookLogger } from './facebook';
+import { ensureFacebookSession, facebookCancelLogin, facebookLogout, facebookSessionLog, facebookSessionLost, facebookSessionStatus, facebookSignedIn, facebookStartLogin, FacebookSessionError, setFacebookSessionLogger, shutdownFacebookSession } from './facebookSession';
 
 /** After the browser path rescued an explore request, prefer it for a while (datacenter IPs). */
 let exploreViaBrowserUntil = 0;
@@ -188,6 +190,49 @@ function instagramForYouReservoir(log: (m: string) => void): Reservoir {
   return instagramForYou;
 }
 
+/**
+ * Facebook "Reels" stock per category: the latest reels of a rotation of public Pages, read from the
+ * Pages' own HTML (facebook.ts). A fill is quick (saved listings) or one Page load (a few seconds).
+ */
+const facebookReservoirs = new Map<number, Reservoir>();
+function facebookReservoir(categoryId: number, log: (m: string) => void): Reservoir {
+  let r = facebookReservoirs.get(categoryId);
+  if (!r) {
+    const cat = facebookCategory(categoryId);
+    r = new Reservoir(`facebook ${cat.label}`, ({ count }) => exploreFacebook(cat.id, count, log), { log, batch: 24, target: 40, low: 20, gapMs: 2500, waitMs: 60_000 });
+    facebookReservoirs.set(categoryId, r);
+  }
+  return r;
+}
+export const facebookStock = (): Record<string, ReservoirStats> => Object.fromEntries([...facebookReservoirs].map(([k, v]) => [String(k), v.stats]));
+
+/** The signed-in account's Reels feed (facebook.com/reel/ loaded with the saved cookies), stocked like the others. */
+let facebookForYou: Reservoir | undefined;
+function facebookForYouReservoir(log: (m: string) => void): Reservoir {
+  if (!facebookForYou) {
+    facebookForYou = new Reservoir(
+      'facebook foryou',
+      async ({ count }) => {
+        let res: Awaited<ReturnType<typeof forYouFacebook>>;
+        try {
+          res = await forYouFacebook(count, log);
+        } catch (e) {
+          if (!(e instanceof FacebookError && e.code === 'facebook_not_signed_in')) throw e;
+          const lost = await facebookSessionLost();
+          throw new FeedError(lost ? `Not signed in to Facebook any more: ${lost}` : e.message, 'facebook_not_signed_in', 401);
+        }
+        if (!res.items.length) {
+          const lost = await facebookSessionLost();
+          if (lost) throw new FeedError(`Not signed in to Facebook any more: ${lost}`, 'facebook_not_signed_in', 401);
+        }
+        return res;
+      },
+      { log, batch: 12, target: 24, low: 12, gapMs: 2500, waitMs: 60_000 },
+    );
+  }
+  return facebookForYou;
+}
+
 export async function buildServer() {
   const app = Fastify({
     // stdout (journald) plus the in-memory tail served by /api/log
@@ -220,6 +265,8 @@ export async function buildServer() {
   setYouTubeSessionLogger((m) => app.log.info({ what: 'youtube-session' }, m));
   setInstagramSessionLogger((m) => app.log.info({ what: 'instagram-session' }, m));
   setInstagramLogger((m) => app.log.info({ what: 'instagram' }, m));
+  setFacebookSessionLogger((m) => app.log.info({ what: 'facebook-session' }, m));
+  setFacebookLogger((m) => app.log.info({ what: 'facebook' }, m));
 
   app.get('/api/health', async (): Promise<HealthResponse> => ({
     ok: true,
@@ -257,6 +304,17 @@ export async function buildServer() {
         const err = e as Error;
         req.log.warn({ err: err.message }, 'instagram resolve failed');
         return reply.code(e instanceof InstagramError ? e.status : 502).send({ error: err.message, attempts: [{ resolver: 'native', ok: false, error: err.message, elapsedMs: Date.now() - t0 }], elapsedMs: Date.now() - t0 });
+      }
+    }
+
+    if (isFacebookUrl(url)) {
+      try {
+        await ensureFacebookSession();
+        return await resolveFacebook(url, (m) => log(m));
+      } catch (e) {
+        const err = e as Error;
+        req.log.warn({ err: err.message }, 'facebook resolve failed');
+        return reply.code(e instanceof FacebookError ? e.status : 502).send({ error: err.message, attempts: [{ resolver: 'native', ok: false, error: err.message, elapsedMs: Date.now() - t0 }], elapsedMs: Date.now() - t0 });
       }
     }
 
@@ -384,6 +442,21 @@ export async function buildServer() {
         log(`instagram explore ${cat.label}: ${r.items.length} served ${r.fromStock ? 'from stock' : 'after a fill'}, ${r.ready} ready, ${resp.elapsedMs} ms`);
         return resp;
       }
+      if (platform === 'facebook') {
+        if (source === 'foryou') {
+          await ensureFacebookSession();
+          if (!facebookSignedIn()) throw new FeedError('Not signed in to Facebook: sign in from Profile to see your For You feed.', 'facebook_not_signed_in', 401);
+          const r = await facebookForYouReservoir(log).take(count);
+          const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0 };
+          log(`facebook foryou: ${r.items.length} served ${r.fromStock ? 'from stock' : 'after a fill'}, ${r.ready} ready, ${resp.elapsedMs} ms`);
+          return resp;
+        }
+        const cat = facebookCategory(b.category);
+        const r = await facebookReservoir(cat.id, log).take(count);
+        const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0 };
+        log(`facebook explore ${cat.label}: ${r.items.length} served ${r.fromStock ? 'from stock' : 'after a fill'}, ${r.ready} ready, ${resp.elapsedMs} ms`);
+        return resp;
+      }
       if (platform === 'youtube') {
         if (source === 'foryou') {
           if (!youtubeCookieFile()) throw new FeedError('Not signed in to YouTube: sign in from Profile to see your For You feed.', 'youtube_not_signed_in', 401);
@@ -413,7 +486,7 @@ export async function buildServer() {
     } catch (e) {
       const err = e as Error;
       req.log.warn({ source, err: err.message }, 'feed request failed');
-      const status = err instanceof FeedError ? err.status : err instanceof YouTubeError || err instanceof InstagramError ? err.status : 502;
+      const status = err instanceof FeedError ? err.status : err instanceof YouTubeError || err instanceof InstagramError || err instanceof FacebookError ? err.status : 502;
       return reply.code(status).send({ error: err.message, source, elapsedMs: Date.now() - t0 });
     }
   });
@@ -423,10 +496,11 @@ export async function buildServer() {
   const socialFail = (reply: import('fastify').FastifyReply, e: unknown, t0: number) => {
     const err = e as Error;
     app.log.warn({ err: err.message }, 'social request failed');
-    return reply.code(e instanceof SocialError || e instanceof YouTubeError || e instanceof InstagramError ? e.status : 502).send({ error: err.message, elapsedMs: Date.now() - t0 });
+    return reply.code(e instanceof SocialError || e instanceof YouTubeError || e instanceof InstagramError || e instanceof FacebookError ? e.status : 502).send({ error: err.message, elapsedMs: Date.now() - t0 });
   };
   const youtubeLog = (m: string) => app.log.info({ what: 'youtube' }, m);
   const instagramLog = (m: string) => app.log.info({ what: 'instagram' }, m);
+  const facebookLog = (m: string) => app.log.info({ what: 'facebook' }, m);
   const handle = (user: unknown): string => {
     const u = String(user || '')
       .trim()
@@ -445,6 +519,10 @@ export async function buildServer() {
         await ensureInstagramSession();
         return await searchInstagram(q, offset, instagramLog);
       }
+      if (platformOf(req.body?.platform) === 'facebook') {
+        await ensureFacebookSession();
+        return await searchFacebook(q, offset, facebookLog);
+      }
       return await searchTikTok(q, offset, socialLog('search'));
     } catch (e) {
       return socialFail(reply, e, t0);
@@ -459,6 +537,10 @@ export async function buildServer() {
       if (platformOf(req.body?.platform) === 'instagram') {
         await ensureInstagramSession();
         return await profileInstagram(user, offset, count, instagramLog);
+      }
+      if (platformOf(req.body?.platform) === 'facebook') {
+        await ensureFacebookSession();
+        return await profileFacebook(user, offset, count, facebookLog);
       }
       if (platformOf(req.body?.platform) === 'youtube') {
         const r = await channelVideos(user, offset, count, youtubeLog);
@@ -520,12 +602,12 @@ export async function buildServer() {
   app.get<{ Querystring: { platform?: string; recheck?: string } }>('/api/session', async (req): Promise<SessionStatus> => {
     const platform = platformOf(req.query.platform);
     // recheck=1 is the panel's "Check again": a deliberate check of saved Instagram cookies goes past the probe pacing.
-    return platform === 'youtube' ? youtubeSessionStatus() : platform === 'instagram' ? instagramSessionStatus(req.query.recheck === '1') : sessionProbe();
+    return platform === 'youtube' ? youtubeSessionStatus() : platform === 'instagram' ? instagramSessionStatus(req.query.recheck === '1') : platform === 'facebook' ? facebookSessionStatus(req.query.recheck === '1') : sessionProbe();
   });
   // The last sign-in log lines (what the server did on TikTok's page / with the YouTube cookies), for diagnosing without a shell.
   app.get<{ Querystring: { platform?: string } }>('/api/session/log', async (req) => {
     const platform = platformOf(req.query.platform);
-    return platform === 'youtube' ? youtubeSessionLog() : platform === 'instagram' ? instagramSessionLog() : sessionLog();
+    return platform === 'youtube' ? youtubeSessionLog() : platform === 'instagram' ? instagramSessionLog() : platform === 'facebook' ? facebookSessionLog() : sessionLog();
   });
   // A cookies.txt export can run to a few hundred KB when a whole browser was exported (the server keeps youtube.com only).
   app.post<{ Body: SessionLoginRequest }>('/api/session/login', { ...resolveLimit, bodyLimit: 4 * 1024 * 1024 }, async (req, reply) => {
@@ -541,11 +623,16 @@ export async function buildServer() {
         const mode = req.body?.mode === 'window' ? 'window' : 'cookies';
         return await youtubeStartLogin(mode, typeof req.body?.cookies === 'string' ? req.body.cookies : undefined, (m) => req.log.info({ what: 'youtube-session' }, m));
       }
+      if (platform === 'facebook') {
+        facebookForYou = undefined;
+        const mode = req.body?.mode === 'window' ? 'window' : 'cookies';
+        return await facebookStartLogin(mode, typeof req.body?.cookies === 'string' ? req.body.cookies : undefined, (m) => req.log.info({ what: 'facebook-session' }, m), req.headers['user-agent']);
+      }
       const mode = req.body?.mode === 'window' ? 'window' : 'qr';
       return await startLogin(mode, (m) => req.log.info(m));
     } catch (e) {
-      const status = e instanceof YouTubeSessionError || e instanceof InstagramSessionError ? e.status : 500;
-      const base = platform === 'youtube' ? await youtubeSessionStatus() : platform === 'instagram' ? await instagramSessionStatus() : sessionStatus();
+      const status = e instanceof YouTubeSessionError || e instanceof InstagramSessionError || e instanceof FacebookSessionError ? e.status : 500;
+      const base = platform === 'youtube' ? await youtubeSessionStatus() : platform === 'instagram' ? await instagramSessionStatus() : platform === 'facebook' ? await facebookSessionStatus() : sessionStatus();
       return reply.code(status).send({ ...base, error: (e as Error).message });
     }
   });
@@ -558,12 +645,16 @@ export async function buildServer() {
       instagramForYou = undefined;
       return instagramLogout();
     }
+    if (platformOf(req.body?.platform) === 'facebook') {
+      facebookForYou = undefined;
+      return facebookLogout();
+    }
     return logout();
   });
   // Cancels a pending sign-in and forgets its token/ticket/dialog (the next sign-in starts from zero).
   app.post<{ Body: SessionActionRequest }>('/api/session/cancel', async (req) => {
     const platform = platformOf(req.body?.platform);
-    return platform === 'youtube' ? youtubeCancelLogin() : platform === 'instagram' ? instagramCancelLogin() : cancelLogin();
+    return platform === 'youtube' ? youtubeCancelLogin() : platform === 'instagram' ? instagramCancelLogin() : platform === 'facebook' ? facebookCancelLogin() : cancelLogin();
   });
   // Clicks / typing for TikTok's verification modal on the headless sign-in page (see SessionInputRequest).
   app.post<{ Body: SessionInputRequest }>('/api/session/input', async (req, reply) => {
@@ -576,7 +667,7 @@ export async function buildServer() {
 
   registerProxyRoutes(app);
 
-  app.get('/api/stats', async () => ({ mediaRecords: mediaCount(), exploreStock: exploreStock(), youtubeStock: youtubeStock(), youtubeForYouStock: youtubeForYou?.stats, instagramStock: instagramStock(), instagramForYouStock: instagramForYou?.stats, instagram: instagramStats(), forYouStock: forYouStock(), workPage: workState(), uptimeSec: Math.round(process.uptime()) }));
+  app.get('/api/stats', async () => ({ mediaRecords: mediaCount(), exploreStock: exploreStock(), youtubeStock: youtubeStock(), youtubeForYouStock: youtubeForYou?.stats, instagramStock: instagramStock(), instagramForYouStock: instagramForYou?.stats, instagram: instagramStats(), facebookStock: facebookStock(), facebookForYouStock: facebookForYou?.stats, facebook: facebookStats(), forYouStock: forYouStock(), workPage: workState(), uptimeSec: Math.round(process.uptime()) }));
 
   if (config.serveClient) {
     const dist = findUp(path.join('client', 'dist')) || findUp(path.join('client', 'dist'), process.cwd()) || path.resolve('client', 'dist');
@@ -609,7 +700,7 @@ if (require.main === module) {
         process.once(sig, () => {
           app.log.info({ sig }, 'shutting down');
           shutdownYtDlp();
-          void Promise.race([Promise.all([shutdownBrowsers(), shutdownYouTubeSession(), shutdownInstagram(), shutdownInstagramSession()]), new Promise((r) => setTimeout(r, 8000))]).finally(() => process.exit(0));
+          void Promise.race([Promise.all([shutdownBrowsers(), shutdownYouTubeSession(), shutdownInstagram(), shutdownInstagramSession(), shutdownFacebookSession()]), new Promise((r) => setTimeout(r, 8000))]).finally(() => process.exit(0));
         });
       }
     })

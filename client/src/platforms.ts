@@ -4,7 +4,7 @@
  *
  * The icons are original drawings that evoke each service; they are not the official logos.
  */
-import { EXPLORE_CATEGORIES, INSTAGRAM_CATEGORIES, YOUTUBE_CATEGORIES, platformOf, type Platform } from '../../shared/types';
+import { EXPLORE_CATEGORIES, FACEBOOK_CATEGORIES, INSTAGRAM_CATEGORIES, YOUTUBE_CATEGORIES, platformOf, type Platform } from '../../shared/types';
 
 export interface PlatformCategory {
   id: number;
@@ -102,6 +102,26 @@ export const PLATFORMS: PlatformDef[] = [
     cookieSite: 'instagram.com',
     signInWindowOwner: 'Instagram',
     searchPlaceholder: 'Search an @account or paste a link',
+  },
+  {
+    id: 'facebook',
+    name: 'Facebook',
+    short: 'Facebook',
+    url: 'feed.html?platform=facebook',
+    accent: '#1877f2',
+    accent2: '#9cc2ff',
+    tile: 'linear-gradient(145deg, #4b8df8 0%, #0b57c9 100%)',
+    icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" d="M13.6 21.5v-7.4h2.6l.4-3.1h-3V9.1c0-.9.3-1.6 1.6-1.6h1.6V4.7c-.3 0-1.3-.1-2.4-.1-2.4 0-3.9 1.4-3.9 4v2.4H7.8v3.1h2.7v7.4h3.1z"/></svg>',
+    categories: FACEBOOK_CATEGORIES,
+    defaultCategory: 0,
+    tabs: { explore: 'Reels', foryou: 'For You' },
+    social: false,
+    signIn: 'cookies',
+    signInHint: 'Facebook shows the Reels of public Pages to everyone (the Reels tab); your own Reels feed needs your account: use the cookies of a browser that is signed in to Facebook (paste a cookies.txt export below, or choose the file). The server checks them with Facebook and keeps only the facebook.com ones.',
+    loginRequired: false,
+    cookieSite: 'facebook.com',
+    signInWindowOwner: 'Facebook',
+    searchPlaceholder: 'Enter a Page name (@page) or paste a reel link',
   },
 ];
 

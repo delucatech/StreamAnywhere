@@ -10,7 +10,7 @@ export interface MediaRecord {
   createdAt: number;
   expiresAt: number;
   label: string;
-  source: 'tiktok' | 'youtube' | 'instagram' | 'mp4';
+  source: 'tiktok' | 'youtube' | 'instagram' | 'facebook' | 'mp4';
   /**
    * Relay in bounded Range chunks instead of one streaming request: googlevideo.com throttles an
    * open-ended request to ~50 KB/s but serves a bounded range (up to 10 MB measured) at full speed.
