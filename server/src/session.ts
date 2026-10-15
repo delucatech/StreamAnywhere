@@ -29,7 +29,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { FeedItem, LoginMode, SessionInputRequest, SessionStatus } from '../../shared/types';
-import { exploreApiUrl, itemToFeedItem, parseExploreBody, type ExploreResult } from './feed';
+import { exploreApiUrl, isTikTokAd, itemToFeedItem, parseExploreBody, type ExploreResult } from './feed';
 
 type Browser = import('puppeteer-core').Browser;
 type Page = import('puppeteer-core').Page;
@@ -1824,7 +1824,12 @@ async function openFeedPage(): Promise<Page> {
       .then((json: any) => {
         const list: any[] = Array.isArray(json?.itemList) ? json.itemList : [];
         let added = 0;
+        let ads = 0;
         for (const raw of list) {
+          if (isTikTokAd(raw)) {
+            ads++;
+            continue;
+          }
           const it = itemToFeedItem(raw, s.feedCookieHeader ? { cookieHeader: s.feedCookieHeader, referer: FEED_URL } : undefined);
           if (it && !s.seenIds.has(it.id)) {
             s.seenIds.add(it.id);
@@ -1834,7 +1839,7 @@ async function openFeedPage(): Promise<Page> {
         }
         if (!list.length) s.lastFeedError = `recommend/item_list answered without items (${JSON.stringify(json).slice(0, 120)})`;
         else s.lastFeedError = undefined;
-        if (added) feedLog?.(`captured ${added} new For You item(s) (${s.pending.length} pending)`);
+        if (added || ads) feedLog?.(`captured ${added} new For You item(s)${ads ? `, skipped ${ads} ad(s)` : ''} (${s.pending.length} pending)`);
       })
       .catch(() => undefined);
   });

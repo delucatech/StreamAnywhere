@@ -12,7 +12,7 @@
 import { buildServer } from '../index';
 import { hostAllowed, ipIsPrivate, assertSafeUpstream } from '../ssrf';
 import { parseTikTokUrl } from '../tiktok';
-import { itemToFeedItem } from '../feed';
+import { isTikTokAd, itemToFeedItem } from '../feed';
 import { entryToFeedItem, isYouTubeUrl, pickAudio, youTubeVideoId } from '../youtube';
 import { accountFromMenu, parseCookiesText, sapisidHash, toNetscape, YouTubeSessionError } from '../youtubeSession';
 import { accountFromAnswer, bodyHint, collectCodes, embedToFeedItem, handleFromQuery, instagramCode, isInstagramUrl, parseCount, parseProfileMeta, planExploreFill, sentAway, uaMetadata, urlExpiry } from '../instagram';
@@ -108,6 +108,7 @@ async function offline(): Promise<void> {
   }
   check('item without video is skipped', itemToFeedItem({ id: '1' }) === undefined);
   check('item without any URL is skipped', itemToFeedItem({ id: '1', video: { bitrateInfo: [{ GearName: 'x', PlayAddr: { UrlList: [] } }] } }) === undefined);
+  check('ad items are skipped (isAd, isSponsored, adInfo); a paid partnership is kept', itemToFeedItem({ ...rawItem, isAd: true }) === undefined && itemToFeedItem({ ...rawItem, isSponsored: true }) === undefined && itemToFeedItem({ ...rawItem, adInfo: { adId: '1' } }) === undefined && isTikTokAd({ ...rawItem, isAd: false, adInfo: {} }) === false && itemToFeedItem({ ...rawItem, isAd: false, brandedContent: true }) !== undefined);
 
   console.log('\n== 4. feed reservoir (offline)');
   await reservoirChecks();
@@ -205,6 +206,10 @@ async function offline(): Promise<void> {
   const deep = new Set<string>();
   collectCodes(preloaded, deep, 0, 40);
   check("codes in the Reels page's preloaded JSON (deep tree)", [...deep].sort().join() === 'DeRGrknyuZv,DeapidhN3hr', [...deep]);
+  const kept = new Set<string>();
+  const adCodes = new Set<string>();
+  collectCodes({ items: [{ media: { code: 'OrganicRl1', video_versions: [{}] } }, { media: { code: 'InjectedAd', video_versions: [{}], injected: { ad_id: '9' } } }, { ad_id: '7', media: { code: 'WrappedAd2', product_type: 'clips' } }, { media: { code: 'Partnered3', media_type: 2, is_paid_partnership: true } }, { media: { code: 'NotAnAdOk4', clips_metadata: {}, injected: null } }] }, kept, 0, 14, adCodes);
+  check('ad reels are left out (injected / ad_id); paid partnership kept; their codes reported', [...kept].sort().join() === 'NotAnAdOk4,OrganicRl1,Partnered3' && [...adCodes].sort().join() === 'InjectedAd,WrappedAd2', { kept: [...kept], adCodes: [...adCodes] });
   const it = embedToFeedItem({ code: 'DecPSQfoaRe', videoUrl: 'https://scontent-hou1-1.cdninstagram.com/o1/v/t2/f2/m86/x.mp4?oe=6AD04B1B', width: 1080, height: 1920, duration: 30.03, views: 30472, likes: 6830, comments: 60, caption: 'hello', cover: 'https://scontent/c.jpg', music: 'Original audio · natgeo', owner: { id: '787132', username: 'natgeo', fullName: 'National Geographic', avatar: 'https://scontent/a.jpg' } });
   const f0 = it.formats[0];
   check('embed -> feed item: author, stats, direct + proxy url', it.id === 'DecPSQfoaRe' && it.author.uniqueId === 'natgeo' && it.stats.likes === 6830 && it.stats.plays === 30472 && f0.codec === 'h264' && f0.directUrl!.endsWith('oe=6AD04B1B') && /^\/api\/media\//.test(f0.proxyUrl || '') && f0.expiresAt === 0x6ad04b1b && !f0.audioProxyUrl, it);

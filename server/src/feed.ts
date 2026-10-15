@@ -74,9 +74,20 @@ export interface UpstreamSession {
  * `upstream` is what the proxy must send for the cookie-bound playAddr URLs; pass undefined when
  * the upstream session is unknown (then only direct URLs are offered).
  */
+/**
+ * A promoted item: TikTok marks the ads it mixes into For You and Explore with `isAd` (and the
+ * older `isSponsored`); a Promote-boosted post also carries an `adInfo`. Branded content from a
+ * creator (a paid partnership) is not an ad here: that is the creator's own video.
+ */
+export function isTikTokAd(item: any): boolean {
+  if (!item || typeof item !== 'object') return false;
+  return item.isAd === true || item.isSponsored === true || (item.adInfo && typeof item.adInfo === 'object' && Object.keys(item.adInfo).length > 0);
+}
+
 export function itemToFeedItem(item: any, upstream?: UpstreamSession, opts: { allowUnplayable?: boolean } = {}): FeedItem | undefined {
   const video = item?.video;
   if (!item?.id || !video) return undefined;
+  if (isTikTokAd(item)) return undefined;
   const author = typeof item.author === 'object' && item.author ? item.author : {};
   const uniqueId: string | undefined = author.uniqueId || (typeof item.author === 'string' ? item.author : undefined);
   const variants: any[] = Array.isArray(video.bitrateInfo) && video.bitrateInfo.length ? video.bitrateInfo : [];
@@ -224,11 +235,16 @@ export function parseExploreBody(text: string, upstream: UpstreamSession | undef
   if (code !== 0) throw new FeedError(`TikTok explore API status ${code}: ${json.statusMsg || json.status_msg || 'unavailable'}`, 'tiktok_status_' + code);
   const list: any[] = Array.isArray(json.itemList) ? json.itemList : [];
   const items: FeedItem[] = [];
+  let ads = 0;
   for (const raw of list) {
+    if (isTikTokAd(raw)) {
+      ads++;
+      continue;
+    }
     const it = itemToFeedItem(raw, upstream);
     if (it) items.push(it);
   }
-  if (list.length && !items.length) warnings.push('explore returned items but none had playable formats');
+  if (list.length && !items.length) warnings.push(ads === list.length ? 'explore returned only ads' : 'explore returned items but none had playable formats');
   return { items, hasMore: json.hasMore !== false, raw: list.length };
 }
 

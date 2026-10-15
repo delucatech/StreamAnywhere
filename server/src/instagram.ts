@@ -137,15 +137,41 @@ export function parseProfileMeta(handle: string, desc: string, ogTitle: string, 
 }
 
 /** Post codes in any JSON tree from Instagram's GraphQL/REST answers: objects that look like a video post. */
-export function collectCodes(node: unknown, out: Set<string>, depth = 0, max = 14): void {
+/**
+ * A node Instagram marks as an ad: the clips feed mixes in promoted reels that carry `injected`
+ * (the ad's tracking record), an `ad_id` / `ad_metadata` / `ad_action`, or `is_ad`. A creator's
+ * paid partnership (`is_paid_partnership`) is not an ad here: that is the creator's own reel.
+ */
+export function isInstagramAd(o: Record<string, unknown>): boolean {
+  return (
+    (o.injected !== undefined && o.injected !== null && o.injected !== false) ||
+    o.ad_id !== undefined ||
+    o.ad_metadata !== undefined ||
+    o.ad_action !== undefined ||
+    o.ad_header_style !== undefined ||
+    o.is_ad === true ||
+    o.is_sponsored === true
+  );
+}
+
+/**
+ * Collects the reel codes found anywhere in a feed answer into `out`. A subtree marked as an ad is
+ * left out of `out`; its codes go to `ads` (when given) so a caller can drop them again when they
+ * reach it another way, such as the viewer's address bar.
+ */
+export function collectCodes(node: unknown, out: Set<string>, depth = 0, max = 14, ads?: Set<string>): void {
   if (depth > max || !node || typeof node !== 'object') return;
   if (Array.isArray(node)) {
-    for (const x of node) collectCodes(x, out, depth + 1, max);
+    for (const x of node) collectCodes(x, out, depth + 1, max, ads);
     return;
   }
   const o = node as Record<string, unknown>;
-  if (typeof o.code === 'string' && CODE.test(o.code) && (o.video_versions || o.product_type === 'clips' || o.media_type === 2 || o.clips_metadata)) out.add(o.code);
-  for (const k of Object.keys(o)) collectCodes(o[k], out, depth + 1, max);
+  const ad = isInstagramAd(o);
+  if (ad && !ads) return;
+  // Inside an ad every code is the ad's (the media sits under the marked item, or is the item).
+  const into = ad ? ads! : out;
+  if (typeof o.code === 'string' && CODE.test(o.code) && (o.video_versions || o.product_type === 'clips' || o.media_type === 2 || o.clips_metadata)) into.add(o.code);
+  for (const k of Object.keys(o)) collectCodes(o[k], into, depth + 1, max, ads);
 }
 
 /** `oe=` (hex unix seconds) of an Instagram CDN URL */
@@ -983,13 +1009,14 @@ export async function forYouInstagram(want: number, log: (m: string) => void): P
   const { codes, viewer } = await withPage(async (p) => {
     await parked;
     const found = new Set<string>();
+    const ads = new Set<string>();
     const onResponse = (res: import('puppeteer-core').HTTPResponse): void => {
       const u = res.url();
       if (!/\/api\/graphql|\/graphql\/query|\/api\/v1\//.test(u) || !/json|javascript|text\/plain/.test(res.headers()['content-type'] || '')) return;
       void res
         .text()
         .then((t) => {
-          if (/"code"/.test(t)) collectCodes(JSON.parse(t.replace(/^for \(;;\);/, '')), found);
+          if (/"code"/.test(t)) collectCodes(JSON.parse(t.replace(/^for \(;;\);/, '')), found, 0, 14, ads);
         })
         .catch(() => undefined);
     };
@@ -1027,7 +1054,7 @@ export async function forYouInstagram(want: number, log: (m: string) => void): P
       for (const t of preloaded) {
         try {
           // The list sits ~16 levels down (ScheduledServerJS > RelayPrefetchedStreamCache > __bbox > result > data).
-          collectCodes(JSON.parse(t), found, 0, 40);
+          collectCodes(JSON.parse(t), found, 0, 40, ads);
         } catch {
           /* not JSON */
         }
@@ -1050,9 +1077,11 @@ export async function forYouInstagram(want: number, log: (m: string) => void): P
       }
       const here = reelHere();
       if (here) found.add(here);
+      // The viewer's address names an ad like any reel: those codes leave the list here.
+      for (const c of ads) found.delete(c);
       // Only a signed-in account gets the Reels page: name it, for a sign-in Instagram would not confirm.
       const viewer = found.size ? await viewerName(p) : '';
-      log(`instagram foryou: ${found.size} reel codes after ${secs()} s`);
+      log(`instagram foryou: ${found.size} reel codes after ${secs()} s${ads.size ? `, ${ads.size} ad(s) skipped` : ''}`);
       return { codes: [...found], viewer };
     } finally {
       p.off('response', onResponse);
