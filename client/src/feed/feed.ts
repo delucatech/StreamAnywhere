@@ -313,8 +313,11 @@ let suppressClickUntil = 0;
 function renderSourceUi(): void {
   const listMode = state.mode.kind !== 'source';
   for (const b of el.tabs.querySelectorAll<HTMLButtonElement>('.tab')) b.classList.toggle('active', !listMode && b.dataset.source === prefs.source);
-  el.chips.classList.toggle('hidden', listMode || prefs.source !== 'explore');
+  const chips = !listMode && prefs.source === 'explore';
+  el.chips.classList.toggle('hidden', !chips);
   el.context.classList.toggle('hidden', !listMode);
+  // nothing under the header (For You, and every tab without categories): the wide layout drops that row
+  el.app.classList.toggle('no-row2', !chips && !listMode);
   if (state.mode.kind === 'search') el.contextLabel.textContent = `Search: ${state.mode.q}`;
   else if (state.mode.kind === 'profile') el.contextLabel.textContent = `@${state.mode.user}`;
   const back = state.mode.kind === 'profile' ? `Back to @${state.mode.user}` : 'Back to the search results';

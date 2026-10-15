@@ -43,6 +43,12 @@
     'rail stage upnext';
   background: #0a0b0f;
 }
+/* no categories and no search / account pill (feed.ts renderSourceUi): no second row, the video
+   starts right under the header and takes the row's height */
+.app.wide.no-row2 {
+  --stage-h: calc(var(--vh) - 84px);
+  grid-template-rows: 72px 0 minmax(0, 1fr);
+}
 @supports (height: 100dvh) {
   .app.wide {
     --vh: 100dvh;
