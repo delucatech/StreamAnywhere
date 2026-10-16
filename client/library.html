@@ -41,19 +41,26 @@
           <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path fill="currentColor" d="M12 3.2 2.8 11.4l1.3 1.5L5.5 11.7V20a1 1 0 0 0 1 1h4v-6h3v6h4a1 1 0 0 0 1-1v-8.3l1.4 1.2 1.3-1.5z" /></svg>
         </a>
         <h1 class="title"><span class="title-icon" id="titleIcon" aria-hidden="true"></span>Library</h1>
-        <button type="button" id="catsBtn" class="top-icon" aria-label="Manage categories" title="Manage categories">
-          <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7h18M3 12h12M3 17h8" /><circle cx="18" cy="16" r="3" /><path d="M20.5 18.5 22 20" /></svg>
-        </button>
+        <span class="top-group">
+          <button type="button" id="addBtn" class="top-icon add" aria-label="Add a video link" aria-expanded="false" title="Add a video link">
+            <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+          </button>
+          <button type="button" id="catsBtn" class="top-icon" aria-label="Manage categories" title="Manage categories">
+            <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7h18M3 12h12M3 17h8" /><circle cx="18" cy="16" r="3" /><path d="M20.5 18.5 22 20" /></svg>
+          </button>
+        </span>
       </header>
 
       <main class="card">
-        <form class="urlrow" id="saveForm" autocomplete="off">
-          <input id="url" class="url" type="url" inputmode="url" placeholder="Paste a YouTube, TikTok, Instagram or Facebook link" spellcheck="false" required />
-          <button type="button" id="pasteBtn" class="btn ghost" title="Paste from the clipboard">Paste</button>
-          <button type="submit" id="saveBtn" class="btn primary">Save link</button>
-        </form>
-        <p class="hint" id="saveHint">Saving keeps the link and its details in your library on every device. Nothing is downloaded until you choose to, on the device you want it on.</p>
-        <p class="status hidden" id="saveStatus" role="status"></p>
+        <div class="addbox hidden" id="addBox">
+          <form class="urlrow" id="saveForm" autocomplete="off">
+            <input id="url" class="url" type="url" inputmode="url" placeholder="Paste a YouTube, TikTok, Instagram or Facebook link" spellcheck="false" required />
+            <button type="button" id="pasteBtn" class="btn ghost" title="Paste from the clipboard">Paste</button>
+            <button type="submit" id="saveBtn" class="btn primary">Save link</button>
+          </form>
+          <p class="hint" id="saveHint">Saving keeps the link and its details in your library on every device. Nothing is downloaded until you choose to, on the device you want it on.</p>
+          <p class="status hidden" id="saveStatus" role="status"></p>
+        </div>
 
         <div class="banner hidden" id="offline" role="status">You are offline. This is the library as last seen; only videos downloaded to this browser can play.</div>
 

@@ -39,6 +39,7 @@ const ICON = {
   muted: icon('<path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M16 9.5l5 5M21 9.5l-5 5"/>'),
   full: icon('<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>'),
   replay: icon('<path d="M4 12a8 8 0 1 0 2.3-5.6"/><path d="M4 4v5h5"/>'),
+  more: icon('<circle cx="5" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="19" cy="12" r="1.6" fill="currentColor"/>'),
 };
 
 export class LibraryPlayer {
@@ -71,6 +72,8 @@ export class LibraryPlayer {
   private hideTimer = 0;
   /** Called when the overlay closes (the page resumes its own state) */
   onClose?: () => void;
+  /** The options button (top right): the page opens the video's sheet over the player */
+  onOptions?: (entryId: string) => void;
 
   constructor(root: HTMLElement) {
     this.root = root;
@@ -82,6 +85,7 @@ export class LibraryPlayer {
         <button type="button" class="th-btn th-close" aria-label="Close player" title="Close (Esc)">${ICON.close}</button>
         <div class="th-title"><div class="th-name"></div><div class="th-sub"></div></div>
         <div class="th-counter"></div>
+        <button type="button" class="th-btn th-menu" aria-label="Options for this video" title="Options: quality, categories, delete…">${ICON.more}</button>
       </div>
       <div class="th-stage">
         <img class="th-poster" alt="" draggable="false" />
@@ -122,6 +126,10 @@ export class LibraryPlayer {
     this.nextBtn = q('.th-next');
     this.fullBtn = q('.th-full');
     q('.th-close').addEventListener('click', () => this.close());
+    q('.th-menu').addEventListener('click', () => {
+      const id = this.current;
+      if (id) this.onOptions?.(id);
+    });
     this.playBtn.addEventListener('click', () => this.togglePause());
     this.big.addEventListener('click', () => this.togglePause());
     this.prevBtn.addEventListener('click', () => this.go(this.index - 1));
@@ -132,11 +140,28 @@ export class LibraryPlayer {
     this.bindStage();
     this.bindBar();
     document.addEventListener('keydown', (e) => this.onKey(e));
-    this.root.addEventListener('pointermove', () => this.showChrome());
+    // a moving mouse brings the bars back; a finger does that with a tap (see bindStage)
+    this.root.addEventListener('pointermove', (e) => {
+      if (e.pointerType === 'mouse') this.showChrome();
+    });
   }
 
   get isOpen(): boolean {
     return !this.root.classList.contains('hidden');
+  }
+
+  /** The video on screen */
+  get current(): string | undefined {
+    return this.items[this.index]?.entryId;
+  }
+
+  pause(): void {
+    this.player?.pause();
+    this.showChrome();
+  }
+
+  resume(): void {
+    if (this.player?.paused && !this.ended) void this.player.play();
   }
 
   /** The renderer in use, for the page's notes ("WebCodecs + Canvas" or the <video> fallback). */
@@ -302,21 +327,24 @@ export class LibraryPlayer {
     else r.webkitRequestFullscreen?.();
   }
 
-  /** The bars fade while a video plays untouched; any pointer movement or tap brings them back. */
+  /**
+   * The title, the bars and the buttons fade a couple of seconds into playback. A tap on the video
+   * while they are hidden only brings them back; a tap while they show pauses or resumes.
+   */
   private showChrome(): void {
     this.root.classList.remove('idle');
     window.clearTimeout(this.hideTimer);
     this.hideTimer = window.setTimeout(() => {
       if (this.player && !this.player.paused) this.root.classList.add('idle');
-    }, 2800);
+    }, 2500);
   }
 
   private bindStage(): void {
-    let down: { x: number; y: number; id: number; at: number } | undefined;
+    let down: { x: number; y: number; id: number; at: number; wasIdle: boolean } | undefined;
     let moved = false;
     this.stage.addEventListener('pointerdown', (e) => {
       if (!e.isPrimary || e.button !== 0) return;
-      down = { x: e.clientX, y: e.clientY, id: e.pointerId, at: performance.now() };
+      down = { x: e.clientX, y: e.clientY, id: e.pointerId, at: performance.now(), wasIdle: this.root.classList.contains('idle') };
       moved = false;
     });
     this.stage.addEventListener('pointermove', (e) => {
@@ -328,6 +356,7 @@ export class LibraryPlayer {
       const dy = e.clientY - down.y;
       const dx = e.clientX - down.x;
       const dt = performance.now() - down.at;
+      const wasIdle = down.wasIdle;
       down = undefined;
       const h = this.stage.clientHeight || 1;
       // a vertical swipe (far or fast enough) moves to the next / previous video, like the feed
@@ -335,7 +364,9 @@ export class LibraryPlayer {
         this.go(dy < 0 ? this.index + 1 : this.index - 1);
         return;
       }
-      if (!moved) this.togglePause();
+      if (moved) return;
+      if (wasIdle) this.showChrome();
+      else this.togglePause();
     };
     this.stage.addEventListener('pointerup', end);
     this.stage.addEventListener('pointercancel', () => (down = undefined));

@@ -131,6 +131,30 @@ input {
 .top-icon:active {
   background: rgba(255, 255, 255, 0.22);
 }
+.top-group {
+  display: flex;
+  gap: 4px;
+}
+.top-icon.add {
+  background: rgba(46, 230, 166, 0.18);
+  color: var(--accent);
+}
+.top-icon.add.on {
+  background: var(--accent);
+  color: #03241a;
+}
+.top-icon.add.on svg {
+  transform: rotate(45deg);
+}
+.addbox {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 14px;
+  background: rgba(46, 230, 166, 0.07);
+  border: 1px solid rgba(46, 230, 166, 0.25);
+}
 .title {
   margin: 0;
   font-size: 18px;
@@ -580,6 +604,10 @@ input {
 }
 
 /* ---------- sheets (one video, categories) ---------- */
+/* the sheet opens over the player too (its options button) */
+body.theater-open .overlay {
+  z-index: 45;
+}
 .overlay {
   position: fixed;
   inset: 0;
@@ -1038,6 +1066,16 @@ input {
 }
 .th-btn:disabled {
   opacity: 0.35;
+}
+.th-btn.th-menu {
+  width: 40px;
+  height: 40px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.8);
+}
+.th-btn.th-menu svg {
+  width: 20px;
+  height: 20px;
 }
 .th-btn.big {
   width: 60px;

@@ -32,6 +32,8 @@ const el = {
   titleIcon: $('titleIcon'),
   homeLink: $<HTMLAnchorElement>('homeLink'),
   catsBtn: $<HTMLButtonElement>('catsBtn'),
+  addBtn: $<HTMLButtonElement>('addBtn'),
+  addBox: $('addBox'),
   form: $<HTMLFormElement>('saveForm'),
   url: $<HTMLInputElement>('url'),
   pasteBtn: $<HTMLButtonElement>('pasteBtn'),
@@ -273,7 +275,7 @@ function renderGrid(): void {
   if (!lib.entries.length) {
     if (!fresh && offline) empty = '<b>Offline, and no saved library on this device yet.</b><br>Open the library once while online; it is remembered here afterwards.';
     else if (!fresh) empty = '<span class="spinner"></span> Loading your library…';
-    else empty = '<b>Your library is empty.</b><br>Paste a video link above and tap <i>Save link</i>. It is saved to your library on every device; downloading is a separate step, so you decide where each video lives.';
+    else empty = '<b>Your library is empty.</b><br>Tap <b>+</b> at the top, paste a video link and save it. It is saved to your library on every device; downloading is a separate step, so you decide where each video lives.';
   } else if (!list.length) {
     if (filters.localOnly) empty = `<b>No videos are downloaded to this browser${filters.cat !== 'all' || filters.q ? ' in this selection' : ''}.</b><br>Open a video and choose <i>Download for in-app playback</i> to watch it here${isTesla ? ' in the car' : ''}, offline too.`;
     else if (filters.q) empty = `<b>Nothing matches “${esc(filters.q)}”.</b>`;
@@ -281,6 +283,11 @@ function renderGrid(): void {
   }
   el.empty.innerHTML = empty;
   el.empty.classList.toggle('hidden', !empty);
+}
+/** A tap on a card: a video that is here plays; one that is not shows how to get it here. */
+function openCard(id: string): void {
+  if (local.has(id)) void playEntry(id);
+  else openSheet(id, 'options');
 }
 el.grid.addEventListener('click', (e) => {
   const play = (e.target as HTMLElement).closest<HTMLElement>('[data-play]');
@@ -290,14 +297,14 @@ el.grid.addEventListener('click', (e) => {
     return;
   }
   const card = (e.target as HTMLElement).closest<HTMLElement>('.vcard');
-  if (card) openSheet(card.dataset.id!);
+  if (card) openCard(card.dataset.id!);
 });
 el.grid.addEventListener('keydown', (e) => {
   if (e.key !== 'Enter' && e.key !== ' ') return;
   const card = (e.target as HTMLElement).closest<HTMLElement>('.vcard');
   if (!card) return;
   e.preventDefault();
-  openSheet(card.dataset.id!);
+  openCard(card.dataset.id!);
 });
 
 el.search.addEventListener('input', () => {
@@ -370,6 +377,7 @@ async function saveLink(raw: string): Promise<void> {
     } else {
       setSaveStatus('', 'none');
       el.url.value = '';
+      showAddBox(false);
       toast(r.entry.meta === 'pending' ? 'Saved. Looking up the title and thumbnail…' : 'Saved to your library');
       flashCard(r.entry.id);
     }
@@ -390,6 +398,14 @@ function flashCard(id: string): void {
   window.setTimeout(() => card.classList.remove('flash'), 1600);
 }
 
+/** The add-link box stays out of the way until "Add" is tapped (and after a link was saved). */
+function showAddBox(on: boolean): void {
+  el.addBox.classList.toggle('hidden', !on);
+  el.addBtn.classList.toggle('on', on);
+  el.addBtn.setAttribute('aria-expanded', String(on));
+  if (on) el.url.focus();
+}
+el.addBtn.addEventListener('click', () => showAddBox(el.addBox.classList.contains('hidden')));
 el.form.addEventListener('submit', (e) => {
   e.preventDefault();
   void saveLink(el.url.value);
@@ -414,21 +430,33 @@ let view: SheetView = { kind: 'info' };
 let titleEditing = false;
 let headRenderedFor = '';
 
-function openSheet(id: string): void {
+/** `start` 'options' opens straight on the download choices (a video not downloaded here was tapped). */
+function openSheet(id: string, start: 'info' | 'options' = 'info'): void {
+  const e = entryById(id);
+  if (!e) return;
   selectedId = id;
   view = { kind: 'info' };
   titleEditing = false;
   headRenderedFor = '';
   el.sheetOverlay.classList.remove('hidden');
   document.body.classList.add('sheet-open');
-  renderSheet();
+  const canOffer = !local.has(id) && !dl.isRunning(dl.taskFor(id)) && !e.unavailable && !offline && hasIndexedDb;
+  if (start === 'options' && canOffer) void loadOptions(e, 'inapp');
+  else renderSheet();
   el.sheet.scrollTop = 0;
 }
 function closeSheet(): void {
   selectedId = undefined;
   el.sheetOverlay.classList.add('hidden');
   document.body.classList.remove('sheet-open');
+  // opened from the player's options button: the video goes on
+  if (theater.isOpen) theater.resume();
 }
+// The player's options button: the same sheet, over the player, with the video paused meanwhile.
+theater.onOptions = (id) => {
+  theater.pause();
+  openSheet(id);
+};
 el.sheetOverlay.addEventListener('click', (e) => {
   if (e.target === el.sheetOverlay) closeSheet();
 });
@@ -496,7 +524,7 @@ function infoHtml(e: LibraryEntry): string {
   if (v) {
     html += `<p class="sh-local ok">Available for in-app playback · ${esc(v.label)} · ${esc(v.detail)} · ${fmtBytes(v.sizeBytes)} · downloaded ${esc(timeAgo(v.savedAt))}</p>
       <div class="sh-actions">
-        <button type="button" class="btn primary" data-act="play">Play</button>
+        <button type="button" class="btn primary" data-act="play">${theater.isOpen && theater.current === e.id ? 'Resume' : 'Play'}</button>
         ${canSaveFiles ? `<button type="button" class="btn" data-act="export-local" title="${canPickDestination ? 'Choose where to save the file' : 'Saves the file where this browser puts downloads'}">Save ${esc(v.label)} copy to device</button>` : ''}
         ${canShareFiles && isIOS ? '<button type="button" class="btn" data-act="share-local">Share / Save to Photos…</button>' : ''}
         <button type="button" class="btn ghost" data-act="pick-inapp" ${running || e.unavailable ? 'disabled' : ''}>Replace with another quality…</button>
@@ -853,6 +881,7 @@ el.catsBody.addEventListener('click', async (e) => {
 
 // ---------------------------------------------------------------- playing
 async function playEntry(id: string): Promise<void> {
+  if (theater.isOpen && theater.current === id) return closeSheet(); // back to the paused video
   const list = visibleEntries().filter((e) => local.has(e.id));
   let idx = list.findIndex((e) => e.id === id);
   if (idx < 0) {
@@ -932,6 +961,7 @@ void (async () => {
     const q = new URLSearchParams(location.search).get('url');
     if (q) {
       history.replaceState(null, '', location.pathname);
+      showAddBox(true);
       el.url.value = q;
       void saveLink(q);
     }
