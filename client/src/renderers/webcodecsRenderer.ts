@@ -233,7 +233,7 @@ export class WebCodecsRenderer implements Renderer {
         const as = await AudioDecoder.isConfigSupported(audio.audioConfig);
         if (gen !== this.generation) return;
         if (as.supported) {
-          this.audio = new AudioSink();
+          this.audio = new AudioSink(audio.audioConfig.sampleRate);
           this.audio.setVolume(this.volume);
           this.clock = this.audio;
           this.audioDecoder = this.makeAudioDecoder(audio.audioConfig);
@@ -501,7 +501,7 @@ export class WebCodecsRenderer implements Renderer {
       this.st.extra['Audio file'] = `${a.bytesLoaded}/${a.totalBytes || '?'} bytes, HTTP ${a.httpStatus}`;
     }
     if (this.audio) {
-      this.st.extra['Audio context'] = this.audio.contextState;
+      this.st.extra['Audio context'] = `${this.audio.contextState}, ${this.audio.ctx.sampleRate} Hz`;
       this.st.extra['Audio chunks'] = `${this.audio.scheduledChunks} scheduled, ${this.audio.droppedChunks} dropped${this.audio.lastError ? ', err: ' + this.audio.lastError : ''}`;
       this.st.extra['Audio starts at'] = this.audio.firstScheduledUs < 0 ? 'not yet' : `${(this.audio.firstScheduledUs / 1e6).toFixed(3)}s`;
     }

@@ -47,14 +47,23 @@ export class WallClock implements PlaybackClock {
   }
 }
 
+/**
+ * Consecutive chunks whose timestamps line up within this tolerance are glued back to back
+ * (sample-accurate), instead of each being placed at its own rounded microsecond timestamp.
+ * Anything further apart is a real discontinuity (seek, dropped chunk) and re-syncs.
+ */
+const CONTIGUOUS_TOLERANCE_S = 0.004;
+
 export class AudioSink implements PlaybackClock {
-  readonly ctx: AudioContext;
-  private readonly gain: GainNode;
+  ctx: AudioContext;
+  private gain: GainNode;
   private baseCtxTime = 0;
   private baseMediaUs = 0;
   private started = false;
   private sources = new Set<AudioBufferSourceNode>();
   private pending: AudioData[] = [];
+  /** Context time at which the last scheduled chunk ends; the next contiguous chunk starts exactly there */
+  private nextStartTime = -1;
   /** Media time (us) up to which audio has been scheduled */
   scheduledUntilUs = 0;
   scheduledChunks = 0;
@@ -63,9 +72,46 @@ export class AudioSink implements PlaybackClock {
   firstScheduledUs = -1;
   lastError = '';
 
-  constructor() {
-    this.ctx = new AudioContext();
+  /**
+   * @param sampleRate the track's sample rate. The context is opened at that rate so the whole
+   *   stream is resampled once, continuously, by the output device path. Opening it at the device
+   *   rate (the default, usually 48 kHz) and feeding 44.1 kHz AudioBuffers made Web Audio resample
+   *   every ~23 ms chunk on its own, and the seams between them crackled.
+   */
+  constructor(sampleRate?: number) {
+    this.ctx = AudioSink.createContext(sampleRate);
     this.gain = this.ctx.createGain();
+    this.gain.connect(this.ctx.destination);
+  }
+
+  private static createContext(sampleRate?: number): AudioContext {
+    if (sampleRate && sampleRate >= 8000 && sampleRate <= 96000) {
+      try {
+        return new AudioContext({ sampleRate });
+      } catch {
+        /* rate not supported here; fall back to the device rate */
+      }
+    }
+    return new AudioContext();
+  }
+
+  /**
+   * The decoder's real output rate can differ from the configured one (HE-AAC doubles it). While
+   * nothing has been scheduled yet the context is cheap to reopen at the right rate.
+   */
+  private matchContextRate(rate: number): void {
+    if (this.started || this.scheduledChunks || !rate || rate === this.ctx.sampleRate) return;
+    const old = this.ctx;
+    const next = AudioSink.createContext(rate);
+    if (next.sampleRate !== rate) {
+      void next.close();
+      return;
+    }
+    const volume = this.gain.gain.value;
+    void old.close();
+    this.ctx = next;
+    this.gain = this.ctx.createGain();
+    this.gain.gain.value = volume;
     this.gain.connect(this.ctx.destination);
   }
 
@@ -122,6 +168,7 @@ export class AudioSink implements PlaybackClock {
 
   /** Queue decoded audio. Before start() the data is held; afterwards it is scheduled immediately. */
   enqueue(data: AudioData): void {
+    this.matchContextRate(data.sampleRate);
     if (!this.started) {
       this.pending.push(data);
       if (this.pending.length > 400) this.pending.shift()?.close();
@@ -140,30 +187,39 @@ export class AudioSink implements PlaybackClock {
         data.copyTo(plane, { planeIndex: ch, format: 'f32-planar' });
         buffer.copyToChannel(plane, ch);
       }
-      const when = this.baseCtxTime + (data.timestamp - this.baseMediaUs) / 1e6;
+      const nominal = this.baseCtxTime + (data.timestamp - this.baseMediaUs) / 1e6;
+      // Glue the chunk to the end of the previous one when the timestamps say they are adjacent:
+      // starting each buffer at its own rounded timestamp left one-sample gaps/overlaps that click.
+      const contiguous = this.nextStartTime >= 0 && Math.abs(nominal - this.nextStartTime) <= CONTIGUOUS_TOLERANCE_S;
+      const when = contiguous ? this.nextStartTime : nominal;
       const now = this.ctx.currentTime;
       const src = this.ctx.createBufferSource();
       src.buffer = buffer;
       src.connect(this.gain);
       src.onended = () => this.sources.delete(src);
-      if (when < now - 0.005) {
+      // A chunk whose start is already behind the clock (or before context time 0, which start()
+      // rejects) plays from the matching offset instead of being placed in the past.
+      if (when < now) {
         const offset = now - when;
         if (offset >= buffer.duration) {
           this.droppedChunks++;
-          data.close();
+          this.nextStartTime = -1;
           return;
         }
         src.start(now, offset);
       } else {
         src.start(when);
       }
+      const durationS = frames / data.sampleRate;
+      this.nextStartTime = when + durationS;
       this.sources.add(src);
       this.scheduledChunks++;
       if (this.firstScheduledUs < 0 || data.timestamp < this.firstScheduledUs) this.firstScheduledUs = data.timestamp;
-      this.scheduledUntilUs = Math.max(this.scheduledUntilUs, data.timestamp + (data.duration || 0));
+      this.scheduledUntilUs = Math.max(this.scheduledUntilUs, data.timestamp + Math.round(durationS * 1e6));
     } catch (e) {
       this.lastError = (e as Error).message;
       this.droppedChunks++;
+      this.nextStartTime = -1;
     } finally {
       data.close();
     }
@@ -182,6 +238,7 @@ export class AudioSink implements PlaybackClock {
     this.sources.clear();
     this.scheduledUntilUs = 0;
     this.firstScheduledUs = -1;
+    this.nextStartTime = -1;
   }
 
   /** Stop every scheduled buffer and discard undecoded-ahead chunks (seek / stop). */
