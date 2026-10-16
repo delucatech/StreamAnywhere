@@ -15,7 +15,7 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
   if (!e) throw new Error(`missing #${id}`);
   return e as T;
 };
-const el = { screen: $('screen'), grid: $('grid'), dock: $('dock'), zoom: $('zoom'), clock: $('clock') };
+const el = { screen: $('screen'), grid: $('grid'), dock: $('dock'), zoom: $('zoom') };
 
 interface App {
   id: Platform | ToolApp;
@@ -228,12 +228,6 @@ async function refreshBadges(): Promise<void> {
     }),
   );
 }
-
-function tickClock(): void {
-  el.clock.textContent = new Date().toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
-}
-tickClock();
-window.setInterval(tickClock, 15_000);
 
 // Arrow keys move between icons (the Tesla browser and desktops); Enter/Space opens (native button).
 document.addEventListener('keydown', (e) => {

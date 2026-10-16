@@ -76,19 +76,6 @@ body {
 .screen.launching {
   opacity: 0;
 }
-.statusbar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  height: 36px;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--muted);
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
-}
-.clock {
-  font-variant-numeric: tabular-nums;
-}
 
 /* ---------- app grid ---------- */
 .grid {
