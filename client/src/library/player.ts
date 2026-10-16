@@ -8,6 +8,12 @@
  *
  * Around it: tap to pause, a seekable progress bar, previous / next (buttons, a vertical swipe,
  * the arrow keys), mute and fullscreen, and the next video starting when one ends.
+ *
+ * Fullscreen is the page's own (the whole theater) where the browser allows an element to go
+ * fullscreen. An iPhone allows none of that: only a <video> element can go fullscreen there, in the
+ * system player. So on an iPhone the button hands the current file to a plain <video> (the stored
+ * Blob, from the same position) and asks for the native fullscreen; when it ends (Done) the canvas
+ * player picks up at the position the user left, playing or paused as they left it.
  */
 import { FeedPlayer, feedPlayerMode } from '../feed/player';
 
@@ -27,6 +33,14 @@ const fmtTime = (s: number): string => {
   const sec = Math.floor(s % 60);
   return h ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}` : `${m}:${String(sec).padStart(2, '0')}`;
 };
+
+/** The page may put an element (the theater) fullscreen: desktops, Android, iPad */
+const elementFullscreenAllowed = (): boolean =>
+  !!document.fullscreenEnabled || !!(document as unknown as { webkitFullscreenEnabled?: boolean }).webkitFullscreenEnabled;
+/** Only a <video> may go fullscreen, in the system player: iPhone */
+const nativeVideoFullscreenAllowed = (): boolean =>
+  typeof (HTMLVideoElement.prototype as unknown as { webkitEnterFullscreen?: unknown }).webkitEnterFullscreen === 'function';
+type NativeVideo = HTMLVideoElement & { webkitEnterFullscreen?: () => void; webkitExitFullscreen?: () => void; webkitDisplayingFullscreen?: boolean };
 
 const icon = (paths: string): string => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
 const ICON = {
@@ -63,6 +77,10 @@ export class LibraryPlayer {
   private nextBtn: HTMLButtonElement;
   private fullBtn: HTMLButtonElement;
   private player?: FeedPlayer;
+  /** The current item's bytes (for the native fullscreen player on an iPhone) */
+  private blob?: Blob;
+  /** The native fullscreen <video> while it is up (iPhone only) */
+  private native?: { video: HTMLVideoElement; url: string; gen: number };
   private items: PlayItem[] = [];
   private index = -1;
   private generation = 0;
@@ -136,7 +154,7 @@ export class LibraryPlayer {
     this.nextBtn.addEventListener('click', () => this.go(this.index + 1));
     this.muteBtn.addEventListener('click', () => this.setMuted(!this.muted));
     this.fullBtn.addEventListener('click', () => this.toggleFullscreen());
-    if (!document.fullscreenEnabled && !(document as unknown as { webkitFullscreenEnabled?: boolean }).webkitFullscreenEnabled) this.fullBtn.classList.add('hidden');
+    if (!elementFullscreenAllowed() && !nativeVideoFullscreenAllowed()) this.fullBtn.classList.add('hidden');
     this.bindStage();
     this.bindBar();
     document.addEventListener('keydown', (e) => this.onKey(e));
@@ -185,6 +203,8 @@ export class LibraryPlayer {
     this.player = undefined;
     this.root.classList.add('hidden');
     document.body.classList.remove('theater-open');
+    this.blob = undefined;
+    this.dropNative();
     if (document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
     this.onClose?.();
   }
@@ -228,10 +248,13 @@ export class LibraryPlayer {
     this.setWaiting(true, 'Opening the local copy…');
     this.player?.destroy();
     this.player = undefined;
+    this.blob = undefined;
+    this.dropNative();
     void item
       .load()
       .then(async (blob) => {
         if (gen !== this.generation) return;
+        this.blob = blob;
         const player = new FeedPlayer(this.canvas, this.stage, {
           onFirstFrame: () => {
             if (gen !== this.generation) return;
@@ -318,6 +341,10 @@ export class LibraryPlayer {
   }
 
   private toggleFullscreen(): void {
+    if (!elementFullscreenAllowed()) {
+      if (nativeVideoFullscreenAllowed()) this.enterNativeFullscreen();
+      return;
+    }
     const d = document as unknown as { webkitFullscreenElement?: Element; webkitExitFullscreen?: () => void };
     const r = this.root as unknown as { webkitRequestFullscreen?: () => void };
     if (document.fullscreenElement || d.webkitFullscreenElement) {
@@ -325,6 +352,98 @@ export class LibraryPlayer {
       else d.webkitExitFullscreen?.();
     } else if (this.root.requestFullscreen) void this.root.requestFullscreen().catch(() => undefined);
     else r.webkitRequestFullscreen?.();
+  }
+
+  /**
+   * iPhone: the system video player over the page. A <video> gets the stored file and the current
+   * position, starts inside this tap (that is what lets it go fullscreen a moment later, once its
+   * metadata is in), and the canvas player waits, paused. The native controls (scrub, pause,
+   * AirPlay) act on that element; its "Done" is `webkitendfullscreen`, which hands the position back.
+   */
+  private enterNativeFullscreen(): void {
+    const p = this.player;
+    const blob = this.blob;
+    if (!p || !blob || this.native) return;
+    const gen = this.generation;
+    const video = document.createElement('video') as NativeVideo;
+    video.className = 'th-native';
+    video.setAttribute('playsinline', '');
+    video.playsInline = true;
+    video.controls = false;
+    video.muted = this.muted;
+    const url = URL.createObjectURL(blob);
+    video.src = url;
+    const startAt = this.ended ? 0 : p.currentTime;
+    const wasPlaying = !p.paused && !this.ended;
+    this.native = { video, url, gen };
+    this.stage.appendChild(video);
+    p.pause();
+    this.showChrome();
+
+    let entered = false;
+    const enter = (): void => {
+      if (entered || this.native?.video !== video) return;
+      try {
+        video.webkitEnterFullscreen?.();
+        entered = true;
+      } catch {
+        /* metadata not in yet: tried again on loadedmetadata */
+      }
+    };
+    const finish = (): void => {
+      if (this.native?.video !== video) return;
+      const t = video.currentTime;
+      const atEnd = video.ended;
+      const playing = !video.paused && !atEnd;
+      this.dropNative();
+      if (gen !== this.generation || this.player !== p) return;
+      if (atEnd) {
+        if (this.index < this.items.length - 1) this.go(this.index + 1);
+        else p.seek(Math.max(0, t));
+        return;
+      }
+      p.seek(Math.max(0, t));
+      if (playing) void p.play();
+      this.showChrome();
+    };
+    video.addEventListener('webkitendfullscreen', finish);
+    video.addEventListener('loadedmetadata', () => {
+      if (this.native?.video !== video) return;
+      if (startAt > 0 && Number.isFinite(video.duration) && startAt < video.duration) video.currentTime = startAt;
+      enter();
+    });
+    video.addEventListener('error', () => {
+      if (this.native?.video !== video) return;
+      this.dropNative();
+      if (gen !== this.generation || this.player !== p) return;
+      if (wasPlaying) void p.play();
+      this.err.textContent = 'This video could not be opened in the fullscreen player.';
+      this.err.classList.remove('hidden');
+      window.setTimeout(() => this.err.classList.add('hidden'), 3000);
+    });
+    void video.play().catch(() => undefined);
+    enter();
+    // a browser that never makes it fullscreen: give the page back
+    window.setTimeout(() => {
+      if (this.native?.video === video && !entered && !video.webkitDisplayingFullscreen) finish();
+    }, 4000);
+  }
+
+  private dropNative(): void {
+    const n = this.native;
+    if (!n) return;
+    this.native = undefined;
+    const v = n.video as NativeVideo;
+    try {
+      v.pause();
+      if (v.webkitDisplayingFullscreen) v.webkitExitFullscreen?.();
+    } catch {
+      /* already gone */
+    }
+    v.removeAttribute('src');
+    v.load();
+    v.remove();
+    URL.revokeObjectURL(n.url);
   }
 
   /**

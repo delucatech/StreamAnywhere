@@ -1184,6 +1184,15 @@ body.theater-open .overlay {
 .th-poster {
   filter: brightness(0.6);
 }
+/* iPhone: the <video> handed to the system fullscreen player sits over the canvas, same frame, until Done */
+.th-native {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
 .th-canvas {
   opacity: 0;
   transition: opacity 0.2s ease;
