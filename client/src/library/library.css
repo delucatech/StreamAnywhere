@@ -480,42 +480,35 @@ input {
   font-size: 12px;
   font-weight: 600;
 }
+/* always drawn: the car, phones and tablets have no hover to reveal it with */
 .vremove {
   position: absolute;
   right: 8px;
   top: 8px;
-  width: 30px;
-  height: 30px;
+  width: 32px;
+  height: 32px;
   border-radius: 8px;
   border: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: rgba(0, 0, 0, 0.62);
   color: #fff;
   display: grid;
   place-items: center;
   cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.15s ease, background 0.15s ease;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+  transition: background 0.15s ease;
   -webkit-tap-highlight-color: transparent;
 }
 .vremove svg {
-  width: 17px;
-  height: 17px;
-}
-.vcard:hover .vremove,
-.vcard:focus-within .vremove,
-.vremove:focus-visible {
-  opacity: 1;
+  width: 18px;
+  height: 18px;
 }
 .vremove:hover,
 .vremove:focus-visible {
-  background: rgba(230, 70, 70, 0.9);
+  background: rgba(230, 70, 70, 0.92);
   outline: none;
 }
-/* no hover on a touch screen: the button is always there */
-@media (hover: none) {
-  .vremove {
-    opacity: 1;
-  }
+.vremove:active {
+  transform: scale(0.94);
 }
 .vplay {
   position: absolute;
@@ -1307,12 +1300,12 @@ body.theater-open .overlay {
     height: 56px;
   }
   .vremove {
-    width: 40px;
-    height: 40px;
+    width: 44px;
+    height: 44px;
   }
   .vremove svg {
-    width: 22px;
-    height: 22px;
+    width: 24px;
+    height: 24px;
   }
 }
 @media (prefers-reduced-motion: reduce) {
