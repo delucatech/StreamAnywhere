@@ -73,6 +73,8 @@ export class Mp4Demuxer {
     private readonly url: string,
     private readonly fetchInit: RequestInit | undefined,
     private readonly cb: DemuxerCallbacks,
+    /** A file in this browser instead of a URL: read with slice() (a "Range" that never fails), no network */
+    private readonly blob?: Blob,
   ) {
     this.file = createFile();
     this.file.onError = (e: unknown) => this.cb.onError(new Error(`mp4box: ${String(e)}`));
@@ -228,6 +230,21 @@ export class Mp4Demuxer {
     }
   }
 
+  /**
+   * The local file as if a server had answered the Range request: 206 with the bytes from `offset`
+   * (416 at or past the end), so the download loop below needs no second code path.
+   */
+  private openBlob(offset: number): Response {
+    const blob = this.blob!;
+    const type = blob.type || 'video/mp4';
+    if (offset >= blob.size) return new Response(null, { status: 416, headers: { 'content-range': `bytes */${blob.size}` } });
+    const part = offset > 0 ? blob.slice(offset) : blob;
+    return new Response(part.stream(), {
+      status: offset > 0 ? 206 : 200,
+      headers: { 'content-type': type, 'content-length': String(part.size), ...(offset > 0 ? { 'content-range': `bytes ${offset}-${blob.size - 1}/${blob.size}` } : {}) },
+    });
+  }
+
   private async startFetch(offset: number): Promise<void> {
     if (this.destroyed) return;
     this.abort?.abort();
@@ -240,7 +257,7 @@ export class Mp4Demuxer {
     if (offset > 0) headers.set('Range', `bytes=${offset}-`);
     let skipBytes = 0;
     try {
-      const res = await fetch(this.url, { ...(this.fetchInit || {}), headers, signal: ac.signal });
+      const res = this.blob ? this.openBlob(offset) : await fetch(this.url, { ...(this.fetchInit || {}), headers, signal: ac.signal });
       if (gen !== this.fetchGen) return;
       this.stats.httpStatus = res.status;
       this.stats.contentType = res.headers.get('content-type') || '';

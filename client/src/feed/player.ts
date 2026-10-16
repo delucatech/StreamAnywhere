@@ -10,7 +10,7 @@
  * Adds what the feed needs on top of the Renderer interface: loop, a time ticker for the progress
  * bar, "paused" bookkeeping and a muted flag (volume 0/1).
  */
-import type { DownloadProgress, LoadSource, PlayerState, Renderer, RendererEvents } from '../renderers/types';
+import type { ConnectionKind, DownloadProgress, LoadSource, PlayerState, Renderer, RendererEvents } from '../renderers/types';
 import { VideoElementRenderer } from '../renderers/videoElementRenderer';
 import { WebCodecsRenderer, webCodecsSupported } from '../renderers/webcodecsRenderer';
 
@@ -120,19 +120,21 @@ export class FeedPlayer {
    * Starts fetching/decoding `url` (plus `audioUrl`, when the sound comes as a second file);
    * resolves when the renderer accepted it (frames arrive later).
    */
-  async load(url: string, connection: 'direct' | 'proxy', label: string, extra: { audioUrl?: string; durationHint?: number } = {}): Promise<void> {
+  async load(url: string, connection: ConnectionKind, label: string, extra: { audioUrl?: string; durationHint?: number; blob?: Blob } = {}): Promise<void> {
     if (this.destroyed) return;
-    this.url = url;
+    // a file stored in this browser (the Video Library) has no URL; `url` must still be truthy for play()
+    this.url = url || (extra.blob ? `local:${label}` : url);
     this.wantPlay = false;
     const src: LoadSource = {
       url,
       label,
       connection,
-      sourceKind: 'tiktok',
+      sourceKind: extra.blob ? 'local' : 'tiktok',
       fetchInit: { mode: 'cors', credentials: 'same-origin' },
-      corsResult: 'not-tested',
+      corsResult: extra.blob ? 'same-origin' : 'not-tested',
       audioUrl: extra.audioUrl,
       durationHint: extra.durationHint,
+      blob: extra.blob,
     };
     this.renderer.setVolume(this.muted ? 0 : 1);
     this.startTicker();

@@ -151,12 +151,23 @@ async function relayChunked(rec: MediaRecord, req: FastifyRequest, reply: Fastif
   return reply.code(parsed ? 206 : 200).headers(headers).send(out);
 }
 
+/** `?dl=<name>` on a relay request: the browser saves the body as a file with that name (the library's "Save to device"). */
+function attachmentFor(req: FastifyRequest): string | undefined {
+  const name = String((req.query as { dl?: unknown })?.dl || '').trim();
+  if (!name) return undefined;
+  const clean = name.replace(/[\\/:*?"<>|]+|[\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 150) || 'video.mp4';
+  const ascii = clean.replace(/[^ -~]/g, '_').replace(/"/g, "'");
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(clean)}`;
+}
+
 export function registerProxyRoutes(app: FastifyInstance): void {
   const handler = async (req: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
     const rec = getMedia(req.params.id);
     if (!rec) {
       return reply.code(404).send({ error: 'Unknown or expired media id. Resolve the video again.' });
     }
+    const attachment = attachmentFor(req);
+    if (attachment) reply.header('content-disposition', attachment);
     const isHead = req.method === 'HEAD';
     const range = typeof req.headers.range === 'string' ? req.headers.range : undefined;
     if (rec.chunked) return relayChunked(rec, req, reply, isHead, range);

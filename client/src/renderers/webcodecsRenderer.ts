@@ -156,7 +156,7 @@ export class WebCodecsRenderer implements Renderer {
         this.fail(err);
       },
       onLog: (msg) => this.events.onLog('info', `[demux] ${msg}`),
-    });
+    }, src.blob);
     if (src.audioUrl) {
       this.audioDemuxer = new Mp4Demuxer(src.audioUrl, src.fetchInit, {
         onReady: (info, _video, audio) => {

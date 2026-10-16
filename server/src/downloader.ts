@@ -124,6 +124,8 @@ export function buildOptions(formats: any[]): { options: DownloadOption[]; plans
     .sort((a, b) => (b.f.height || 0) - (a.f.height || 0) || (Number(b.f.fps) || 0) - (Number(a.f.fps) || 0));
   for (const { key, f } of chosen) {
     const fps = Number(f.fps) || 0;
+    // "1080p" names the shorter side: a vertical Short of 1080x1920 is 1080p, not 1920p
+    const p = Math.min(Number(f.height), Number(f.width) || Number(f.height));
     const merge = !hasAudio(f) && Boolean(audio);
     const vSize = sizeOf(f);
     const aSize = merge ? sizeOf(audio) : { bytes: 0, estimate: false };
@@ -134,7 +136,7 @@ export function buildOptions(formats: any[]): { options: DownloadOption[]; plans
     options.push({
       id,
       kind: 'video',
-      label: `${f.height}p${fps > 30 ? Math.round(fps) : ''}`,
+      label: `${p}p${fps > 30 ? Math.round(fps) : ''}`,
       detail: `${ext.toUpperCase()} · ${codecName(f.vcodec)}${acodec ? ` + ${codecName(acodec)}` : ' (no sound)'}`,
       width: f.width || undefined,
       height: f.height,
@@ -153,7 +155,7 @@ export function buildOptions(formats: any[]): { options: DownloadOption[]; plans
     });
   }
   // the first H.264 option at 1080p or below is the one most devices play as it is
-  const rec = options.find((o) => /^avc1|^h264/i.test(o.vcodec || '') && (o.height || 0) <= 1080) || options[0];
+  const rec = options.find((o) => /^avc1|^h264/i.test(o.vcodec || '') && Math.min(o.height || 0, o.width || o.height || 0) <= 1080) || options[0];
   if (rec) rec.recommended = true;
   if (audio) {
     const s = sizeOf(audio);

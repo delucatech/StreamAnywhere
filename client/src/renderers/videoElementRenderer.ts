@@ -27,6 +27,13 @@ export class VideoElementRenderer implements Renderer {
   private firstFrameSent = false;
   private useRvfc = false;
   private generation = 0;
+  private objectUrl?: string;
+
+  private revokeObjectUrl(): void {
+    if (!this.objectUrl) return;
+    URL.revokeObjectURL(this.objectUrl);
+    this.objectUrl = undefined;
+  }
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -77,11 +84,18 @@ export class VideoElementRenderer implements Renderer {
     this.st.cors = src.corsResult === 'passed' ? 'Passed' : src.corsResult === 'failed' ? 'Failed' : src.corsResult === 'same-origin' ? 'Same-origin (n/a)' : 'Not tested';
     this.st.extra['Frame callback'] = this.useRvfc ? 'requestVideoFrameCallback' : 'requestAnimationFrame (rVFC unavailable)';
     this.setState('loading');
-    const sameOrigin = src.url.startsWith('blob:') || new URL(src.url, location.href).origin === location.origin;
-    let ok = await this.attemptLoad(src.url, sameOrigin ? null : 'anonymous', gen);
+    // A file stored in this browser: the element plays it from an object URL (revoked on the next load)
+    this.revokeObjectUrl();
+    let url = src.url;
+    if (src.blob) {
+      url = URL.createObjectURL(src.blob);
+      this.objectUrl = url;
+    }
+    const sameOrigin = url.startsWith('blob:') || new URL(url, location.href).origin === location.origin;
+    let ok = await this.attemptLoad(url, sameOrigin ? null : 'anonymous', gen);
     if (!ok && !sameOrigin && gen === this.generation) {
       this.events.onLog('warn', 'crossOrigin="anonymous" load failed; retrying without CORS (canvas will be tainted if it loads)');
-      ok = await this.attemptLoad(src.url, null, gen);
+      ok = await this.attemptLoad(url, null, gen);
       if (ok) this.tainted = true;
     }
     if (gen !== this.generation) return;
@@ -256,5 +270,6 @@ export class VideoElementRenderer implements Renderer {
     this.video.removeAttribute('src');
     this.video.load();
     this.video.remove();
+    this.revokeObjectUrl();
   }
 }

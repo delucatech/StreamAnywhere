@@ -140,7 +140,7 @@ export function currentPlatform(): PlatformDef {
 
 const LAST_KEY = 'streamanywhere.lastApp';
 /** The launcher's apps that are not platforms (home.ts) */
-export type ToolApp = 'lab' | 'downloader';
+export type ToolApp = 'lab' | 'library';
 export function rememberApp(id: Platform | ToolApp): void {
   try {
     localStorage.setItem(LAST_KEY, id);

@@ -4,13 +4,14 @@ import rateLimit from '@fastify/rate-limit';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { EXPLORE_CATEGORIES, YOUTUBE_CATEGORIES, platformOf } from '../../shared/types';
-import type { ConversationRequest, DownloadProbeRequest, DownloadStartRequest, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ProbeRequest, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SendMessageRequest, SessionActionRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
+import type { ConversationRequest, DownloadProbeRequest, LibraryCategoryRequest, LibraryEntryPatch, LibrarySaveRequest, DownloadStartRequest, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ProbeRequest, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SendMessageRequest, SessionActionRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
 import { registerAuth } from './auth';
 import { config, findUp } from './config';
 import { registerProxyRoutes } from './proxy';
 import { isTikTokUrl, probeUrl, resolveTikTokNative, TikTokError } from './tiktok';
 import { detectFfmpeg } from './ffmpeg';
 import { cancelJob, DOWNLOAD_SOURCES, DownloadError, downloaderStats, getJob, jobFile, jobServed, MAX_BYTES, probeDownload, setDownloaderLogger, shutdownDownloader, startDownload } from './downloader';
+import { addCategory, deleteCategory, deleteEntry, entryOptions, flushLibrary, LibraryError, libraryState, libraryStats, patchEntry, refreshEntry, renameCategory, saveLink, setLibraryLogger, thumbFile } from './library';
 import { daemonStatus, detectYtDlp, resolveWithYtDlp, setYtDlpLogger, shutdownYtDlp, warmYtDlp } from './ytdlp';
 import { logStream, recentLog } from './logbuf';
 import { defaultExpiry, mediaCount, registerMedia } from './mediaStore';
@@ -270,6 +271,7 @@ export async function buildServer() {
   setFacebookSessionLogger((m) => app.log.info({ what: 'facebook-session' }, m));
   setFacebookLogger((m) => app.log.info({ what: 'facebook' }, m));
   setDownloaderLogger((m) => app.log.info({ what: 'downloader' }, m));
+  setLibraryLogger((m) => app.log.info({ what: 'library' }, m));
 
   app.get('/api/health', async (): Promise<HealthResponse> => ({
     ok: true,
@@ -720,7 +722,87 @@ export async function buildServer() {
       .send(stream);
   });
 
-  app.get('/api/stats', async () => ({ downloads: downloaderStats(), mediaRecords: mediaCount(), exploreStock: exploreStock(), youtubeStock: youtubeStock(), youtubeForYouStock: youtubeForYou?.stats, instagramStock: instagramStock(), instagramForYouStock: instagramForYou?.stats, instagram: instagramStats(), facebookStock: facebookStock(), facebookForYouStock: facebookForYou?.stats, facebook: facebookStats(), forYouStock: forYouStock(), workPage: workState(), uptimeSec: Math.round(process.uptime()) }));
+  // ---- Video Library (library.html): the shared list of saved links, categories, qualities on offer
+  const libraryError = (reply: { code(n: number): { send(b: unknown): unknown } }, e: unknown): unknown => {
+    const err = e as { message?: string; status?: number };
+    const status = e instanceof LibraryError || e instanceof DownloadError || e instanceof YouTubeError || e instanceof InstagramError || e instanceof FacebookError || e instanceof InstagramSessionError || e instanceof FacebookSessionError ? err.status || 502 : 502;
+    return reply.code(status).send({ error: err.message || String(e) });
+  };
+  app.get<{ Querystring: { rev?: string } }>('/api/library', async (req, reply) => {
+    reply.header('cache-control', 'no-store');
+    const s = libraryState();
+    if (req.query.rev !== undefined && Number(req.query.rev) === s.rev) return { rev: s.rev, unchanged: true };
+    return s;
+  });
+  app.post<{ Body: LibrarySaveRequest }>('/api/library', resolveLimit, async (req, reply) => {
+    try {
+      const r = saveLink(String(req.body?.url || ''), Array.isArray(req.body?.categoryIds) ? req.body!.categoryIds!.map(String) : []);
+      return { ...r, state: libraryState() };
+    } catch (e) {
+      return libraryError(reply, e);
+    }
+  });
+  app.post<{ Params: { id: string }; Body: LibraryEntryPatch }>('/api/library/entries/:id', async (req, reply) => {
+    try {
+      return { entry: patchEntry(req.params.id, req.body || {}), state: libraryState() };
+    } catch (e) {
+      return libraryError(reply, e);
+    }
+  });
+  app.post<{ Params: { id: string } }>('/api/library/entries/:id/delete', async (req, reply) => {
+    try {
+      deleteEntry(req.params.id);
+      return libraryState();
+    } catch (e) {
+      return libraryError(reply, e);
+    }
+  });
+  app.post<{ Params: { id: string } }>('/api/library/entries/:id/refresh', resolveLimit, async (req, reply) => {
+    try {
+      return { entry: refreshEntry(req.params.id), state: libraryState() };
+    } catch (e) {
+      return libraryError(reply, e);
+    }
+  });
+  app.get<{ Params: { id: string } }>('/api/library/entries/:id/options', resolveLimit, async (req, reply) => {
+    try {
+      reply.header('cache-control', 'no-store');
+      return await entryOptions(req.params.id);
+    } catch (e) {
+      req.log.warn({ id: req.params.id, err: (e as Error).message }, 'library options failed');
+      return libraryError(reply, e);
+    }
+  });
+  app.post<{ Body: LibraryCategoryRequest }>('/api/library/categories', async (req, reply) => {
+    try {
+      return { category: addCategory(req.body?.name), state: libraryState() };
+    } catch (e) {
+      return libraryError(reply, e);
+    }
+  });
+  app.post<{ Params: { id: string }; Body: LibraryCategoryRequest }>('/api/library/categories/:id', async (req, reply) => {
+    try {
+      return { category: renameCategory(req.params.id, req.body?.name), state: libraryState() };
+    } catch (e) {
+      return libraryError(reply, e);
+    }
+  });
+  app.post<{ Params: { id: string } }>('/api/library/categories/:id/delete', async (req, reply) => {
+    try {
+      deleteCategory(req.params.id);
+      return libraryState();
+    } catch (e) {
+      return libraryError(reply, e);
+    }
+  });
+  // Thumbnails are copied once when the link is saved (the platforms' cover URLs expire); the ?v= changes with the file.
+  app.get<{ Params: { id: string } }>('/api/library/thumb/:id', async (req, reply) => {
+    const f = thumbFile(req.params.id);
+    if (!f) return reply.code(404).send({ error: 'No thumbnail' });
+    return reply.code(200).headers({ 'content-type': f.mime, 'cache-control': 'public, max-age=31536000, immutable' }).send(fs.createReadStream(f.path));
+  });
+
+  app.get('/api/stats', async () => ({ downloads: downloaderStats(), library: libraryStats(), mediaRecords: mediaCount(), exploreStock: exploreStock(), youtubeStock: youtubeStock(), youtubeForYouStock: youtubeForYou?.stats, instagramStock: instagramStock(), instagramForYouStock: instagramForYou?.stats, instagram: instagramStats(), facebookStock: facebookStock(), facebookForYouStock: facebookForYou?.stats, facebook: facebookStats(), forYouStock: forYouStock(), workPage: workState(), uptimeSec: Math.round(process.uptime()) }));
 
   if (config.serveClient) {
     const dist = findUp(path.join('client', 'dist')) || findUp(path.join('client', 'dist'), process.cwd()) || path.resolve('client', 'dist');
@@ -754,6 +836,7 @@ if (require.main === module) {
           app.log.info({ sig }, 'shutting down');
           shutdownYtDlp();
           shutdownDownloader();
+          flushLibrary();
           void Promise.race([Promise.all([shutdownBrowsers(), shutdownYouTubeSession(), shutdownInstagram(), shutdownInstagramSession(), shutdownFacebookSession()]), new Promise((r) => setTimeout(r, 8000))]).finally(() => process.exit(0));
         });
       }

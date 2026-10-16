@@ -1,4 +1,4 @@
-import type { ConversationResponse, DownloadJob, DownloadProbeResponse, DownloadSource, FeedProgress, FeedRequest, FeedResponse, FollowRequest, FollowResponse, HealthResponse, InboxResponse, LoginMode, Platform, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SendMessageResponse, ServerProbe, SessionInputRequest, SessionStatus } from '../../shared/types';
+import type { ConversationResponse, DownloadJob, DownloadProbeResponse, DownloadSource, FeedProgress, LibraryCategory, LibraryEntry, LibraryEntryPatch, LibraryOptionsResponse, LibrarySaveResponse, LibraryState, FeedRequest, FeedResponse, FollowRequest, FollowResponse, HealthResponse, InboxResponse, LoginMode, Platform, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SendMessageResponse, ServerProbe, SessionInputRequest, SessionStatus } from '../../shared/types';
 
 /**
  * API base URL. Empty = same origin (dev server proxy or SERVE_CLIENT deployments). When the
@@ -140,4 +140,38 @@ export const api = {
   downloadCancel: (jobId: string): Promise<DownloadJob> => post(`/api/download/jobs/${jobId}/cancel`, {}),
   inboxOpen: (id: string): Promise<ConversationResponse> => post('/api/inbox/open', { id }),
   inboxSend: (req: SendMessageRequest): Promise<SendMessageResponse> => post('/api/inbox/send', req),
+  // Video Library (library.html)
+  /** The whole library, or { rev, unchanged: true } when nothing changed since `rev` */
+  library: async (rev?: number): Promise<LibraryState | { rev: number; unchanged: true }> => {
+    const res = await fetch(apiUrl(`/api/library${rev !== undefined ? `?rev=${rev}` : ''}`), { mode: 'cors', credentials: 'same-origin', cache: 'no-store' });
+    toLoginOn401(res);
+    const json = await res.json().catch(() => undefined);
+    if (!res.ok) throw new ApiError((json as { error?: string })?.error || `library ${res.status}`, res.status, json);
+    return json as LibraryState;
+  },
+  librarySave: (url: string, categoryIds?: string[]): Promise<LibrarySaveResponse> => post('/api/library', { url, categoryIds }, 30_000),
+  libraryPatch: (id: string, patch: LibraryEntryPatch): Promise<{ entry: LibraryEntry; state: LibraryState }> => post(`/api/library/entries/${id}`, patch),
+  libraryDelete: (id: string): Promise<LibraryState> => post(`/api/library/entries/${id}/delete`, {}),
+  libraryRefresh: (id: string): Promise<{ entry: LibraryEntry; state: LibraryState }> => post(`/api/library/entries/${id}/refresh`, {}),
+  /** The qualities on offer right now (a lookup at the source: a few seconds, longer on a cold server) */
+  libraryOptions: async (id: string, timeoutMs = 120_000): Promise<LibraryOptionsResponse> => {
+    const ctl = new AbortController();
+    const timer = window.setTimeout(() => ctl.abort(), timeoutMs);
+    let res: Response;
+    try {
+      res = await fetch(apiUrl(`/api/library/entries/${id}/options`), { mode: 'cors', credentials: 'same-origin', cache: 'no-store', signal: ctl.signal });
+    } catch (e) {
+      if (ctl.signal.aborted) throw new ApiError(`no answer from the server in ${Math.round(timeoutMs / 1000)} s`, 504);
+      throw e;
+    } finally {
+      window.clearTimeout(timer);
+    }
+    toLoginOn401(res);
+    const json = await res.json().catch(() => undefined);
+    if (!res.ok) throw new ApiError((json as { error?: string })?.error || `options ${res.status}`, res.status, json);
+    return json as LibraryOptionsResponse;
+  },
+  libraryAddCategory: (name: string): Promise<{ category: LibraryCategory; state: LibraryState }> => post('/api/library/categories', { name }),
+  libraryRenameCategory: (id: string, name: string): Promise<{ category: LibraryCategory; state: LibraryState }> => post(`/api/library/categories/${id}`, { name }),
+  libraryDeleteCategory: (id: string): Promise<LibraryState> => post(`/api/library/categories/${id}/delete`, {}),
 };

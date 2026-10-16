@@ -605,3 +605,91 @@ export interface DownloadJob {
   startedAt: number;
   elapsedMs: number;
 }
+
+// ---------------------------------------------------------------- Video Library (library.html)
+// Links saved to one library that every browser of the site shares (the server keeps it); videos
+// downloaded for in-app playback stay in the browser that downloaded them (IndexedDB).
+
+export type LibrarySource = DownloadSource;
+
+export interface LibraryCategory {
+  id: string;
+  name: string;
+  createdAt: number;
+}
+
+export interface LibraryEntry {
+  id: string;
+  /** The link as it was pasted (scheme added) */
+  url: string;
+  /** One form per video (watch?v=ID, @user/video/ID, reel/CODE): duplicates are found by it */
+  canonicalUrl: string;
+  source: LibrarySource;
+  /** The platform's own id of the video */
+  sourceId?: string;
+  title: string;
+  /** The title was typed by the user: a later lookup must not replace it */
+  titleEdited?: boolean;
+  author?: string;
+  duration?: number;
+  width?: number;
+  height?: number;
+  /** Thumbnail cached on the server (/api/library/thumb/:id?v=…); absent = placeholder */
+  thumb?: string;
+  categoryIds: string[];
+  addedAt: number;
+  updatedAt: number;
+  /** The metadata lookup: running, done, or failed (the entry stays, with an editable title) */
+  meta: 'pending' | 'ok' | 'failed';
+  metaError?: string;
+  /** The source said the video is gone (private, removed): it cannot be downloaded again */
+  unavailable?: { at: number; reason: string };
+}
+
+export interface LibraryState {
+  /** Grows with every change; GET /api/library?rev=N answers { rev, unchanged: true } when nothing changed */
+  rev: number;
+  entries: LibraryEntry[];
+  categories: LibraryCategory[];
+}
+
+export interface LibrarySaveRequest {
+  url: string;
+  categoryIds?: string[];
+}
+
+export interface LibrarySaveResponse {
+  entry: LibraryEntry;
+  /** The link was already in the library: `entry` is the existing one */
+  duplicate: boolean;
+  state: LibraryState;
+}
+
+export interface LibraryEntryPatch {
+  title?: string;
+  categoryIds?: string[];
+}
+
+export interface LibraryCategoryRequest {
+  name: string;
+}
+
+/**
+ * One quality a browser can get right now. 'job' = a server-side download (YouTube: picture and
+ * sound are separate files, merged with ffmpeg) fetched from /api/download/jobs/:id/file when done;
+ * 'stream' = a ready MP4 the browser fetches itself (cookie-free CDN URL and/or the same-origin proxy).
+ */
+export interface LibraryOption extends DownloadOption {
+  via: 'job' | 'stream';
+  directUrl?: string;
+  proxyUrl?: string;
+}
+
+export interface LibraryOptionsResponse {
+  entryId: string;
+  /** For 'job' options: the lookup handle for /api/download/start (valid for a while) */
+  probeId?: string;
+  options: LibraryOption[];
+  warnings: string[];
+  elapsedMs: number;
+}

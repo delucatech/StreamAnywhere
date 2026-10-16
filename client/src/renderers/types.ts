@@ -24,6 +24,12 @@ export interface LoadSource {
   /** Result of the browser-side CORS probe that selected this URL */
   corsResult?: 'passed' | 'failed' | 'not-tested' | 'same-origin';
   corsDetail?: string;
+  /**
+   * A video file stored in this browser (the Video Library's downloads, IndexedDB): the demuxer
+   * reads it with Blob.slice() instead of fetch(), everything after that is the same pipeline.
+   * `url` may then be empty (the <video> fallback makes its own object URL).
+   */
+  blob?: Blob;
 }
 
 export type PlayerState = 'idle' | 'loading' | 'ready' | 'buffering' | 'playing' | 'paused' | 'ended' | 'error';

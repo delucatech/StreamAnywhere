@@ -281,39 +281,66 @@ Docker) have no Chrome: the feed page then offers Explore only and says so.
 ## Launcher and platforms
 
 **`/`** (`home.html`) is an iPad-style home screen: one icon per platform (TikTok, YouTube, Instagram, Facebook) plus the
-Video Downloader and the lab player, a dock, and a zoom-from-icon animation into `feed.html?platform=…`; the feed's Home
+Video Library and the lab player, a dock, and a zoom-from-icon animation into `feed.html?platform=…`; the feed's Home
 button (top left) zooms back. A green badge on an icon means that platform is signed in on the
 server. The page has a web-app manifest, so it can be added to a phone's or tablet's home screen
 and runs full screen. Platforms are declared once in `client/src/platforms.ts` (name, colours, icon,
 categories); the feed page reads `?platform=` and labels, colours and routes itself accordingly.
 
-## Video Downloader
+## Video Library
 
-The **Downloader** icon on the home screen opens `download.html`: paste a video link, see the
-qualities on offer, pick one, and the file is saved on the device with the video's title as its
-name. YouTube is the first source; TikTok, Instagram and Facebook are listed as "soon" (the server's
-`DOWNLOAD_SOURCES` table in `server/src/downloader.ts` is where a source is switched on).
+The **Library** icon on the home screen opens `library.html` (the Video Downloader grew into it;
+`download.html` redirects there). One library of saved links is shared by every browser of the site;
+videos are downloaded where you want them, on the device you are using:
 
-How it works (`server/src/downloader.ts`):
+1. **Save link** stores the URL in the library at once and looks its details up in the background
+   (title, author, length, thumbnail; YouTube through yt-dlp, the others through the feed's resolvers).
+   Duplicates are recognised by the video's canonical form (`watch?v=ID`, `@user/video/ID`, `reel/CODE`).
+   A failed lookup keeps the entry with a placeholder title that can be edited. Nothing is downloaded.
+2. **Download for in-app playback** stores the video in *this* browser (IndexedDB, in 8 MB parts
+   written while the download streams) and the built-in player plays it, offline too.
+3. **Save to device** writes a regular file: the destination picker on desktop Chromium / Edge
+   (`showSaveFilePicker`), the downloads folder or the Files app elsewhere. The car's browser cannot
+   save files, so the action is not shown there. A file saved this way is not an in-app copy.
 
-- `POST /api/download/probe` runs one yt-dlp extraction (the warm daemon) and folds the formats into
-  one option per resolution (and per frame rate above 30): the best codec at that height (H.264 over
-  VP9 over AV1, since H.264 plays everywhere) merged with the best AAC track, plus "audio only". Sizes
-  are the parts' sizes added up (`~` when yt-dlp only estimates one). The extraction is kept for 20
-  minutes so the download does not look the video up again.
-- `POST /api/download/start` begins a job: the yt-dlp command line downloads the chosen parts (in
-  bounded Range chunks, so googlevideo serves them at full speed) and merges them with ffmpeg into an
-  MP4 under the server's temp directory (`DOWNLOAD_DIR`, default `<tmp>/streamanywhere-downloads`).
-  Two jobs run at once (`DOWNLOAD_PARALLEL`); the page polls `GET /api/download/jobs/:id` every second
-  for the progress (bytes, speed, time left, which part).
-- `GET /api/download/jobs/:id/file` serves the finished file (`Content-Disposition: attachment`); the
-  page fetches it as a browser download as soon as the job is done. Files are deleted 5 minutes after
-  they were fetched (an hour otherwise), and the directory is emptied at startup.
-- Files over `DOWNLOAD_MAX_BYTES` (default 2 GB) are refused: the VM's disk is small.
+Categories (create, rename, delete, assign several per video), search, a category filter and an
+"On this browser" filter organise the list. Each card says where the video stands: *Saved to library*,
+*Looking up details…*, *Downloading…* (with progress), *On this browser · 720p*, *Download failed*,
+*Unavailable at the source*.
 
-ffmpeg comes from the `ffmpeg-static` package (a dependency of the server; its install step downloads
-the binary for the platform), from `FFMPEG_PATH`, or from the PATH. `/api/health` reports what was
-found under `ffmpeg`.
+**Server** (`server/src/library.ts`): the library is one JSON file (`LIBRARY_DIR/library.json`,
+default `<dir of TIKTOK_PROFILE_DIR>/library`, i.e. `/var/lib/streamanywhere/library` on the VM),
+written atomically, with a `rev` that grows on every change so the pages can poll cheaply
+(`GET /api/library?rev=N` answers `unchanged`). Thumbnails are copied once into `LIBRARY_DIR/thumbs`
+(the platforms' cover URLs expire within days) and served from `/api/library/thumb/:id`.
+`GET /api/library/entries/:id/options` lists the qualities a browser can get right now: YouTube =
+the downloader's options (a server job that merges picture and sound with ffmpeg, then
+`/api/download/jobs/:id/file`); TikTok / Instagram / Facebook / plain files = ready MP4s the browser
+fetches itself, from the cookie-free CDN URL or through the proxy (`?dl=<name>` on a relay makes it
+a file download). A source that says the video is gone marks the entry *unavailable*: the link is
+not a backup of the video.
+
+**Browser** (`client/src/library/`): `db.ts` is the IndexedDB store (library mirror, video records,
+blob parts); a video counts as present only when its record and all its parts are there with the
+recorded size (`verifyVideos`, run on every load), so a store the browser evicted shows *Download
+again*, never a stale "available". `downloads.ts` runs the tasks (progress, cancel, retry, quota
+check before a download, `QuotaExceededError` cleaned up). `capabilities.ts` decides per browser
+which actions are offered (Tesla: no file saving; iPhone: Files app and the share sheet; Chromium:
+destination picker). `sw.js` caches the page and its built assets so the library opens offline.
+
+**Player** (`client/src/library/player.ts`): the feed's `FeedPlayer` on a canvas, unchanged — WebCodecs
+(mp4box demux → `VideoDecoder` / `AudioDecoder` → canvas 2D + Web Audio) or the hidden-`<video>`
+fallback. The only addition to the pipeline is a Blob source in `Mp4Demuxer`: the stored file is read
+with `Blob.slice()` where a URL would be fetched with a `Range` header (the `<video>` fallback gets an
+object URL). The pipeline has no other network dependency, so local videos play with the network off.
+Around it: tap to pause, a seekable bar, previous / next by button, vertical swipe, wheel or arrow
+keys, mute, fullscreen, auto-advance. Qualities whose codec the browser cannot decode
+(`VideoDecoder.isConfigSupported`) are greyed for in-app downloads and still offered as files.
+
+Browser notes: Safari on iPhone may clear site data (the local videos) after 7 days without a visit
+unless the app is on the Home Screen; the page asks for persistent storage where the API exists and
+says in its footer what the browser granted. Removing a library entry deletes the local copies on
+every browser the next time they open the library; deleting a local copy keeps the entry.
 
 ## YouTube (guest mode)
 

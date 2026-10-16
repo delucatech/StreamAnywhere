@@ -50,6 +50,7 @@ export default defineConfig(({ mode }) => {
         main: path.resolve(__dirname, 'index.html'),
         feed: path.resolve(__dirname, 'feed.html'),
         download: path.resolve(__dirname, 'download.html'),
+        library: path.resolve(__dirname, 'library.html'),
       },
     },
   },

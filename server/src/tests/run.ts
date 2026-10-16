@@ -22,6 +22,7 @@ import { extractReels, facebookVideoId, isFacebookUrl, pageFromQuery, pageSummar
 import { accountFromPage, cookieHeaderFor, FacebookSessionError, parseFacebookCookies, slugFromMeRedirect } from '../facebookSession';
 import { Reservoir, expiredSoon } from '../reservoir';
 import { buildOptions, downloadSourceOf, saveName } from '../downloader';
+import { canonicalize, normalizeUrl } from '../library';
 import type { FeedItem } from '../../../shared/types';
 import type { FeedResponse } from '../../../shared/types';
 import { openUpstream } from '../http';
@@ -360,6 +361,28 @@ async function downloaderChecks(): Promise<void> {
   check('the best fit is the top H.264 option at 1080p or below', options.find((o) => o.recommended)?.id === 'v1080p60');
   check('audio only = the AAC track', plans.get('audio')?.spec === '140' && opt('audio')?.ext === 'm4a', opt('audio'));
   check('file name: title cleaned, id when empty', saveName('A / B: "C"?  ', 'x', 'mp4') === 'A B C.mp4' && saveName(undefined, 'abc', 'm4a') === 'video-abc.m4a', saveName('A / B: "C"?  ', 'x', 'mp4'));
+  check('option labels name the shorter side (a vertical Short is 1080p, not 1920p)', buildOptions([{ format_id: '1', url: 'https://x/v', protocol: 'https', vcodec: 'avc1.64001f', acodec: 'none', width: 1080, height: 1920, fps: 30, filesize: 10 }, { format_id: '2', url: 'https://x/a', protocol: 'https', vcodec: 'none', acodec: 'mp4a.40.2', abr: 128, filesize: 2 }]).options[0].label === '1080p');
+
+  console.log('\n== 2c. Video Library (offline)');
+  check('link normalised: scheme added, fragment dropped', normalizeUrl('youtu.be/jNQXAC9IVRw#t=1') === 'https://youtu.be/jNQXAC9IVRw');
+  let badLink = '';
+  try {
+    normalizeUrl('ftp://example.com/x.mp4');
+  } catch (e) {
+    badLink = (e as Error).message;
+  }
+  check('non-http links refused', /http/.test(badLink), badLink);
+  check('youtube canonical form: watch?v=ID from any form', canonicalize('https://youtu.be/jNQXAC9IVRw?t=3').canonicalUrl === 'https://www.youtube.com/watch?v=jNQXAC9IVRw' && canonicalize('https://m.youtube.com/shorts/jNQXAC9IVRw').canonicalUrl === 'https://www.youtube.com/watch?v=jNQXAC9IVRw' && canonicalize('https://youtu.be/jNQXAC9IVRw').sourceId === 'jNQXAC9IVRw');
+  check('tiktok canonical form: by video id; short links keep their url until looked up', canonicalize('https://www.tiktok.com/@tiktok/video/7693184538704416031?lang=en').canonicalUrl === 'https://www.tiktok.com/video/7693184538704416031' && canonicalize('https://vm.tiktok.com/ZMabc123/').sourceId === undefined);
+  check('instagram / facebook canonical forms', canonicalize('https://www.instagram.com/reels/C9abcDEFghi/?igsh=1').canonicalUrl === 'https://www.instagram.com/reel/C9abcDEFghi/' && canonicalize('https://www.facebook.com/reel/1234567890').canonicalUrl === 'https://www.facebook.com/reel/1234567890');
+  check('other links pass through as they are', canonicalize('https://example.com/videos/clip.mp4?x=1').source === 'other' && canonicalize('https://example.com/videos/clip.mp4?x=1').canonicalUrl === 'https://example.com/videos/clip.mp4?x=1');
+  let notVideo = '';
+  try {
+    canonicalize('https://www.youtube.com/@somechannel');
+  } catch (e) {
+    notVideo = (e as Error).message;
+  }
+  check('a youtube channel link is not a video', /not a YouTube video/.test(notVideo), notVideo);
 }
 
 async function reservoirChecks(): Promise<void> {
