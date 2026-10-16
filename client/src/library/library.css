@@ -481,7 +481,7 @@ input {
   font-weight: 600;
 }
 /* always drawn: the car, phones and tablets have no hover to reveal it with */
-.vremove {
+.vmore {
   position: absolute;
   right: 8px;
   top: 8px;
@@ -498,16 +498,16 @@ input {
   transition: background 0.15s ease;
   -webkit-tap-highlight-color: transparent;
 }
-.vremove svg {
-  width: 18px;
-  height: 18px;
+.vmore svg {
+  width: 20px;
+  height: 20px;
 }
-.vremove:hover,
-.vremove:focus-visible {
-  background: rgba(230, 70, 70, 0.92);
+.vmore:hover,
+.vmore:focus-visible {
+  background: rgba(255, 255, 255, 0.28);
   outline: none;
 }
-.vremove:active {
+.vmore:active {
   transform: scale(0.94);
 }
 .vplay {
@@ -802,6 +802,54 @@ body.theater-open .overlay {
   gap: 8px;
   flex-wrap: wrap;
   margin-top: 10px;
+}
+/* the "more" menu */
+.menu {
+  display: flex;
+  flex-direction: column;
+  padding: 8px 0 12px;
+}
+.menu-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 2px;
+  min-height: 48px;
+  padding: 8px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 15px;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.menu-item:last-child {
+  border-bottom: 0;
+}
+.menu-item:hover,
+.menu-item:focus-visible {
+  background: rgba(255, 255, 255, 0.07);
+  outline: none;
+}
+.menu-item:active {
+  background: rgba(255, 255, 255, 0.12);
+}
+.menu-item[disabled] {
+  opacity: 0.45;
+  cursor: default;
+}
+.menu-item small {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.menu-item.danger-text {
+  color: #ffb8c0;
 }
 .sh-local {
   margin: 0;
@@ -1299,13 +1347,17 @@ body.theater-open .overlay {
     width: 56px;
     height: 56px;
   }
-  .vremove {
+  .vmore {
     width: 44px;
     height: 44px;
   }
-  .vremove svg {
-    width: 24px;
-    height: 24px;
+  .vmore svg {
+    width: 26px;
+    height: 26px;
+  }
+  .menu-item {
+    min-height: 56px;
+    font-size: 17px;
   }
 }
 @media (prefers-reduced-motion: reduce) {

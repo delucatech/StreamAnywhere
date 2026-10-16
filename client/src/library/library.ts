@@ -256,7 +256,7 @@ function cardHtml(e: LibraryEntry): string {
     <div class="vthumb">${thumb}
       <span class="vsrc" style="background:${s.tile}" title="${esc(s.name)}">${s.icon}</span>
       ${e.duration ? `<span class="vdur">${fmtDuration(e.duration)}</span>` : ''}
-      <button type="button" class="vremove" data-remove="${esc(e.id)}" aria-label="Remove ${esc(e.title)} from the library" title="Remove from library"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 13h10l1-13"/><path d="M9 7V4h6v3"/></svg></button>
+      <button type="button" class="vmore" data-more="${esc(e.id)}" aria-label="More options for ${esc(e.title)}" title="More"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="2.2" fill="currentColor"/><circle cx="12" cy="12" r="2.2" fill="currentColor"/><circle cx="19" cy="12" r="2.2" fill="currentColor"/></svg></button>
       ${v ? `<button type="button" class="vplay" data-play="${esc(e.id)}" aria-label="Play ${esc(e.title)}"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M8 5.5v13l10-6.5z"/></svg></button>` : ''}
     </div>
     <div class="vbody">
@@ -297,10 +297,10 @@ el.grid.addEventListener('click', (e) => {
     void playEntry(play.dataset.play!);
     return;
   }
-  const remove = (e.target as HTMLElement).closest<HTMLElement>('[data-remove]');
-  if (remove) {
+  const more = (e.target as HTMLElement).closest<HTMLElement>('[data-more]');
+  if (more) {
     e.stopPropagation();
-    openSheet(remove.dataset.remove!, 'remove');
+    openSheet(more.dataset.more!, 'menu');
     return;
   }
   const card = (e.target as HTMLElement).closest<HTMLElement>('.vcard');
@@ -432,20 +432,25 @@ el.pasteBtn.addEventListener('click', async () => {
 });
 
 // ---------------------------------------------------------------- one video (the sheet)
-type SheetView = { kind: 'info' } | { kind: 'options'; mode: 'inapp' | 'device'; loading: boolean; error?: string; resp?: LibraryOptionsResponse; playable?: Map<string, boolean> } | { kind: 'remove'; fromGrid?: boolean };
+type SheetView =
+  | { kind: 'info' }
+  | { kind: 'menu' }
+  | { kind: 'category' }
+  | { kind: 'options'; mode: 'inapp' | 'device'; loading: boolean; error?: string; resp?: LibraryOptionsResponse; playable?: Map<string, boolean> }
+  | { kind: 'remove'; back: 'info' | 'menu' };
 let view: SheetView = { kind: 'info' };
 let titleEditing = false;
 let headRenderedFor = '';
 
 /**
  * `start` 'options' opens straight on the download choices (a video not downloaded here was tapped);
- * 'remove' straight on the removal question (the card's trash button).
+ * 'menu' on the short list of actions (the card's "more" button).
  */
-function openSheet(id: string, start: 'info' | 'options' | 'remove' = 'info'): void {
+function openSheet(id: string, start: 'info' | 'options' | 'menu' = 'info'): void {
   const e = entryById(id);
   if (!e) return;
   selectedId = id;
-  view = start === 'remove' ? { kind: 'remove', fromGrid: true } : { kind: 'info' };
+  view = start === 'menu' ? { kind: 'menu' } : { kind: 'info' };
   titleEditing = false;
   headRenderedFor = '';
   el.sheetOverlay.classList.remove('hidden');
@@ -502,7 +507,45 @@ function renderSheet(): void {
       </div>
       <button type="button" class="sh-close" data-act="close" aria-label="Close">✕</button>`;
   }
-  el.shBody.innerHTML = view.kind === 'options' ? optionsHtml(e, view) : view.kind === 'remove' ? removeHtml(e) : infoHtml(e);
+  el.shBody.innerHTML =
+    view.kind === 'options' ? optionsHtml(e, view) : view.kind === 'remove' ? removeHtml(e) : view.kind === 'menu' ? menuHtml(e) : view.kind === 'category' ? categoryHtml(e) : infoHtml(e);
+}
+
+/** The card's "more" menu: one action per row, the destructive ones last. */
+function menuHtml(e: LibraryEntry): string {
+  const v = local.get(e.id);
+  const running = dl.isRunning(dl.taskFor(e.id));
+  const s = sourceDef(e.source);
+  const cats = e.categoryIds.map((id) => lib.categories.find((c) => c.id === id)?.name).filter(Boolean) as string[];
+  const item = (act: string, label: string, opts: { sub?: string; disabled?: boolean; danger?: boolean } = {}) =>
+    `<button type="button" class="menu-item${opts.danger ? ' danger-text' : ''}" data-act="${act}" ${opts.disabled ? 'disabled' : ''}><span>${label}</span>${opts.sub ? `<small>${esc(opts.sub)}</small>` : ''}</button>`;
+  let html = '<div class="menu">';
+  if (v) {
+    html += item('play', theater.isOpen && theater.current === e.id ? 'Resume' : 'Play', { sub: `On this browser · ${v.label}` });
+    if (canSaveFiles) html += item('export-local', `Save ${esc(v.label)} copy to device`);
+    if (canShareFiles && isIOS) html += item('share-local', 'Share / Save to Photos…');
+  } else {
+    html += item('pick-inapp', 'Download for in-app playback', { disabled: running || !!e.unavailable || offline || !hasIndexedDb, sub: running ? 'Download in progress' : e.unavailable ? 'Unavailable at the source' : offline ? 'Offline' : undefined });
+    if (canSaveFiles) html += item('pick-device', 'Save to device', { disabled: running || !!e.unavailable || offline });
+  }
+  html += item('categories', 'Change category', { sub: cats.length ? cats.join(', ') : 'No category' });
+  html += item('edit-title', 'Edit title');
+  html += `<a class="menu-item" href="${esc(e.url)}" target="_blank" rel="noopener noreferrer"><span>Open on ${esc(s.name)}</span></a>`;
+  html += item('details', 'Details', { sub: 'Downloads, qualities and everything else' });
+  if (v) html += item('delete-local', 'Delete from this browser', { danger: true, sub: 'The link stays in your library' });
+  html += item('remove', 'Remove from library…', { danger: true });
+  html += '</div>';
+  return html;
+}
+
+/** Category picker reached from the "more" menu: the same chips as the details view, on a page of their own. */
+function categoryHtml(e: LibraryEntry): string {
+  let html = '<section class="sh-section"><h3 class="sh-h">Categories</h3>';
+  if (lib.categories.length) html += `<div class="sh-cats">${lib.categories.map((c) => `<button type="button" class="chip${e.categoryIds.includes(c.id) ? ' on' : ''}" data-cat-toggle="${esc(c.id)}" aria-pressed="${e.categoryIds.includes(c.id)}">${esc(c.name)}</button>`).join('')}<button type="button" class="chip add" data-act="new-cat">+ New category</button></div>`;
+  else html += '<p class="sh-note">No categories yet. <button type="button" class="link" data-act="new-cat">Create one</button> to group your videos.</p>';
+  html += '<p class="sh-note">Tap a category to add or remove this video; it is saved right away.</p>';
+  html += '<div class="sh-actions"><button type="button" class="btn primary" data-act="menu">Done</button></div></section>';
+  return html;
 }
 
 function taskHtml(e: LibraryEntry): string {
@@ -759,9 +802,16 @@ el.sheet.addEventListener('click', (ev) => {
     case 'close':
       return closeSheet();
     case 'back':
-      // "Keep it" on a question asked from the grid closes the sheet instead of showing details nobody asked for
-      if (view.kind === 'remove' && view.fromGrid) return closeSheet();
+      view = { kind: view.kind === 'remove' ? view.back : 'info' };
+      return renderSheet();
+    case 'menu':
+      view = { kind: 'menu' };
+      return renderSheet();
+    case 'details':
       view = { kind: 'info' };
+      return renderSheet();
+    case 'categories':
+      view = { kind: 'category' };
       return renderSheet();
     case 'edit-title':
       return void startTitleEdit(e);
@@ -818,7 +868,7 @@ el.sheet.addEventListener('click', (ev) => {
     case 'new-cat':
       return openCats(true);
     case 'remove':
-      view = { kind: 'remove' };
+      view = { kind: 'remove', back: view.kind === 'menu' ? 'menu' : 'info' };
       return renderSheet();
     case 'remove-confirm':
       return void removeEntry(e);
