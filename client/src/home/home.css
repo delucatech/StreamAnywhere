@@ -6,6 +6,8 @@
   --safe-b: env(safe-area-inset-bottom, 0px);
   /* iPad-like icon: a rounded square (the corner radius is ~22% of the side) with the label underneath */
   --icon: clamp(84px, 14vmin, 132px);
+  /* a grid cell: the icon plus room for the label to overhang it */
+  --cell: calc(var(--icon) + 40px);
   --radius: 22.37%;
   font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   color-scheme: dark;
@@ -93,7 +95,7 @@ body {
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(calc(var(--icon) + 40px), max-content));
+  grid-template-columns: repeat(auto-fit, minmax(var(--cell), max-content));
   justify-content: center;
   align-content: start;
   gap: clamp(18px, 4vmin, 44px) clamp(14px, 4vmin, 40px);
@@ -101,7 +103,7 @@ body {
   overflow-y: auto;
 }
 .app {
-  width: calc(var(--icon) + 40px);
+  width: var(--cell);
   display: grid;
   justify-items: center;
   gap: 9px;
@@ -277,12 +279,30 @@ body {
   }
 }
 
+/* phones: iPhone-sized icons, four to a row on a 375 px+ screen (three on narrower ones) */
 @media (max-width: 480px) {
   :root {
-    --icon: clamp(64px, 19vw, 84px);
+    --icon: clamp(54px, 15vw, 64px);
+    --cell: calc(var(--icon) + 18px);
   }
   .grid {
-    padding-top: 24px;
+    gap: 18px 10px;
+    padding: 24px 0 16px;
+  }
+  .app {
+    gap: 6px;
+    padding: 4px 0;
+  }
+  .app .label {
+    font-size: 11px;
+  }
+  .app .badge {
+    min-width: 18px;
+    height: 18px;
+    line-height: 18px;
+    font-size: 11px;
+    padding: 0 5px;
+    border-radius: 9px;
   }
 }
 @media (prefers-reduced-motion: reduce) {
