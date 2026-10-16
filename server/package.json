@@ -3,7 +3,7 @@
   "version": "0.5.0-alpha.1",
   "private": true,
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "node scripts/dev.js",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server/src/index.js",
     "typecheck": "tsc --noEmit -p tsconfig.json",
