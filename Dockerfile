@@ -11,8 +11,9 @@ RUN npm run build
 
 FROM node:20-alpine
 WORKDIR /app
-# yt-dlp fallback resolver (optional but cheap)
-RUN apk add --no-cache python3 py3-pip && pip3 install --break-system-packages --no-cache-dir yt-dlp
+# yt-dlp fallback resolver (optional but cheap); ffmpeg merges the Video Downloader's files (the
+# ffmpeg-static package's binary needs glibc, so Alpine's own ffmpeg is used)
+RUN apk add --no-cache python3 py3-pip ffmpeg && pip3 install --break-system-packages --no-cache-dir yt-dlp
 COPY package.json package-lock.json ./
 COPY client/package.json client/
 COPY server/package.json server/

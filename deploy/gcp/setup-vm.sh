@@ -108,6 +108,12 @@ fi
 cd "$APP_DIR"
 echo "deploying $(git rev-parse --short HEAD): $(git log -1 --format=%s | cut -c1-80)"
 npm ci --no-audit --no-fund --loglevel=error
+# The Video Downloader merges YouTube's video and audio files with ffmpeg: the ffmpeg-static package
+# downloads a binary during npm ci; Debian's ffmpeg is the fallback when that download failed.
+if [ ! -x "$APP_DIR/node_modules/ffmpeg-static/ffmpeg" ] && ! command -v ffmpeg >/dev/null; then
+  apt-get install -y -qq ffmpeg >/dev/null || echo "WARN: ffmpeg install failed (the Video Downloader cannot merge video and audio)"
+fi
+echo "ffmpeg: $("$APP_DIR/node_modules/ffmpeg-static/ffmpeg" -version 2>/dev/null | head -1 || ffmpeg -version 2>/dev/null | head -1 || echo missing)"
 npm run build 2>&1 | tail -5
 chown -R "$APP_USER:$APP_USER" "$APP_DIR" /var/lib/streamanywhere
 
@@ -179,7 +185,7 @@ systemctl reload caddy || systemctl restart caddy
 sleep 3
 echo "== health: $(curl -fsS http://127.0.0.1:8787/api/health | head -c 120)"
 echo
-echo "Done. Open https://$PUBLIC_HOST/ (the launcher: TikTok, YouTube, Lab)"
+echo "Done. Open https://$PUBLIC_HOST/ (the launcher: TikTok, YouTube, Instagram, Facebook, Downloader, Lab)"
 echo "  - TikTok: 'Sign in' -> 'Sign in with QR code' and scan it with the TikTok app."
 echo "  - YouTube: guest mode (Shorts by hashtag + search); sign-in comes later."
 echo "  - Logs: journalctl -u streamanywhere -f"

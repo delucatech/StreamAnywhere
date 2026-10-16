@@ -127,6 +127,8 @@ export interface HealthResponse {
   ytdlp: { available: boolean; version?: string; command?: string; error?: string };
   /** The warm yt-dlp Python processes (see server/scripts/ytdlp-daemon.py) */
   ytdlpDaemon?: { enabled: boolean; python?: string; running: number; busy: number; version?: string };
+  /** Merges YouTube's separate video and audio files (the Video Downloader) */
+  ffmpeg?: { available: boolean; path?: string; version?: string; error?: string };
   resolver: string;
   proxyAllowedHosts: string[];
   uptimeSec: number;
@@ -520,4 +522,86 @@ export interface SessionStatus {
   /** Something the user should know about the current attempt (e.g. "started over: TikTok's QR session
    *  expired while waiting for the e-mail code; the verification is re-used") */
   notice?: string;
+}
+
+// ---------------------------------------------------------------- Video Downloader (download.html)
+
+/** Where a pasted link points; only YouTube is served so far (the server says which are on). */
+export type DownloadSource = 'youtube' | 'tiktok' | 'instagram' | 'facebook' | 'other';
+
+export interface DownloadProbeRequest {
+  url: string;
+}
+
+/** One thing the user can save: a video at a given quality (merged with the best audio), or the audio alone. */
+export interface DownloadOption {
+  id: string;
+  kind: 'video' | 'audio';
+  /** "1080p", "720p60", "Audio only" */
+  label: string;
+  /** "MP4 · H.264 + AAC", "M4A · AAC 128 kbps" */
+  detail: string;
+  width?: number;
+  height?: number;
+  fps?: number;
+  vcodec?: string;
+  acodec?: string;
+  /** Container of the saved file */
+  ext: string;
+  /** Sum of the parts' sizes when yt-dlp knows them (an estimate when `sizeIsEstimate`) */
+  sizeBytes?: number;
+  sizeIsEstimate?: boolean;
+  /** The option the page selects first */
+  recommended?: boolean;
+}
+
+export interface DownloadProbeResponse {
+  /** Handle for /api/download/start (the server keeps the lookup for a while) */
+  probeId: string;
+  source: DownloadSource;
+  id: string;
+  url: string;
+  title?: string;
+  author?: string;
+  duration?: number;
+  cover?: string;
+  options: DownloadOption[];
+  warnings: string[];
+  elapsedMs: number;
+}
+
+export interface DownloadStartRequest {
+  probeId: string;
+  optionId: string;
+}
+
+export type DownloadJobState = 'queued' | 'downloading' | 'merging' | 'done' | 'error' | 'cancelled';
+
+export interface DownloadProgress {
+  /** 0-100 of the whole job when the total is known */
+  percent?: number;
+  downloadedBytes: number;
+  totalBytes?: number;
+  speedBps?: number;
+  etaSec?: number;
+  /** "video", "audio", "video + audio" — what is being fetched right now */
+  part?: string;
+}
+
+export interface DownloadJob {
+  jobId: string;
+  state: DownloadJobState;
+  source: DownloadSource;
+  title?: string;
+  option: DownloadOption;
+  progress: DownloadProgress;
+  /** Set when done: the name the browser saves the file as, its size, and where to fetch it */
+  fileName?: string;
+  sizeBytes?: number;
+  fileUrl?: string;
+  error?: string;
+  /** How many jobs are ahead of this one while queued */
+  queuePosition?: number;
+  startedAt: number;
+  elapsedMs: number;
 }

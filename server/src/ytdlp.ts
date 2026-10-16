@@ -93,6 +93,12 @@ export async function detectYtDlp(): Promise<{ available: boolean; version?: str
   return { available: false, error: errors.join('; ') };
 }
 
+/** The yt-dlp command line (for a download, which streams its progress; see downloader.ts), once detected. */
+export async function ytdlpCommand(): Promise<{ cmd: string; args: string[] } | undefined> {
+  await detectYtDlp();
+  return cached ? { cmd: cached.c.cmd, args: cached.c.args } : undefined;
+}
+
 /** The number of yt-dlp processes running at once (a Python start costs ~1 s and ~60 MB; the VM has 1 GB). */
 const MAX_PARALLEL = 2;
 let running = 0;

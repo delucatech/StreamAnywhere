@@ -281,11 +281,39 @@ Docker) have no Chrome: the feed page then offers Explore only and says so.
 ## Launcher and platforms
 
 **`/`** (`home.html`) is an iPad-style home screen: one icon per platform (TikTok, YouTube, Instagram, Facebook) plus the
-lab player, a dock, and a zoom-from-icon animation into `feed.html?platform=…`; the feed's Home
+Video Downloader and the lab player, a dock, and a zoom-from-icon animation into `feed.html?platform=…`; the feed's Home
 button (top left) zooms back. A green badge on an icon means that platform is signed in on the
 server. The page has a web-app manifest, so it can be added to a phone's or tablet's home screen
 and runs full screen. Platforms are declared once in `client/src/platforms.ts` (name, colours, icon,
 categories); the feed page reads `?platform=` and labels, colours and routes itself accordingly.
+
+## Video Downloader
+
+The **Downloader** icon on the home screen opens `download.html`: paste a video link, see the
+qualities on offer, pick one, and the file is saved on the device with the video's title as its
+name. YouTube is the first source; TikTok, Instagram and Facebook are listed as "soon" (the server's
+`DOWNLOAD_SOURCES` table in `server/src/downloader.ts` is where a source is switched on).
+
+How it works (`server/src/downloader.ts`):
+
+- `POST /api/download/probe` runs one yt-dlp extraction (the warm daemon) and folds the formats into
+  one option per resolution (and per frame rate above 30): the best codec at that height (H.264 over
+  VP9 over AV1, since H.264 plays everywhere) merged with the best AAC track, plus "audio only". Sizes
+  are the parts' sizes added up (`~` when yt-dlp only estimates one). The extraction is kept for 20
+  minutes so the download does not look the video up again.
+- `POST /api/download/start` begins a job: the yt-dlp command line downloads the chosen parts (in
+  bounded Range chunks, so googlevideo serves them at full speed) and merges them with ffmpeg into an
+  MP4 under the server's temp directory (`DOWNLOAD_DIR`, default `<tmp>/streamanywhere-downloads`).
+  Two jobs run at once (`DOWNLOAD_PARALLEL`); the page polls `GET /api/download/jobs/:id` every second
+  for the progress (bytes, speed, time left, which part).
+- `GET /api/download/jobs/:id/file` serves the finished file (`Content-Disposition: attachment`); the
+  page fetches it as a browser download as soon as the job is done. Files are deleted 5 minutes after
+  they were fetched (an hour otherwise), and the directory is emptied at startup.
+- Files over `DOWNLOAD_MAX_BYTES` (default 2 GB) are refused: the VM's disk is small.
+
+ffmpeg comes from the `ffmpeg-static` package (a dependency of the server; its install step downloads
+the binary for the platform), from `FFMPEG_PATH`, or from the PATH. `/api/health` reports what was
+found under `ffmpeg`.
 
 ## YouTube (guest mode)
 

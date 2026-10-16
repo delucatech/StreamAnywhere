@@ -8,7 +8,7 @@
  */
 import type { Platform, SessionStatus } from '../../../shared/types';
 import { api } from '../api';
-import { PLATFORMS, rememberApp, type PlatformDef } from '../platforms';
+import { PLATFORMS, rememberApp, type PlatformDef, type ToolApp } from '../platforms';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const e = document.getElementById(id);
@@ -18,7 +18,7 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
 const el = { screen: $('screen'), grid: $('grid'), dock: $('dock'), zoom: $('zoom'), clock: $('clock') };
 
 interface App {
-  id: Platform | 'lab';
+  id: Platform | ToolApp;
   name: string;
   url: string;
   tile: string;
@@ -33,7 +33,15 @@ const LAB: App = {
   tile: 'linear-gradient(145deg, #3b4a7a 0%, #16203f 100%)',
   icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" d="M9 3h6v2h-1v5.3l5.2 8.6A2 2 0 0 1 17.5 22h-11a2 2 0 0 1-1.7-3.1L10 10.3V5H9z"/><path fill="#8fd3ff" d="M8.6 16h6.8l2.1 3.5H6.5z"/></svg>',
 };
-const APPS: App[] = [...PLATFORMS.map((p) => ({ id: p.id, name: p.short, url: p.url, tile: p.tile, icon: p.icon, platform: p })), LAB];
+/** Video Downloader: a link in, a file out (download.html) */
+const DOWNLOADER: App = {
+  id: 'downloader',
+  name: 'Downloader',
+  url: 'download.html',
+  tile: 'linear-gradient(145deg, #2ee6a6 0%, #0b8f6a 100%)',
+  icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" d="M12 2.5a1.2 1.2 0 0 1 1.2 1.2v8.3l2.6-2.6a1.2 1.2 0 0 1 1.7 1.7l-4.65 4.65a1.2 1.2 0 0 1-1.7 0L6.5 11.1a1.2 1.2 0 1 1 1.7-1.7l2.6 2.6V3.7A1.2 1.2 0 0 1 12 2.5z"/><path fill="#fff" opacity=".9" d="M4.5 14.3a1.2 1.2 0 0 1 1.2 1.2v2.9h12.6v-2.9a1.2 1.2 0 1 1 2.4 0v4.1a1.2 1.2 0 0 1-1.2 1.2H4.5a1.2 1.2 0 0 1-1.2-1.2v-4.1a1.2 1.2 0 0 1 1.2-1.2z"/></svg>',
+};
+const APPS: App[] = [...PLATFORMS.map((p) => ({ id: p.id, name: p.short, url: p.url, tile: p.tile, icon: p.icon, platform: p })), DOWNLOADER, LAB];
 
 const badges = new Map<string, HTMLElement[]>();
 

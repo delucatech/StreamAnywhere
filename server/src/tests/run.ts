@@ -21,6 +21,7 @@ import { FACEBOOK_CATEGORIES, INSTAGRAM_CATEGORIES } from '../../../shared/types
 import { extractReels, facebookVideoId, isFacebookUrl, pageFromQuery, pageSummary, planExploreFill as planFacebookFill, playable, reelToFeedItem, slugFromProfileUrl } from '../facebook';
 import { accountFromPage, cookieHeaderFor, FacebookSessionError, parseFacebookCookies, slugFromMeRedirect } from '../facebookSession';
 import { Reservoir, expiredSoon } from '../reservoir';
+import { buildOptions, downloadSourceOf, saveName } from '../downloader';
 import type { FeedItem } from '../../../shared/types';
 import type { FeedResponse } from '../../../shared/types';
 import { openUpstream } from '../http';
@@ -332,6 +333,35 @@ const fakeItem = (id: string, expiresAt?: number): FeedItem => ({
   formats: [{ id: 'f', label: 'f', codec: 'h264', requiresCookies: true, directUrl: 'https://www.tiktok.com/aweme/v1/play/?x=' + id, expiresAt }],
 });
 
+async function downloaderChecks(): Promise<void> {
+  console.log('\n== 2b. Video Downloader (offline)');
+  check('source of a link', downloadSourceOf('https://youtu.be/jNQXAC9IVRw') === 'youtube' && downloadSourceOf('https://www.tiktok.com/@a/video/1') === 'tiktok' && downloadSourceOf('https://example.com/v') === 'other');
+  // what yt-dlp lists for a YouTube video: video-only H.264 / VP9 / AV1 at several heights, two AAC tracks, an Opus one, a muxed 360p
+  const yt = [
+    { format_id: '140', ext: 'm4a', vcodec: 'none', acodec: 'mp4a.40.2', abr: 129, filesize: 1000, protocol: 'https', url: 'https://a/140', format_note: 'medium' },
+    { format_id: '139', ext: 'm4a', vcodec: 'none', acodec: 'mp4a.40.5', abr: 48, filesize: 400, protocol: 'https', url: 'https://a/139' },
+    { format_id: '251', ext: 'webm', vcodec: 'none', acodec: 'opus', abr: 140, filesize: 1100, protocol: 'https', url: 'https://a/251' },
+    { format_id: '136', ext: 'mp4', vcodec: 'avc1.64001f', acodec: 'none', height: 720, width: 1280, fps: 30, tbr: 1500, filesize: 9000, protocol: 'https', url: 'https://a/136' },
+    { format_id: '247', ext: 'webm', vcodec: 'vp9', acodec: 'none', height: 720, width: 1280, fps: 30, tbr: 1200, filesize: 7000, protocol: 'https', url: 'https://a/247' },
+    { format_id: '137', ext: 'mp4', vcodec: 'avc1.640028', acodec: 'none', height: 1080, width: 1920, fps: 30, tbr: 3000, filesize_approx: 20000, protocol: 'https', url: 'https://a/137' },
+    { format_id: '299', ext: 'mp4', vcodec: 'avc1.64002a', acodec: 'none', height: 1080, width: 1920, fps: 60, tbr: 4500, filesize: 30000, protocol: 'https', url: 'https://a/299' },
+    { format_id: '313', ext: 'webm', vcodec: 'vp9', acodec: 'none', height: 2160, width: 3840, fps: 30, tbr: 12000, filesize: 90000, protocol: 'https', url: 'https://a/313' },
+    { format_id: '401', ext: 'mp4', vcodec: 'av01.0.12M.08', acodec: 'none', height: 2160, width: 3840, fps: 30, tbr: 11000, filesize: 80000, protocol: 'https', url: 'https://a/401' },
+    { format_id: 'sb0', ext: 'mhtml', vcodec: 'none', acodec: 'none', height: 90, protocol: 'mhtml', url: 'https://a/sb', format_note: 'storyboard' },
+    { format_id: '18', ext: 'mp4', vcodec: 'avc1.42001E', acodec: 'mp4a.40.2', height: 360, width: 640, fps: 30, tbr: 500, filesize: 4000, protocol: 'https', url: 'https://a/18' },
+  ];
+  const { options, plans } = buildOptions(yt);
+  const opt = (id: string) => options.find((o) => o.id === id);
+  check('one option per height (60 fps apart), highest first, audio last', options.map((o) => o.id).join(' ') === 'v2160 v1080p60 v1080 v720 v360 audio', options.map((o) => o.id));
+  check('H.264 preferred over VP9 at the same height', plans.get('v720')?.spec === '136+140' && opt('v720')?.detail === 'MP4 · H.264 + AAC', plans.get('v720'));
+  check('VP9 preferred over AV1 where there is no H.264', plans.get('v2160')?.spec === '313+140' && /VP9/.test(opt('v2160')?.detail || ''), plans.get('v2160'));
+  check('sizes add video + audio, approximate when either is', opt('v720')?.sizeBytes === 10000 && opt('v720')?.sizeIsEstimate === false && opt('v1080')?.sizeIsEstimate === true, [opt('v720'), opt('v1080')]);
+  check('a muxed format is not merged', plans.get('v360')?.spec === '18' && plans.get('v360')?.merge === false, plans.get('v360'));
+  check('the best fit is the top H.264 option at 1080p or below', options.find((o) => o.recommended)?.id === 'v1080p60');
+  check('audio only = the AAC track', plans.get('audio')?.spec === '140' && opt('audio')?.ext === 'm4a', opt('audio'));
+  check('file name: title cleaned, id when empty', saveName('A / B: "C"?  ', 'x', 'mp4') === 'A B C.mp4' && saveName(undefined, 'abc', 'm4a') === 'video-abc.m4a', saveName('A / B: "C"?  ', 'x', 'mp4'));
+}
+
 async function reservoirChecks(): Promise<void> {
   let now = 1_000_000;
   const clock = () => now;
@@ -577,6 +607,7 @@ async function ytdlpChecks(): Promise<void> {
 
 (async () => {
   await offline();
+  await downloaderChecks();
   if (skipNetwork) console.log('\n(network checks skipped: SKIP_NETWORK=1)');
   else {
     await network();

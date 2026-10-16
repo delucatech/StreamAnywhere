@@ -1,4 +1,4 @@
-import type { ConversationResponse, FeedProgress, FeedRequest, FeedResponse, FollowRequest, FollowResponse, HealthResponse, InboxResponse, LoginMode, Platform, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SendMessageResponse, ServerProbe, SessionInputRequest, SessionStatus } from '../../shared/types';
+import type { ConversationResponse, DownloadJob, DownloadProbeResponse, DownloadSource, FeedProgress, FeedRequest, FeedResponse, FollowRequest, FollowResponse, HealthResponse, InboxResponse, LoginMode, Platform, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SendMessageResponse, ServerProbe, SessionInputRequest, SessionStatus } from '../../shared/types';
 
 /**
  * API base URL. Empty = same origin (dev server proxy or SERVE_CLIENT deployments). When the
@@ -121,6 +121,23 @@ export const api = {
     if (!res.ok) throw new ApiError((json as { error?: string })?.error || `inbox ${res.status}`, res.status, json);
     return json as InboxResponse;
   },
+  // Video Downloader (download.html)
+  downloadSources: async (): Promise<{ sources: { id: DownloadSource; name: string; enabled: boolean }[]; maxBytes: number; ffmpeg: boolean; ytdlp: boolean }> => {
+    const res = await fetch(apiUrl('/api/download/sources'), { mode: 'cors', credentials: 'same-origin' });
+    toLoginOn401(res);
+    if (!res.ok) throw new ApiError(`sources ${res.status}`, res.status);
+    return res.json();
+  },
+  downloadProbe: (url: string): Promise<DownloadProbeResponse> => post('/api/download/probe', { url }, 60_000),
+  downloadStart: (probeId: string, optionId: string): Promise<DownloadJob> => post('/api/download/start', { probeId, optionId }, 30_000),
+  downloadJob: async (jobId: string): Promise<DownloadJob> => {
+    const res = await fetch(apiUrl(`/api/download/jobs/${jobId}`), { mode: 'cors', credentials: 'same-origin', cache: 'no-store' });
+    toLoginOn401(res);
+    const json = await res.json().catch(() => undefined);
+    if (!res.ok) throw new ApiError((json as { error?: string })?.error || `job ${res.status}`, res.status, json);
+    return json as DownloadJob;
+  },
+  downloadCancel: (jobId: string): Promise<DownloadJob> => post(`/api/download/jobs/${jobId}/cancel`, {}),
   inboxOpen: (id: string): Promise<ConversationResponse> => post('/api/inbox/open', { id }),
   inboxSend: (req: SendMessageRequest): Promise<SendMessageResponse> => post('/api/inbox/send', req),
 };

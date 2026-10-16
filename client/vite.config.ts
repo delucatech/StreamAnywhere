@@ -49,6 +49,7 @@ export default defineConfig(({ mode }) => {
         home: path.resolve(__dirname, 'home.html'),
         main: path.resolve(__dirname, 'index.html'),
         feed: path.resolve(__dirname, 'feed.html'),
+        download: path.resolve(__dirname, 'download.html'),
       },
     },
   },

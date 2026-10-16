@@ -4,11 +4,13 @@ import rateLimit from '@fastify/rate-limit';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { EXPLORE_CATEGORIES, YOUTUBE_CATEGORIES, platformOf } from '../../shared/types';
-import type { ConversationRequest, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ProbeRequest, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SendMessageRequest, SessionActionRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
+import type { ConversationRequest, DownloadProbeRequest, DownloadStartRequest, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ProbeRequest, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SendMessageRequest, SessionActionRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
 import { registerAuth } from './auth';
 import { config, findUp } from './config';
 import { registerProxyRoutes } from './proxy';
 import { isTikTokUrl, probeUrl, resolveTikTokNative, TikTokError } from './tiktok';
+import { detectFfmpeg } from './ffmpeg';
+import { cancelJob, DOWNLOAD_SOURCES, DownloadError, downloaderStats, getJob, jobFile, jobServed, MAX_BYTES, probeDownload, setDownloaderLogger, shutdownDownloader, startDownload } from './downloader';
 import { daemonStatus, detectYtDlp, resolveWithYtDlp, setYtDlpLogger, shutdownYtDlp, warmYtDlp } from './ytdlp';
 import { logStream, recentLog } from './logbuf';
 import { defaultExpiry, mediaCount, registerMedia } from './mediaStore';
@@ -267,12 +269,14 @@ export async function buildServer() {
   setInstagramLogger((m) => app.log.info({ what: 'instagram' }, m));
   setFacebookSessionLogger((m) => app.log.info({ what: 'facebook-session' }, m));
   setFacebookLogger((m) => app.log.info({ what: 'facebook' }, m));
+  setDownloaderLogger((m) => app.log.info({ what: 'downloader' }, m));
 
   app.get('/api/health', async (): Promise<HealthResponse> => ({
     ok: true,
     node: process.version,
     ytdlp: await detectYtDlp(),
     ytdlpDaemon: daemonStatus(),
+    ffmpeg: await detectFfmpeg(),
     resolver: config.resolver,
     proxyAllowedHosts: config.proxyAllowedHosts,
     uptimeSec: Math.round(process.uptime()),
@@ -667,7 +671,56 @@ export async function buildServer() {
 
   registerProxyRoutes(app);
 
-  app.get('/api/stats', async () => ({ mediaRecords: mediaCount(), exploreStock: exploreStock(), youtubeStock: youtubeStock(), youtubeForYouStock: youtubeForYou?.stats, instagramStock: instagramStock(), instagramForYouStock: instagramForYou?.stats, instagram: instagramStats(), facebookStock: facebookStock(), facebookForYouStock: facebookForYou?.stats, facebook: facebookStats(), forYouStock: forYouStock(), workPage: workState(), uptimeSec: Math.round(process.uptime()) }));
+  // ---- Video Downloader (download.html): look a link up, start a download, poll it, fetch the file
+  const downloadError = (reply: { code(n: number): { send(b: unknown): unknown } }, e: unknown): unknown => {
+    const err = e as DownloadError;
+    return reply.code(err instanceof DownloadError ? err.status : 502).send({ error: err.message || String(e) });
+  };
+  app.get('/api/download/sources', async () => ({ sources: DOWNLOAD_SOURCES, maxBytes: MAX_BYTES, ffmpeg: (await detectFfmpeg()).available, ytdlp: (await detectYtDlp()).available }));
+  app.post<{ Body: DownloadProbeRequest }>('/api/download/probe', resolveLimit, async (req, reply) => {
+    const url = String(req.body?.url || '').trim();
+    if (!/^https?:\/\//i.test(url)) return reply.code(400).send({ error: 'Paste a link that starts with https://' });
+    try {
+      return await probeDownload(url);
+    } catch (e) {
+      req.log.warn({ url: url.slice(0, 120), err: (e as Error).message }, 'download probe failed');
+      return downloadError(reply, e);
+    }
+  });
+  app.post<{ Body: DownloadStartRequest }>('/api/download/start', resolveLimit, async (req, reply) => {
+    try {
+      return await startDownload(String(req.body?.probeId || ''), String(req.body?.optionId || ''));
+    } catch (e) {
+      req.log.warn({ err: (e as Error).message }, 'download start failed');
+      return downloadError(reply, e);
+    }
+  });
+  app.get<{ Params: { id: string } }>('/api/download/jobs/:id', async (req, reply) => {
+    const job = getJob(req.params.id);
+    return job || reply.code(404).send({ error: 'No such download (the server may have restarted)' });
+  });
+  app.post<{ Params: { id: string } }>('/api/download/jobs/:id/cancel', async (req, reply) => {
+    const job = cancelJob(req.params.id);
+    return job || reply.code(404).send({ error: 'No such download' });
+  });
+  app.get<{ Params: { id: string } }>('/api/download/jobs/:id/file', async (req, reply) => {
+    const f = jobFile(req.params.id);
+    if (!f) return reply.code(404).send({ error: 'That file is not here any more: download it again' });
+    const ascii = f.fileName.replace(/[^ -~]/g, '_').replace(/"/g, "'");
+    const stream = fs.createReadStream(f.path);
+    stream.on('end', () => jobServed(req.params.id));
+    return reply
+      .code(200)
+      .headers({
+        'content-type': f.mime,
+        'content-length': String(f.sizeBytes),
+        'content-disposition': `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(f.fileName)}`,
+        'cache-control': 'no-store',
+      })
+      .send(stream);
+  });
+
+  app.get('/api/stats', async () => ({ downloads: downloaderStats(), mediaRecords: mediaCount(), exploreStock: exploreStock(), youtubeStock: youtubeStock(), youtubeForYouStock: youtubeForYou?.stats, instagramStock: instagramStock(), instagramForYouStock: instagramForYou?.stats, instagram: instagramStats(), facebookStock: facebookStock(), facebookForYouStock: facebookForYou?.stats, facebook: facebookStats(), forYouStock: forYouStock(), workPage: workState(), uptimeSec: Math.round(process.uptime()) }));
 
   if (config.serveClient) {
     const dist = findUp(path.join('client', 'dist')) || findUp(path.join('client', 'dist'), process.cwd()) || path.resolve('client', 'dist');
@@ -700,6 +753,7 @@ if (require.main === module) {
         process.once(sig, () => {
           app.log.info({ sig }, 'shutting down');
           shutdownYtDlp();
+          shutdownDownloader();
           void Promise.race([Promise.all([shutdownBrowsers(), shutdownYouTubeSession(), shutdownInstagram(), shutdownInstagramSession(), shutdownFacebookSession()]), new Promise((r) => setTimeout(r, 8000))]).finally(() => process.exit(0));
         });
       }

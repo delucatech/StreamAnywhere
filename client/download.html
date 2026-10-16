@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b1020" />
+    <title>StreamAnywhere – Video Downloader</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="stylesheet" href="/src/download/download.css" />
+  </head>
+  <body class="dl-body">
+    <!-- Opened from the home screen: the launcher's zoom splash continues here (feed.html does the same). -->
+    <div id="splash" class="splash hidden" aria-hidden="true">
+      <div id="splashIcon" class="splash-icon"></div>
+    </div>
+    <script>
+      try {
+        var launch = JSON.parse(sessionStorage.getItem('streamanywhere.launch') || 'null');
+        sessionStorage.removeItem('streamanywhere.launch');
+        if (launch && launch.tile && launch.icon) {
+          var splash = document.getElementById('splash');
+          splash.style.background = launch.tile;
+          document.getElementById('splashIcon').innerHTML = launch.icon;
+          splash.classList.remove('hidden');
+        }
+      } catch (e) {
+        /* no splash */
+      }
+    </script>
+
+    <div class="wallpaper" aria-hidden="true"></div>
+
+    <div class="page" id="page">
+      <header class="topbar">
+        <a id="homeLink" class="top-icon" href="home.html" aria-label="Home" title="Home">
+          <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path fill="currentColor" d="M12 3.2 2.8 11.4l1.3 1.5L5.5 11.7V20a1 1 0 0 0 1 1h4v-6h3v6h4a1 1 0 0 0 1-1v-8.3l1.4 1.2 1.3-1.5z" /></svg>
+        </a>
+        <h1 class="title"><span class="title-icon" id="titleIcon" aria-hidden="true"></span>Video Downloader</h1>
+        <span class="top-spacer"></span>
+      </header>
+
+      <main class="card">
+        <div class="sources" id="sources" role="radiogroup" aria-label="Source"></div>
+
+        <form class="urlrow" id="urlForm" autocomplete="off">
+          <input id="url" class="url" type="url" inputmode="url" placeholder="Paste a YouTube link" spellcheck="false" required />
+          <button type="button" id="pasteBtn" class="btn ghost" title="Paste from the clipboard">Paste</button>
+          <button type="submit" id="lookupBtn" class="btn primary">Get video</button>
+        </form>
+        <p class="hint" id="hint">Works with watch, Shorts and youtu.be links. The qualities on offer appear here; pick one and the video is fetched, merged with its sound and saved on this device.</p>
+
+        <p class="status hidden" id="status" role="status"></p>
+
+        <section class="video hidden" id="video">
+          <img id="cover" class="cover" alt="" />
+          <div class="meta">
+            <h2 id="vTitle" class="vtitle"></h2>
+            <p id="vSub" class="vsub"></p>
+          </div>
+        </section>
+
+        <section class="options hidden" id="optionsWrap">
+          <h3 class="h">Quality</h3>
+          <div class="option-list" id="options" role="radiogroup" aria-label="Quality"></div>
+          <div class="actions">
+            <button type="button" id="downloadBtn" class="btn primary big">Download</button>
+          </div>
+        </section>
+
+        <section class="job hidden" id="job">
+          <div class="bar"><i id="barFill"></i></div>
+          <p class="job-text" id="jobText"></p>
+          <div class="actions">
+            <a id="saveLink" class="btn primary big hidden" download>Save file</a>
+            <button type="button" id="cancelBtn" class="btn danger hidden">Cancel</button>
+            <button type="button" id="againBtn" class="btn ghost hidden">Download another</button>
+          </div>
+        </section>
+      </main>
+
+      <p class="foot" id="foot"></p>
+    </div>
+
+    <script type="module" src="/src/download/download.ts"></script>
+  </body>
+</html>
