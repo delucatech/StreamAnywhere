@@ -256,6 +256,7 @@ function cardHtml(e: LibraryEntry): string {
     <div class="vthumb">${thumb}
       <span class="vsrc" style="background:${s.tile}" title="${esc(s.name)}">${s.icon}</span>
       ${e.duration ? `<span class="vdur">${fmtDuration(e.duration)}</span>` : ''}
+      <button type="button" class="vremove" data-remove="${esc(e.id)}" aria-label="Remove ${esc(e.title)} from the library" title="Remove from library"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 13h10l1-13"/><path d="M9 7V4h6v3"/></svg></button>
       ${v ? `<button type="button" class="vplay" data-play="${esc(e.id)}" aria-label="Play ${esc(e.title)}"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M8 5.5v13l10-6.5z"/></svg></button>` : ''}
     </div>
     <div class="vbody">
@@ -294,6 +295,12 @@ el.grid.addEventListener('click', (e) => {
   if (play) {
     e.stopPropagation();
     void playEntry(play.dataset.play!);
+    return;
+  }
+  const remove = (e.target as HTMLElement).closest<HTMLElement>('[data-remove]');
+  if (remove) {
+    e.stopPropagation();
+    openSheet(remove.dataset.remove!, 'remove');
     return;
   }
   const card = (e.target as HTMLElement).closest<HTMLElement>('.vcard');
@@ -425,17 +432,20 @@ el.pasteBtn.addEventListener('click', async () => {
 });
 
 // ---------------------------------------------------------------- one video (the sheet)
-type SheetView = { kind: 'info' } | { kind: 'options'; mode: 'inapp' | 'device'; loading: boolean; error?: string; resp?: LibraryOptionsResponse; playable?: Map<string, boolean> } | { kind: 'remove' };
+type SheetView = { kind: 'info' } | { kind: 'options'; mode: 'inapp' | 'device'; loading: boolean; error?: string; resp?: LibraryOptionsResponse; playable?: Map<string, boolean> } | { kind: 'remove'; fromGrid?: boolean };
 let view: SheetView = { kind: 'info' };
 let titleEditing = false;
 let headRenderedFor = '';
 
-/** `start` 'options' opens straight on the download choices (a video not downloaded here was tapped). */
-function openSheet(id: string, start: 'info' | 'options' = 'info'): void {
+/**
+ * `start` 'options' opens straight on the download choices (a video not downloaded here was tapped);
+ * 'remove' straight on the removal question (the card's trash button).
+ */
+function openSheet(id: string, start: 'info' | 'options' | 'remove' = 'info'): void {
   const e = entryById(id);
   if (!e) return;
   selectedId = id;
-  view = { kind: 'info' };
+  view = start === 'remove' ? { kind: 'remove', fromGrid: true } : { kind: 'info' };
   titleEditing = false;
   headRenderedFor = '';
   el.sheetOverlay.classList.remove('hidden');
@@ -749,6 +759,8 @@ el.sheet.addEventListener('click', (ev) => {
     case 'close':
       return closeSheet();
     case 'back':
+      // "Keep it" on a question asked from the grid closes the sheet instead of showing details nobody asked for
+      if (view.kind === 'remove' && view.fromGrid) return closeSheet();
       view = { kind: 'info' };
       return renderSheet();
     case 'edit-title':
