@@ -1155,6 +1155,12 @@ function showLoading(title: string, detail: string, done = false): void {
     return;
   }
   el.upnextStatus.classList.add('hidden');
+  // Phones, videos still to watch: nothing over the video. The next batch (or TikTok being slow) is
+  // the viewer's business only once they are out of videos; until then they play and scroll.
+  if (!centered && !viewerWaiting()) {
+    el.loading.classList.add('hidden');
+    return;
+  }
   // centred on the video panel (on wide screens that is the middle column, not the whole window)
   const f = el.feed.getBoundingClientRect();
   const a = el.app.getBoundingClientRect();
