@@ -11,7 +11,13 @@ import { api } from '../api';
 import { PLATFORMS, rememberApp, type PlatformDef, type ToolApp } from '../platforms';
 
 // The pages and their scripts come from this device from the second visit on (public/sw.js).
-if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('/sw.js').catch((e) => console.warn('[home] service worker not registered', e));
+if ('serviceWorker' in navigator && window.isSecureContext) {
+  navigator.serviceWorker.register('/sw.js').catch((e) => console.warn('[home] service worker not registered', e));
+  // shown from the cache while the network was slow, and a newer home screen has arrived since (a deploy)
+  navigator.serviceWorker.addEventListener('message', (e: MessageEvent) => {
+    if ((e.data as { type?: string } | null)?.type === 'page-updated') location.reload();
+  });
+}
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const e = document.getElementById(id);

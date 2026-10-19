@@ -2617,6 +2617,12 @@ function syncOverlayPause(): void {
 }
 document.addEventListener('visibilitychange', syncOverlayPause);
 
+// The service worker showed this page from its cache while the network was slow, and a newer page
+// has arrived since (a deploy): take it now while nothing is lost – only before playback started.
+navigator.serviceWorker?.addEventListener('message', (e: MessageEvent) => {
+  if ((e.data as { type?: string } | null)?.type === 'page-updated' && !state.started && !leaving) location.reload();
+});
+
 // ---------- boot ----------
 // The feed must not wait for the session check (it may launch a browser on the server): start with
 // Explore right away, and switch to For You as soon as the server confirms a signed-in profile.

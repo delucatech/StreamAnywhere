@@ -42,6 +42,9 @@ export default defineConfig(({ mode }) => {
   },
   build: {
     outDir: 'dist',
+    // Earlier builds' scripts and styles stay (content-hashed names never clash): a page a device
+    // cached before a deploy still finds them. The VM prunes the ones older than two weeks.
+    emptyOutDir: false,
     sourcemap: true,
     target: 'es2020',
     rollupOptions: {

@@ -115,6 +115,8 @@ if [ ! -x "$APP_DIR/node_modules/ffmpeg-static/ffmpeg" ] && ! command -v ffmpeg 
 fi
 echo "ffmpeg: $("$APP_DIR/node_modules/ffmpeg-static/ffmpeg" -version 2>/dev/null | head -1 || ffmpeg -version 2>/dev/null | head -1 || echo missing)"
 npm run build 2>&1 | tail -5
+# Builds keep earlier scripts and styles (vite.config.ts emptyOutDir: false) for pages cached on devices; two weeks is plenty.
+find client/dist/assets -type f -mtime +14 -delete 2>/dev/null || true
 chown -R "$APP_USER:$APP_USER" "$APP_DIR" /var/lib/streamanywhere
 
 echo "== 3b. dynamic dns"
