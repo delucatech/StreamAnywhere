@@ -266,10 +266,13 @@ function warmAppPage(): void {
 }
 
 /**
- * While the home screen idles: every app whose saved feed this device lacks (never opened, or the
- * feed expired) gets a few videos from the server now – only what the server has ready, nothing
- * started there – saved the way the feed page saves its own feed, so the app's first open plays
- * at once. At most once per PREFETCH_EVERY per app, one app at a time.
+ * While the home screen idles, one app at a time, at most once per PREFETCH_EVERY per app:
+ *  - an app whose saved feed this device lacks (never opened, or the feed expired) gets a few
+ *    videos from the server now – only what the server has ready, nothing started there – saved
+ *    the way the feed page saves its own feed, so the app's first open plays at once. The feed
+ *    asked for is the one the app will show (For You for a signed-in account, else Explore);
+ *  - an app whose feed this device holds is only warmed: the server tops that feed's stock up in
+ *    the background when it is low, so the app finds fresh videos when it is opened.
  */
 const RESUME_MAX_AGE = 7 * 24 * 3600_000;
 const PREFETCH_EVERY = 10 * 60_000;
@@ -281,10 +284,19 @@ function hasSavedFeed(id: string): boolean {
     return false;
   }
 }
+/** The feed the app shows first (feed.ts: For You unless the viewer picked Explore), and its Explore category. */
+function wantedFeed(p: PlatformDef): { source: 'foryou' | 'explore'; category: number } {
+  try {
+    const prefs = JSON.parse(localStorage.getItem(p.id === 'tiktok' ? 'streamanywhere.feed' : `streamanywhere.feed.${p.id}`) || '{}') as { source?: string; pick?: string; category?: number };
+    const forYou = prefs.pick !== 'user' || prefs.source === 'foryou';
+    return { source: forYou ? 'foryou' : 'explore', category: Number.isInteger(prefs.category) ? (prefs.category as number) : p.defaultCategory };
+  } catch {
+    return { source: 'foryou', category: p.defaultCategory };
+  }
+}
 async function prefetchFeeds(): Promise<void> {
   if (document.hidden) return;
   for (const p of PLATFORMS) {
-    if (hasSavedFeed(p.id)) continue;
     const stamp = `streamanywhere.prefetched.${p.id}`;
     try {
       if (Date.now() - Number(localStorage.getItem(stamp) || 0) < PREFETCH_EVERY) continue;
@@ -292,10 +304,21 @@ async function prefetchFeeds(): Promise<void> {
     } catch {
       return; // no storage: nothing to save into
     }
+    const want = wantedFeed(p);
     try {
-      const r = await api.feed({ platform: p.id, source: 'explore', category: p.defaultCategory, count: 8, quick: true, prefetch: true });
+      if (hasSavedFeed(p.id)) {
+        await api.feed({ platform: p.id, source: want.source, category: want.category, count: 1, warm: true });
+        continue;
+      }
+      // the app's own feed first; a For You feed with nothing ready (no account there) falls back to Explore
+      let source = want.source;
+      let r = await api.feed({ platform: p.id, source, category: want.category, count: 8, quick: true, prefetch: true });
+      if (!r.items.length && source === 'foryou' && !p.loginRequired) {
+        source = 'explore';
+        r = await api.feed({ platform: p.id, source, category: want.category, count: 8, quick: true, prefetch: true });
+      }
       if (!r.items.length || hasSavedFeed(p.id)) continue;
-      localStorage.setItem(`streamanywhere.resume.${p.id}`, JSON.stringify({ v: 1, savedAt: Date.now(), source: 'explore', category: p.defaultCategory, items: r.items, index: 0 }));
+      localStorage.setItem(`streamanywhere.resume.${p.id}`, JSON.stringify({ v: 1, savedAt: Date.now(), source, category: want.category, items: r.items, index: 0 }));
     } catch {
       /* not signed in there, or the server is busy: the app loads its own feed when opened */
     }

@@ -17,7 +17,7 @@ import { logStream, recentLog } from './logbuf';
 import { defaultExpiry, mediaCount, registerMedia } from './mediaStore';
 import { hostAllowed } from './ssrf';
 import { EXPLORE_DEFAULT_CATEGORY, FeedError, fetchExploreFeed, normalizeExploreOptions, type ExploreResult } from './feed';
-import { cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouCheap, forYouStock, logout, rememberLog, workState, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
+import { cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouCheap, forYouStock, forYouWarm, logout, rememberLog, workState, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
 import { Reservoir, type ReservoirStats } from './reservoir';
 import { slimItems } from './lastBatch';
 import { getProgress } from './progress';
@@ -434,24 +434,40 @@ export async function buildServer() {
     const quick = b.quick === true;
     // The home screen filling the device's saved feeds: only what is ready, nothing started, no waiting
     const prefetch = b.prefetch === true;
+    // The home screen, for a feed the device holds already: top the stock up in the background, hand out nothing
+    const warm = b.warm === true;
     const t0 = Date.now();
     const log = (msg: string) => app.log.info({ platform, source }, msg);
     const warn = (err: string, msg: string) => app.log.warn({ platform, source, err }, msg);
     const served = (r: { items: FeedItem[]; warnings: string[]; stale?: boolean; fromStock?: boolean; ready?: number } | undefined, what: string): FeedResponse => {
       if (!r) {
-        log(`${what}: nothing ready for a prefetch`);
+        log(`${what}: nothing handed out (${warm ? 'warm-up' : 'nothing ready for a prefetch'})`);
         return { source, items: [], hasMore: true, warnings: [], elapsedMs: Date.now() - t0 };
       }
       const resp: FeedResponse = { source, items: slimItems(r.items), hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
       log(`${what}: ${r.items.length} served ${r.stale ? 'from the last good batch' : r.fromStock ? 'from stock' : 'after a fill'}${prefetch ? ' (prefetch)' : ''}, ${r.ready ?? 0} ready, ${resp.elapsedMs} ms`);
       return resp;
     };
+    /**
+     * A home screen request (warm, or a prefetch that found nothing fresh): top the feed up in the
+     * background when the server has served it before. `gate` is the sign-in check some platforms
+     * need first (awaited in the background, never by the home screen).
+     */
+    const homeScreen = (reservoir: Reservoir, what: string, gate?: () => Promise<boolean>): FeedResponse | undefined => {
+      if (!warm && !prefetch) return undefined;
+      const r = prefetch ? reservoir.takeCheap(count) : undefined;
+      if (!r || r.stale) {
+        if (gate) void gate().then((ok) => ok && reservoir.warmIfKnown() && log(`${what}: topping up for the home screen`), () => undefined);
+        else if (reservoir.warmIfKnown()) log(`${what}: topping up for the home screen`);
+      }
+      return served(r, what);
+    };
     try {
       if (platform === 'instagram') {
         const cat = instagramCategory(b.category);
         const reservoir = source === 'foryou' ? instagramForYouReservoir(log) : instagramReservoir(cat.id, log);
         const what = source === 'foryou' ? 'instagram foryou' : `instagram explore ${cat.label}`;
-        if (prefetch) return served(instagramMaySignIn() ? reservoir.takeCheap(count) : undefined, what);
+        if (warm || prefetch) return instagramMaySignIn() ? homeScreen(reservoir, what, ensureInstagramSession)! : served(undefined, what);
         // A viewer with nothing on screen does not wait for the sign-in check (a browser start on the
         // server): earlier videos go out now, and the check plus a fill run meanwhile.
         const quickBatch = quick && instagramMaySignIn() ? reservoir.takeStale() : undefined;
@@ -466,7 +482,7 @@ export async function buildServer() {
       if (platform === 'facebook') {
         if (source === 'foryou') {
           const reservoir = facebookForYouReservoir(log);
-          if (prefetch) return served(facebookMaySignIn() ? reservoir.takeCheap(count) : undefined, 'facebook foryou');
+          if (warm || prefetch) return facebookMaySignIn() ? homeScreen(reservoir, 'facebook foryou', ensureFacebookSession)! : served(undefined, 'facebook foryou');
           const quickBatch = quick && facebookMaySignIn() ? reservoir.takeStale() : undefined;
           if (quickBatch) {
             void ensureFacebookSession().then((ok) => ok && reservoir.warm(), () => undefined);
@@ -478,33 +494,37 @@ export async function buildServer() {
         }
         const cat = facebookCategory(b.category);
         const reservoir = facebookReservoir(cat.id, log);
-        if (prefetch) return served(reservoir.takeCheap(count), `facebook explore ${cat.label}`);
+        if (warm || prefetch) return homeScreen(reservoir, `facebook explore ${cat.label}`)!;
         return served(await reservoir.take(count, quick), `facebook explore ${cat.label}`);
       }
       if (platform === 'youtube') {
         if (source === 'foryou') {
           if (!youtubeCookieFile()) {
-            if (prefetch) return served(undefined, 'youtube foryou');
+            if (warm || prefetch) return served(undefined, 'youtube foryou');
             throw new FeedError('Not signed in to YouTube: sign in from Profile to see your For You feed.', 'youtube_not_signed_in', 401);
           }
           const reservoir = youtubeForYouReservoir(log);
-          if (prefetch) return served(reservoir.takeCheap(count), 'youtube foryou');
+          if (warm || prefetch) return homeScreen(reservoir, 'youtube foryou')!;
           return served(await reservoir.take(count, quick), 'youtube foryou');
         }
         const cat = youTubeCategory(b.category);
         const reservoir = youtubeReservoir(cat.id, log);
-        if (prefetch) return served(reservoir.takeCheap(count), `youtube explore ${cat.tag}`);
+        if (warm || prefetch) return homeScreen(reservoir, `youtube explore ${cat.tag}`)!;
         return served(await reservoir.take(count, quick), `youtube explore ${cat.tag}`);
       }
       if (source === 'explore') {
         const category = b.category !== undefined && Number.isInteger(Number(b.category)) ? Number(b.category) : undefined;
         const norm = normalizeExploreOptions({ category, count });
         const reservoir = exploreReservoir(norm.category, log, warn);
-        if (prefetch) return served(reservoir.takeCheap(norm.count), `explore ${norm.category}`);
+        if (warm || prefetch) return homeScreen(reservoir, `explore ${norm.category}`)!;
         // Served from the stock (filled in the background); only an empty stock waits for TikTok.
         return served(await reservoir.take(norm.count, quick), `explore ${norm.category}`);
       }
-      if (prefetch) return served(forYouCheap(count), 'foryou');
+      if (warm || prefetch) {
+        const r = prefetch ? forYouCheap(count) : undefined;
+        if ((!r || r.stale) && forYouWarm(log)) log('foryou: the page goes on loading for the home screen');
+        return served(r, 'foryou');
+      }
       const r = await fetchForYou(count, log, quick);
       const resp: FeedResponse = { source, items: slimItems(r.items), hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
       return resp;

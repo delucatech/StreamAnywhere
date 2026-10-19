@@ -87,6 +87,11 @@ function usableFormat(f: MediaFormat, now: number): MediaFormat | undefined {
   return f.directUrl || f.proxyUrl ? f : undefined;
 }
 
+/** Whether this feed has been served before (its last good batch is on disk): a feed somebody uses. */
+export function hasBatch(key: string): boolean {
+  return load(key) !== undefined;
+}
+
 /**
  * The next few remembered items for a feed that has nothing ready, or undefined once they are
  * used up (then the caller waits for the source as before).

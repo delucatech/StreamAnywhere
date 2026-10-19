@@ -470,12 +470,20 @@ async function reservoirChecks(): Promise<void> {
     const readyBefore = slow.ready;
     const cheap = slow.takeCheap(3);
     check('a prefetch takes from the stock without starting anything', !!cheap && cheap.items.length === 3 && cheap.fromStock && slow.ready === readyBefore - 3, { got: cheap?.items.length, readyBefore, ready: slow.ready });
+    // The home screen: a known feed with a low stock is topped up in the background; a full one is left alone.
+    while (slow.ready > 0) await slow.take(10);
+    const callsBeforeWarm = calls;
+    check('warm-up tops a known, empty stock up', slow.warmIfKnown() === true, { ready: slow.ready });
+    await new Promise((res) => setTimeout(res, 40));
+    check('the warm-up fill ran', calls === callsBeforeWarm + 1 && slow.ready > 0, { calls, callsBeforeWarm, ready: slow.ready });
+    check('warm-up leaves a stock at or above the low mark alone', slow.ready < 10 || slow.warmIfKnown() === false, { ready: slow.ready });
+    await new Promise((res) => setTimeout(res, 40)); // any top-up that followed
     const readyAfter = slow.ready;
     slow.stop();
     await new Promise((res) => setTimeout(res, 700)); // the file writes are asynchronous (the stock one coalesced)
     check('the last good batch is on disk', fs.existsSync(staleFile), staleFile);
     const again2 = new Reservoir('stale-test-2', source, { target: 20, low: 10, batch: 10, gapMs: 0, idleMs: 60_000, now: clock, persistKey: 'test-stale' });
-    check('a new reservoir starts with the stock the last one saved', again2.ready === readyAfter, { ready: again2.ready, readyAfter });
+    check('a new reservoir starts with the stock the last one saved', again2.ready === readyAfter && readyAfter > 0, { ready: again2.ready, readyAfter });
     again2.stop();
   } finally {
     try {

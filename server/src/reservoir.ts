@@ -18,7 +18,7 @@
  * (`stale`), while the fill runs. A viewer who already has videos waits for fresh ones as before.
  */
 import type { FeedItem } from '../../shared/types';
-import { loadStock, rememberBatch, saveStock, staleBatch } from './lastBatch';
+import { hasBatch, loadStock, rememberBatch, saveStock, staleBatch } from './lastBatch';
 
 export interface ReservoirFetch {
   items: FeedItem[];
@@ -201,6 +201,20 @@ export class Reservoir {
   warm(): void {
     this.lastTakeAt = this.opt.now();
     void this.fill(true);
+  }
+
+  /**
+   * The home screen: a feed this server has served before (somebody uses it) whose stock is low is
+   * topped up in the background, as if a viewer were watching – with the usual pauses between
+   * fills, so a home screen visited often costs the source nothing extra. Returns whether a top-up
+   * was planned.
+   */
+  warmIfKnown(): boolean {
+    this.prune();
+    if (!this.opt.persistKey || this.stock.length >= this.opt.low || !hasBatch(this.opt.persistKey)) return false;
+    this.lastTakeAt = this.opt.now();
+    this.scheduleFill();
+    return true;
   }
 
   /** Forgets the stock (the source changed its mind, e.g. a sign-out). Keeps the recent-id window. */

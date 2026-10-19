@@ -202,6 +202,12 @@ export interface FeedRequest {
    * answer empty rather than wait.
    */
   prefetch?: boolean;
+  /**
+   * The home screen, for an app this device already holds a feed of: hand out nothing, but top the
+   * feed's stock up in the background when it is low and the server has served that feed before,
+   * so the app finds fresh videos ready when it is opened. Answers empty at once.
+   */
+  warm?: boolean;
 }
 
 export interface FeedResponse {

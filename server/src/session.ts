@@ -2059,6 +2059,21 @@ function startForYouPump(): void {
   });
 }
 
+/**
+ * The home screen, for a device that holds a For You feed already: the signed-in page goes on
+ * loading in the background when few items are pending, so the app finds fresh ones when opened.
+ * Nothing when the sign-in is not confirmed (no probe, no browser start for a home screen visit).
+ */
+export function forYouWarm(log: (m: string) => void): boolean {
+  if (s.state !== 'logged_in' || s.pending.length >= 8) return false;
+  feedLog = wrapLog(log);
+  forYouAskedAt = Date.now();
+  void feedPage()
+    .then(() => startForYouPump())
+    .catch((e) => log(`For You: warm-up could not open the page (${(e as Error).message})`));
+  return true;
+}
+
 /** The home screen filling a device's saved feed: what is ready (pending items, else earlier videos), starting nothing. */
 export function forYouCheap(count: number): ForYouResult | undefined {
   if (s.pending.length) {
