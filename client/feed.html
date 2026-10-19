@@ -164,12 +164,13 @@
           <span class="upnext-title">Up next</span>
           <button class="upnext-auto" id="upnextAuto" type="button" role="switch" aria-checked="true" title="Auto-scroll to the next video when one ends (A)"><i aria-hidden="true"></i>Auto-scroll</button>
         </div>
-        <!-- wide screens: "loading more" while a video plays shows here, not over the video (feed.ts showLoading) -->
-        <div class="upnext-status hidden" id="upnextStatus" role="status" aria-live="polite">
-          <div class="spinner" aria-hidden="true"></div>
-          <div class="upnext-status-text"><b id="upnextStatusTitle"></b><span id="upnextStatusDetail"></span></div>
+        <!-- The rows are filled in by feed.ts; the last one is the "loading more" status (never over the video). -->
+        <div class="upnext-list" id="upnextList">
+          <div class="q-status hidden" id="upnextStatus" role="status" aria-live="polite">
+            <div class="spinner" aria-hidden="true"></div>
+            <div class="q-status-text"><b id="upnextStatusTitle"></b><span id="upnextStatusDetail"></span></div>
+          </div>
         </div>
-        <div class="upnext-list" id="upnextList"></div>
       </aside>
 
       <!-- bottom bar with icons, like the app -->

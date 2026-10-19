@@ -1027,7 +1027,9 @@ async function signOut(cancelOnly = false): Promise<void> {
   }
 }
 
-// ---------- loading indicator: centered with details while the viewer waits, a small chip otherwise ----------
+// ---------- loading indicator: never over a video ----------
+// Nothing loaded yet: a card centred on the empty panel. Videos on screen: the last row of the
+// Up next list (wide screens) or a small chip under the top bar (phones), while the video plays on.
 let loadingTicker = 0;
 function sourceLabel(): string {
   if (state.mode.kind === 'search') return `search results for “${state.mode.q}”`;
@@ -1036,8 +1038,9 @@ function sourceLabel(): string {
   const cat = P.categories.find((c) => c.id === prefs.category);
   return `${P.tabs.explore}${cat && cat.id !== P.defaultCategory ? ' · ' + cat.label : ''}`;
 }
-function showLoading(title: string, detail: string, centered: boolean, done = false): void {
-  // Wide screens, a video playing: the status goes under "Up next", off the video.
+function showLoading(title: string, detail: string, done = false): void {
+  const centered = state.entries.length === 0;
+  // Wide screens, videos loaded: the status is the last row of the Up next list, off the video.
   if (!centered && el.app.classList.contains('wide')) {
     el.loading.classList.add('hidden');
     el.upnextStatus.classList.remove('hidden');
@@ -1063,6 +1066,8 @@ function showLoading(title: string, detail: string, centered: boolean, done = fa
   el.loadingTitle.textContent = title;
   el.loadingDetail.textContent = detail;
 }
+/** The viewer has nothing more to watch until the next batch arrives. */
+const viewerWaiting = (): boolean => state.entries.length === 0 || state.wantNext || state.active >= state.entries.length - 1;
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
 /** Unplayed videos after the one in view. */
 const aheadCount = (): number => Math.max(0, state.entries.length - 1 - Math.max(state.active, 0));
@@ -1070,7 +1075,7 @@ const aheadCount = (): number => Math.max(0, state.entries.length - 1 - Math.max
 function flashAdded(added: number): void {
   clearInterval(loadingTicker);
   const ahead = aheadCount();
-  showLoading(`+${plural(added, 'new video')}`, `${state.entries.length} loaded · ${ahead} still to watch`, false, true);
+  showLoading(`+${plural(added, 'new video')}`, `${state.entries.length} loaded · ${ahead} still to watch`, true);
   const t = window.setTimeout(() => {
     if (loadingTicker === t) hideLoading();
   }, 2500);
@@ -1100,7 +1105,6 @@ function startLoadingStatus(): void {
     serverStep = r.text || '';
     render();
   };
-  const waiting = () => state.entries.length === 0 || state.wantNext || state.active >= state.entries.length - 1;
   function render(): void {
     const sec = Math.round((Date.now() - t0) / 1000);
     const first = state.entries.length === 0;
@@ -1114,7 +1118,7 @@ function startLoadingStatus(): void {
       if (sec >= 12) step = `${P.name} is slow to answer, still trying`;
       if (serverStep) step = serverStep.split('\n')[0];
       const left = ahead ? `${ahead} still to watch` : 'none left to watch yet';
-      showLoading(title, `${step}${sec >= 3 ? ` · ${sec} s` : ''}\n${left}`, waiting());
+      showLoading(title, `${step}${sec >= 3 ? ` · ${sec} s` : ''}\n${left}`);
       return;
     }
     let title = `Loading ${sourceLabel()}…`;
@@ -1126,7 +1130,7 @@ function startLoadingStatus(): void {
     if (sec >= 40 || serverStep) detail += `
 ${sec} s so far – still working`;
     if (state.emptyBatches > 0) title = `Still loading ${sourceLabel()}…`;
-    showLoading(title, detail, waiting());
+    showLoading(title, detail);
   }
   render();
   void askServer();
@@ -1146,7 +1150,7 @@ function startSessionCheckStatus(): void {
 (a fresh browser start on the server can take up to a minute)`;
     if (sec >= 10) detail += `
 ${sec} s so far – still working`;
-    showLoading(`Opening ${P.name}…`, detail, true);
+    showLoading(`Opening ${P.name}…`, detail);
   };
   render();
   loadingTicker = window.setInterval(render, 1000);
@@ -1156,15 +1160,15 @@ function showRetryStatus(delayMs: number): void {
   const until = Date.now() + delayMs;
   const render = () => {
     const left = Math.max(0, Math.ceil((until - Date.now()) / 1000));
-    const waiting = state.entries.length === 0 || state.wantNext || state.active >= state.entries.length - 1;
-    if (!waiting) return hideLoading();
+    // Phones: the chip over the video only while the viewer is actually out of videos. The list
+    // (wide screens) can always say when the next try is.
+    if (!viewerWaiting() && !el.app.classList.contains('wide')) return hideLoading();
     const n = state.entries.length;
     showLoading(
       n ? `${n} videos loaded · no new ones yet` : `${P.name} returned no videos for ${sourceLabel()}`,
       n
         ? `${P.name} limits how fast it hands out videos · next try in ${left} s\n${aheadCount() ? `${aheadCount()} still to watch` : 'none left to watch yet'}`
         : `Retrying in ${left} s… (${P.name} limits how fast it hands out videos)`,
-      true,
     );
     if (left <= 0) clearInterval(loadingTicker);
   };
@@ -1329,7 +1333,7 @@ function addItems(items: FeedItem[]): number {
 const QUEUE_BEHIND = 12;
 const QUEUE_AHEAD = 12;
 /** The rows by video id: kept across updates, so the list keeps its scroll position and momentum. */
-const queueRows = new Map<string, { row: HTMLElement; now: HTMLElement; who: HTMLElement; desc: HTMLElement }>();
+const queueRows = new Map<string, { row: HTMLElement; now: HTMLElement; wait: HTMLElement; who: HTMLElement; desc: HTMLElement }>();
 /** The video whose row was last brought into view. */
 let queueShownId = '';
 /** When the viewer last scrolled the list; the current row does not pull it back for a while after that. */
@@ -1364,18 +1368,21 @@ function renderQueue(): void {
       const now = document.createElement('span');
       now.className = 'q-now';
       now.textContent = 'NOW PLAYING';
+      // what the video in view is waiting for (renderWait), under NOW PLAYING instead of over the video
+      const wait = document.createElement('span');
+      wait.className = 'q-wait hidden';
       const who = document.createElement('span');
       who.className = 'q-author';
       const desc = document.createElement('span');
       desc.className = 'q-desc';
-      text.append(now, who, desc);
+      text.append(now, wait, who, desc);
       row.append(thumb, text);
       row.addEventListener('click', () => {
         if (!state.started) start();
         const at = state.entries.indexOf(entry);
         if (at >= 0 && at !== state.active) goTo(at);
       });
-      q = { row, now, who, desc };
+      q = { row, now, wait, who, desc };
       queueRows.set(item.id, q);
     }
     // the parts that change: the state (now / watched / next) and the name once the video is resolved
@@ -1387,13 +1394,16 @@ function renderQueue(): void {
     const author = name ? `@${name}` : '';
     q.row.title = k === i ? `Playing ${author || 'this video'}` : `Play ${author || 'this video'}`;
     q.now.hidden = k !== i;
+    if (k !== i) q.wait.classList.add('hidden');
     q.who.textContent = author;
     q.desc.textContent = item.desc || (k < i ? 'Watched' : '');
     // into place without emptying the list (an empty list would lose its scroll position)
     if (list.children[pos] !== q.row) list.insertBefore(q.row, list.children[pos] ?? null);
     pos++;
   }
-  while (list.children.length > pos) list.lastElementChild!.remove();
+  // rows no longer in the window go; the status row (loading more…) stays the last child
+  while (list.children.length > pos + 1) list.children[pos].remove();
+  if (list.lastElementChild !== el.upnextStatus) list.append(el.upnextStatus);
   for (const id of [...queueRows.keys()]) if (!keep.has(id)) queueRows.delete(id);
   // The current row comes into view when the video changes, unless the viewer is browsing the list.
   const curId = state.entries[i]?.item.id ?? '';
@@ -1669,7 +1679,10 @@ function ensurePlayer(entry: Entry): FeedPlayer {
     onFirstFrame: () => {
       entry.root.classList.add('has-frame');
       entry.retrying = false;
-      if (activeEntry() === entry) syncWait();
+      if (activeEntry() === entry) {
+        syncWait();
+        warmNeighbours();
+      }
     },
     onWaiting: (w) => {
       entry.buffering = w;
@@ -1859,18 +1872,44 @@ function setActive(idx: number): void {
   void playEntry(cur);
   syncWait();
   renderQueue();
-  // Warm the neighbours (their players fetch and decode the first frames, then idle on
-  // backpressure), release the rest so decoders and audio contexts do not pile up.
+  // Only the video in view and its two neighbours keep a player (each holds a decoder, an audio
+  // context and an open download); the rest are released.
   state.entries.forEach((e, i) => {
-    const d = Math.abs(i - idx);
-    if (d === 1) {
-      if (!e.failed) void ensureFormats(e).then((ok) => ok && Math.abs(state.entries.indexOf(e) - state.active) === 1 && attachSource(e));
-    } else if (d > 2 && e.player) {
-      releasePlayer(e);
-    }
+    if (Math.abs(i - idx) > 1 && e.player) releasePlayer(e);
   });
+  warmNeighbours();
   scheduleMoreIfNeeded();
   saveResume();
+}
+
+/** A video in view that shows no frame after this long no longer holds its neighbours back. */
+const WARM_LATEST_MS = 3000;
+let warmTimer = 0;
+/**
+ * The neighbours of the video in view get a player too (they fetch and decode their first frames,
+ * then idle on backpressure), so the next one starts at once. The video in view goes first: they
+ * start only once it has painted its first frame, so its download does not share the connection
+ * while the viewer waits. Before "Tap to start", or when it fails or shows nothing within
+ * WARM_LATEST_MS, they start anyway.
+ */
+function warmNeighbours(): void {
+  clearTimeout(warmTimer);
+  warmTimer = 0;
+  const cur = activeEntry();
+  if (!cur) return;
+  const ready = !state.started || cur.failed || cur.root.classList.contains('has-frame');
+  if (!ready) {
+    warmTimer = window.setTimeout(() => {
+      warmTimer = 0;
+      warmNeighbours();
+    }, WARM_LATEST_MS);
+    return;
+  }
+  const idx = state.active;
+  for (const e of [state.entries[idx + 1], state.entries[idx - 1]]) {
+    if (!e || e.failed) continue;
+    void ensureFormats(e).then((ok) => ok && Math.abs(state.entries.indexOf(e) - state.active) === 1 && attachSource(e));
+  }
 }
 
 function goTo(idx: number): void {
@@ -1922,13 +1961,17 @@ function waitPhaseOf(e: Entry): string {
 function syncWait(): void {
   const e = activeEntry();
   const phase = e ? waitPhaseOf(e) : '';
-  if (waitEntry && waitEntry !== e) waitEntry.waitEl.classList.add('hidden');
+  if (waitEntry && waitEntry !== e) {
+    waitEntry.waitEl.classList.add('hidden');
+    queueWait(waitEntry, '');
+  }
   // the clock starts when a wait starts; from one step to the next (resolve → load) it keeps running
   if (e !== waitEntry || !waitPhase) waitSince = Date.now();
   waitEntry = e;
   waitPhase = phase;
   if (!e || !phase) {
     e?.waitEl.classList.add('hidden');
+    queueWait(e, '');
     clearInterval(waitTimer);
     waitTimer = 0;
     return;
@@ -1940,7 +1983,11 @@ function renderWait(): void {
   const e = waitEntry;
   if (!e) return;
   const ms = Date.now() - waitSince;
-  if (ms < WAIT_SHOW_MS) return e.waitEl.classList.add('hidden');
+  if (ms < WAIT_SHOW_MS) {
+    e.waitEl.classList.add('hidden');
+    queueWait(e, '');
+    return;
+  }
   const sec = Math.floor(ms / 1000);
   let text = waitPhase === 'resolve' ? `Getting the video from ${P.name}…` : waitPhase === 'retry' ? 'Trying another connection…' : waitPhase === 'buffer' ? 'Buffering…' : 'Loading video…';
   // Bytes are moving: how much of the video is here (the file size once the server has said it)
@@ -1950,6 +1997,14 @@ function renderWait(): void {
   if (sec >= 6) text += `\n${sec} s – slow connection, still loading`;
   if (e.waitText.textContent !== text) e.waitText.textContent = text;
   e.waitEl.classList.remove('hidden');
+  queueWait(e, text);
+}
+/** The wait line on the video's row in the Up next list (empty text hides it). */
+function queueWait(e: Entry | undefined, text: string): void {
+  const q = e && queueRows.get(e.item.id);
+  if (!q) return;
+  q.wait.classList.toggle('hidden', !text);
+  if (q.wait.textContent !== text) q.wait.textContent = text;
 }
 
 function toggleMute(): void {

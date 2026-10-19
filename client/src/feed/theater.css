@@ -406,46 +406,80 @@
 .wide .toast {
   bottom: 24px;
 }
-/* "loading more" while a video plays: under the Up next heading, not over the video (feed.ts showLoading) */
-.upnext-status {
+/* "loading more" / "fetching the next video": the last row of the Up next list, never over the video (feed.ts showLoading) */
+.q-status {
   display: none;
 }
-.wide .upnext-status:not(.hidden) {
+.wide .q-status:not(.hidden) {
+  flex: 0 0 auto;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   gap: 10px;
+  margin-top: 4px;
   padding: 10px 12px;
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(255, 255, 255, 0.08);
 }
-.wide .upnext-status .spinner {
+.wide .q-status .spinner {
   width: 18px;
   height: 18px;
   border-width: 2px;
 }
-.wide .upnext-status.done {
+.wide .q-status.done {
   grid-template-columns: minmax(0, 1fr);
 }
-.wide .upnext-status.done .spinner {
+.wide .q-status.done .spinner {
   display: none;
 }
-.wide .upnext-status-text {
+.wide .q-status-text {
   display: grid;
   gap: 2px;
   min-width: 0;
 }
-.wide .upnext-status-text b {
+.wide .q-status-text b {
   font-size: 13px;
   font-weight: 700;
   color: #fff;
 }
-.wide .upnext-status-text span {
+.wide .q-status-text span {
   font-size: 11.5px;
   line-height: 1.35;
   color: var(--muted);
   white-space: pre-line;
+}
+/* What the video in view waits for: said on its row (feed.ts renderWait); the video keeps a bare spinner */
+.wide .item .wait {
+  padding: 0;
+  background: transparent;
+  backdrop-filter: none;
+}
+.wide .item .wait span:not(.spinner) {
+  display: none;
+}
+.wide .q-wait {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--muted);
+  white-space: pre-line;
+}
+.wide .q-wait::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.18);
+  border-top-color: var(--accent);
+  border-right-color: var(--accent-2);
+  animation: spin 0.9s linear infinite;
+}
+.wide .q-wait.hidden {
+  display: none;
 }
 
 /* ---- Up next ---- */
@@ -522,6 +556,8 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
+  /* room under the last row (the status), so it can scroll clear of the fade below */
+  padding-bottom: 48px;
   -webkit-mask-image: linear-gradient(180deg, #000 86%, transparent);
   mask-image: linear-gradient(180deg, #000 86%, transparent);
 }
