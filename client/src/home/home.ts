@@ -10,6 +10,9 @@ import type { Platform, SessionStatus } from '../../../shared/types';
 import { api } from '../api';
 import { PLATFORMS, rememberApp, type PlatformDef, type ToolApp } from '../platforms';
 
+// The pages and their scripts come from this device from the second visit on (public/sw.js).
+if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('/sw.js').catch((e) => console.warn('[home] service worker not registered', e));
+
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const e = document.getElementById(id);
   if (!e) throw new Error(`missing #${id}`);
@@ -262,7 +265,45 @@ function warmAppPage(): void {
     .catch(() => undefined);
 }
 
+/**
+ * While the home screen idles: every app whose saved feed this device lacks (never opened, or the
+ * feed expired) gets a few videos from the server now – only what the server has ready, nothing
+ * started there – saved the way the feed page saves its own feed, so the app's first open plays
+ * at once. At most once per PREFETCH_EVERY per app, one app at a time.
+ */
+const RESUME_MAX_AGE = 7 * 24 * 3600_000;
+const PREFETCH_EVERY = 10 * 60_000;
+function hasSavedFeed(id: string): boolean {
+  try {
+    const r = JSON.parse(localStorage.getItem(`streamanywhere.resume.${id}`) || 'null') as { savedAt?: number; items?: unknown[] } | null;
+    return !!r && Array.isArray(r.items) && r.items.length > 0 && Date.now() - Number(r.savedAt || 0) < RESUME_MAX_AGE;
+  } catch {
+    return false;
+  }
+}
+async function prefetchFeeds(): Promise<void> {
+  if (document.hidden) return;
+  for (const p of PLATFORMS) {
+    if (hasSavedFeed(p.id)) continue;
+    const stamp = `streamanywhere.prefetched.${p.id}`;
+    try {
+      if (Date.now() - Number(localStorage.getItem(stamp) || 0) < PREFETCH_EVERY) continue;
+      localStorage.setItem(stamp, String(Date.now()));
+    } catch {
+      return; // no storage: nothing to save into
+    }
+    try {
+      const r = await api.feed({ platform: p.id, source: 'explore', category: p.defaultCategory, count: 8, quick: true, prefetch: true });
+      if (!r.items.length || hasSavedFeed(p.id)) continue;
+      localStorage.setItem(`streamanywhere.resume.${p.id}`, JSON.stringify({ v: 1, savedAt: Date.now(), source: 'explore', category: p.defaultCategory, items: r.items, index: 0 }));
+    } catch {
+      /* not signed in there, or the server is busy: the app loads its own feed when opened */
+    }
+  }
+}
+
 playReturn();
 window.setTimeout(warmAppPage, 1200);
+window.setTimeout(() => void prefetchFeeds(), 2500);
 void refreshBadges();
 window.setInterval(() => void refreshBadges(), 30_000);

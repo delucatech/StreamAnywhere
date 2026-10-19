@@ -418,7 +418,16 @@ async function runSearch(q: string, more: boolean): Promise<void> {
       renderResults(q);
       status(el.searchStatus, `${countText(search.items.length, search.users.length)} for “${q}” from an earlier search · looking for fresh ones…`);
       fresh(`Searching ${host.platform.name} for fresh results…`);
-    } else status(el.searchStatus, `Searching for “${q}”…`);
+    } else {
+      status(el.searchStatus, `Searching for “${q}”…`);
+      // the shape of what is coming, while it comes (renderResults replaces them)
+      for (let i = 0; i < 6; i++) {
+        const sk = document.createElement('div');
+        sk.className = 'v-tile skeleton';
+        sk.setAttribute('aria-hidden', 'true');
+        el.searchVideos.appendChild(sk);
+      }
+    }
   } else status(el.searchStatus, 'Loading more…');
   try {
     const r = await api.search({ platform: host.platform.id, q, offset: more ? search.offset : 0 });
@@ -441,6 +450,7 @@ async function runSearch(q: string, more: boolean): Promise<void> {
     status(el.searchStatus, n || search.users.length ? `${countText(n, more ? 0 : search.users.length)} for “${q}”` : `Nothing found for “${q}”`);
     for (const w of r.warnings) console.warn('[search]', w);
   } catch (e) {
+    for (const sk of el.searchVideos.querySelectorAll('.skeleton')) sk.remove();
     if (search.fromCache && !more) status(el.searchStatus, `Showing the earlier results for “${q}” – the fresh search failed: ${errMsg(e)}`, true);
     else status(el.searchStatus, `Search failed: ${errMsg(e)}`, true);
   } finally {

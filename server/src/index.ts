@@ -4,7 +4,7 @@ import rateLimit from '@fastify/rate-limit';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { EXPLORE_CATEGORIES, YOUTUBE_CATEGORIES, platformOf } from '../../shared/types';
-import type { ConversationRequest, DownloadProbeRequest, LibraryCategoryRequest, LibraryEntryPatch, LibrarySaveRequest, DownloadStartRequest, FeedItem, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ProbeRequest, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SendMessageRequest, SessionActionRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
+import type { ConversationRequest, DownloadProbeRequest, LibraryCategoryRequest, LibraryEntryPatch, LibrarySaveRequest, DownloadStartRequest, FeedItem, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ProbeRequest, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SessionActionRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
 import { registerAuth } from './auth';
 import { config, findUp } from './config';
 import { registerProxyRoutes } from './proxy';
@@ -17,8 +17,9 @@ import { logStream, recentLog } from './logbuf';
 import { defaultExpiry, mediaCount, registerMedia } from './mediaStore';
 import { hostAllowed } from './ssrf';
 import { EXPLORE_DEFAULT_CATEGORY, FeedError, fetchExploreFeed, normalizeExploreOptions, type ExploreResult } from './feed';
-import { cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouStock, logout, rememberLog, workState, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
+import { cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouCheap, forYouStock, logout, rememberLog, workState, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
 import { Reservoir, type ReservoirStats } from './reservoir';
+import { slimItems } from './lastBatch';
 import { getProgress } from './progress';
 import { conversation, fetchProfile, followUser, inbox, inboxDebug, searchTikTok, sendMessage, SocialError } from './social';
 import { channelVideos, exploreYouTube, isYouTubeUrl, recommendedYouTube, resolveYouTube, searchYouTube, youTubeCategory, YouTubeError } from './youtube';
@@ -431,12 +432,18 @@ export async function buildServer() {
     const count = Math.max(1, Math.min(30, Number(b.count) || 12));
     // The viewer has nothing on screen: earlier videos beat waiting (reservoir.ts takeStale)
     const quick = b.quick === true;
+    // The home screen filling the device's saved feeds: only what is ready, nothing started, no waiting
+    const prefetch = b.prefetch === true;
     const t0 = Date.now();
     const log = (msg: string) => app.log.info({ platform, source }, msg);
     const warn = (err: string, msg: string) => app.log.warn({ platform, source, err }, msg);
-    const served = (r: { items: FeedItem[]; warnings: string[]; stale?: boolean; fromStock?: boolean; ready?: number }, what: string): FeedResponse => {
-      const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
-      log(`${what}: ${r.items.length} served ${r.stale ? 'from the last good batch' : r.fromStock ? 'from stock' : 'after a fill'}, ${r.ready ?? 0} ready, ${resp.elapsedMs} ms`);
+    const served = (r: { items: FeedItem[]; warnings: string[]; stale?: boolean; fromStock?: boolean; ready?: number } | undefined, what: string): FeedResponse => {
+      if (!r) {
+        log(`${what}: nothing ready for a prefetch`);
+        return { source, items: [], hasMore: true, warnings: [], elapsedMs: Date.now() - t0 };
+      }
+      const resp: FeedResponse = { source, items: slimItems(r.items), hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
+      log(`${what}: ${r.items.length} served ${r.stale ? 'from the last good batch' : r.fromStock ? 'from stock' : 'after a fill'}${prefetch ? ' (prefetch)' : ''}, ${r.ready ?? 0} ready, ${resp.elapsedMs} ms`);
       return resp;
     };
     try {
@@ -444,6 +451,7 @@ export async function buildServer() {
         const cat = instagramCategory(b.category);
         const reservoir = source === 'foryou' ? instagramForYouReservoir(log) : instagramReservoir(cat.id, log);
         const what = source === 'foryou' ? 'instagram foryou' : `instagram explore ${cat.label}`;
+        if (prefetch) return served(instagramMaySignIn() ? reservoir.takeCheap(count) : undefined, what);
         // A viewer with nothing on screen does not wait for the sign-in check (a browser start on the
         // server): earlier videos go out now, and the check plus a fill run meanwhile.
         const quickBatch = quick && instagramMaySignIn() ? reservoir.takeStale() : undefined;
@@ -458,6 +466,7 @@ export async function buildServer() {
       if (platform === 'facebook') {
         if (source === 'foryou') {
           const reservoir = facebookForYouReservoir(log);
+          if (prefetch) return served(facebookMaySignIn() ? reservoir.takeCheap(count) : undefined, 'facebook foryou');
           const quickBatch = quick && facebookMaySignIn() ? reservoir.takeStale() : undefined;
           if (quickBatch) {
             void ensureFacebookSession().then((ok) => ok && reservoir.warm(), () => undefined);
@@ -468,24 +477,36 @@ export async function buildServer() {
           return served(await reservoir.take(count, quick), 'facebook foryou');
         }
         const cat = facebookCategory(b.category);
-        return served(await facebookReservoir(cat.id, log).take(count, quick), `facebook explore ${cat.label}`);
+        const reservoir = facebookReservoir(cat.id, log);
+        if (prefetch) return served(reservoir.takeCheap(count), `facebook explore ${cat.label}`);
+        return served(await reservoir.take(count, quick), `facebook explore ${cat.label}`);
       }
       if (platform === 'youtube') {
         if (source === 'foryou') {
-          if (!youtubeCookieFile()) throw new FeedError('Not signed in to YouTube: sign in from Profile to see your For You feed.', 'youtube_not_signed_in', 401);
-          return served(await youtubeForYouReservoir(log).take(count, quick), 'youtube foryou');
+          if (!youtubeCookieFile()) {
+            if (prefetch) return served(undefined, 'youtube foryou');
+            throw new FeedError('Not signed in to YouTube: sign in from Profile to see your For You feed.', 'youtube_not_signed_in', 401);
+          }
+          const reservoir = youtubeForYouReservoir(log);
+          if (prefetch) return served(reservoir.takeCheap(count), 'youtube foryou');
+          return served(await reservoir.take(count, quick), 'youtube foryou');
         }
         const cat = youTubeCategory(b.category);
-        return served(await youtubeReservoir(cat.id, log).take(count, quick), `youtube explore ${cat.tag}`);
+        const reservoir = youtubeReservoir(cat.id, log);
+        if (prefetch) return served(reservoir.takeCheap(count), `youtube explore ${cat.tag}`);
+        return served(await reservoir.take(count, quick), `youtube explore ${cat.tag}`);
       }
       if (source === 'explore') {
         const category = b.category !== undefined && Number.isInteger(Number(b.category)) ? Number(b.category) : undefined;
         const norm = normalizeExploreOptions({ category, count });
+        const reservoir = exploreReservoir(norm.category, log, warn);
+        if (prefetch) return served(reservoir.takeCheap(norm.count), `explore ${norm.category}`);
         // Served from the stock (filled in the background); only an empty stock waits for TikTok.
-        return served(await exploreReservoir(norm.category, log, warn).take(norm.count, quick), `explore ${norm.category}`);
+        return served(await reservoir.take(norm.count, quick), `explore ${norm.category}`);
       }
+      if (prefetch) return served(forYouCheap(count), 'foryou');
       const r = await fetchForYou(count, log, quick);
-      const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
+      const resp: FeedResponse = { source, items: slimItems(r.items), hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
       return resp;
     } catch (e) {
       const err = e as Error;
@@ -512,22 +533,42 @@ export async function buildServer() {
     if (!/^[\w.\-]{1,64}$/.test(u)) throw new SocialError('That is not a TikTok handle', 400);
     return u;
   };
+  // Search answers and account pages are kept for a few minutes, for every device: they come from a
+  // headless browser on a small machine, and a repeat (the same phrase on the car and the phone,
+  // the next page of the same account) need not run it again. A follow drops the account's entry.
+  const SOCIAL_CACHE_MS = 10 * 60 * 1000;
+  const socialCache = new Map<string, { at: number; value: unknown }>();
+  const cachedSocial = async <T>(key: string, work: () => Promise<T>): Promise<T> => {
+    const hit = socialCache.get(key);
+    if (hit && Date.now() - hit.at < SOCIAL_CACHE_MS) return hit.value as T;
+    const value = await work();
+    socialCache.set(key, { at: Date.now(), value });
+    if (socialCache.size > 300) {
+      const oldest = [...socialCache.entries()].sort((a, b) => a[1].at - b[1].at).slice(0, 100);
+      for (const [k] of oldest) socialCache.delete(k);
+    }
+    return value;
+  };
   app.post<{ Body: SearchRequest }>('/api/search', resolveLimit, async (req, reply) => {
     const t0 = Date.now();
     try {
       const q = String(req.body?.q || '').trim().slice(0, 100);
       if (!q) throw new SocialError('Type something to search for', 400);
       const offset = Math.max(0, Math.min(500, Number(req.body?.offset) || 0));
-      if (platformOf(req.body?.platform) === 'youtube') return await searchYouTube(q, offset, youtubeLog);
-      if (platformOf(req.body?.platform) === 'instagram') {
-        await ensureInstagramSession();
-        return await searchInstagram(q, offset, instagramLog);
-      }
-      if (platformOf(req.body?.platform) === 'facebook') {
-        await ensureFacebookSession();
-        return await searchFacebook(q, offset, facebookLog);
-      }
-      return await searchTikTok(q, offset, socialLog('search'));
+      const platform = platformOf(req.body?.platform);
+      const r = await cachedSocial<SearchResponse>(`search|${platform}|${q.toLowerCase()}|${offset}`, async () => {
+        if (platform === 'youtube') return searchYouTube(q, offset, youtubeLog);
+        if (platform === 'instagram') {
+          await ensureInstagramSession();
+          return searchInstagram(q, offset, instagramLog);
+        }
+        if (platform === 'facebook') {
+          await ensureFacebookSession();
+          return searchFacebook(q, offset, facebookLog);
+        }
+        return searchTikTok(q, offset, socialLog('search'));
+      });
+      return { ...r, items: slimItems(r.items), elapsedMs: Date.now() - t0 };
     } catch (e) {
       return socialFail(reply, e, t0);
     }
@@ -538,20 +579,24 @@ export async function buildServer() {
       const user = handle(req.body?.user);
       const offset = Math.max(0, Math.min(2000, Number(req.body?.offset) || 0));
       const count = Math.max(1, Math.min(60, Number(req.body?.count) || 24));
-      if (platformOf(req.body?.platform) === 'instagram') {
-        await ensureInstagramSession();
-        return await profileInstagram(user, offset, count, instagramLog);
-      }
-      if (platformOf(req.body?.platform) === 'facebook') {
-        await ensureFacebookSession();
-        return await profileFacebook(user, offset, count, facebookLog);
-      }
-      if (platformOf(req.body?.platform) === 'youtube') {
-        const r = await channelVideos(user, offset, count, youtubeLog);
-        const resp: ProfileResponse = { user: { uniqueId: user, nickname: r.items[0]?.author.nickname }, items: r.items, offset, hasMore: r.hasMore, warnings: [], elapsedMs: Date.now() - t0 };
-        return resp;
-      }
-      return await fetchProfile(user, offset, count, socialLog('profile'));
+      const platform = platformOf(req.body?.platform);
+      const r = await cachedSocial<ProfileResponse>(`profile|${platform}|${user.toLowerCase()}|${offset}|${count}`, async () => {
+        if (platform === 'instagram') {
+          await ensureInstagramSession();
+          return profileInstagram(user, offset, count, instagramLog);
+        }
+        if (platform === 'facebook') {
+          await ensureFacebookSession();
+          return profileFacebook(user, offset, count, facebookLog);
+        }
+        if (platform === 'youtube') {
+          const c = await channelVideos(user, offset, count, youtubeLog);
+          const resp: ProfileResponse = { user: { uniqueId: user, nickname: c.items[0]?.author.nickname }, items: c.items, offset, hasMore: c.hasMore, warnings: [], elapsedMs: Date.now() - t0 };
+          return resp;
+        }
+        return fetchProfile(user, offset, count, socialLog('profile'));
+      });
+      return { ...r, items: slimItems(r.items), elapsedMs: Date.now() - t0 };
     } catch (e) {
       return socialFail(reply, e, t0);
     }
@@ -559,7 +604,9 @@ export async function buildServer() {
   app.post<{ Body: FollowRequest }>('/api/follow', resolveLimit, async (req, reply) => {
     const t0 = Date.now();
     try {
-      return await followUser(handle(req.body?.user), req.body?.follow !== false, socialLog('follow'));
+      const user = handle(req.body?.user);
+      for (const k of socialCache.keys()) if (k.startsWith(`profile|tiktok|${user.toLowerCase()}|`)) socialCache.delete(k);
+      return await followUser(user, req.body?.follow !== false, socialLog('follow'));
     } catch (e) {
       return socialFail(reply, e, t0);
     }

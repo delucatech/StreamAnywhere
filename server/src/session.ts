@@ -2059,6 +2059,17 @@ function startForYouPump(): void {
   });
 }
 
+/** The home screen filling a device's saved feed: what is ready (pending items, else earlier videos), starting nothing. */
+export function forYouCheap(count: number): ForYouResult | undefined {
+  if (s.pending.length) {
+    const items = s.pending.splice(0, count);
+    rememberBatch('tiktok-foryou', items);
+    return { items, warnings: [] };
+  }
+  const stale = staleBatch('tiktok-foryou');
+  return stale?.length ? { items: stale, warnings: [], stale: true } : undefined;
+}
+
 /**
  * Returns up to `count` not-yet-delivered items from the signed-in For You feed. The background
  * pump keeps the page loading; this waits (at most ~12 s) only when the stock is empty.

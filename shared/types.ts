@@ -196,6 +196,12 @@ export interface FeedRequest {
    * wants fresh ones, prefetched ahead, so the wait for the source costs them nothing.
    */
   quick?: boolean;
+  /**
+   * The home screen filling a device's saved feeds ahead of time: answer only with what is ready
+   * (the stock, or earlier videos), start nothing (no fill, no browser, no sign-in check), and
+   * answer empty rather than wait.
+   */
+  prefetch?: boolean;
 }
 
 export interface FeedResponse {

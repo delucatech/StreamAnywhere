@@ -49,6 +49,8 @@ document.title = `${P.name} – StreamAnywhere`;
 document.body.classList.add(`platform-${P.id}`);
 document.documentElement.style.setProperty('--accent', P.accent);
 document.documentElement.style.setProperty('--accent-2', P.accent2);
+// The page and its scripts come from this device from the second open on (public/sw.js).
+if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('/sw.js').catch((e) => console.warn('[feed] service worker not registered', e));
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const el = document.getElementById(id);
@@ -941,6 +943,23 @@ window.setInterval(() => {
 /** Consecutive failed status polls; the last known status is kept meanwhile (a blip must not end the live view) */
 let sessionPollFailures = 0;
 const SESSION_POLL_GIVE_UP = 90; // ~3 minutes of 2 s polls
+/** The account the server reported signed in on the last visit: the next visit asks for For You straight away. */
+const SIGNED_KEY = `streamanywhere.signedin.${P.id}`;
+function lastSignedIn(): boolean {
+  try {
+    return !!localStorage.getItem(SIGNED_KEY);
+  } catch {
+    return false;
+  }
+}
+function rememberSignedIn(s: SessionStatus | undefined): void {
+  try {
+    if (s?.state === 'logged_in') localStorage.setItem(SIGNED_KEY, s.username || '1');
+    else if (s && s.supported && s.state !== 'login_pending' && !s.probing) localStorage.removeItem(SIGNED_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+}
 /** The saved preference was For You but the server was still checking the profile at boot: switch when it says signed in */
 let restoreForYou = false;
 /** The boot sequence decides the source itself once the session check has settled */
@@ -955,6 +974,7 @@ async function refreshSession(announce = false, recheck = false): Promise<Sessio
     const prevProbing = Boolean(state.session?.probing);
     state.session = await api.session(P.id, recheck);
     sessionPollFailures = 0;
+    rememberSignedIn(state.session);
     if (state.session.state === 'logged_in') {
       signedOutPanelShown = false;
       maybeAutoStart();
@@ -1094,6 +1114,7 @@ async function signOut(cancelOnly = false): Promise<void> {
   el.sessionText.innerHTML = P.signIn === 'cookies' ? '<b>Signing out…</b>\nDeleting the saved cookies on the server.' : '<b>Signing out…</b>\nClosing the browser session on the server (a few seconds).';
   try {
     state.session = await api.sessionLogout(P.id);
+    rememberSignedIn(state.session);
     renderSession();
     if (prefs.source === 'foryou' || P.loginRequired) {
       prefs.source = 'explore';
@@ -1941,11 +1962,19 @@ function onPlayerError(entry: Entry, e: Error): void {
  */
 const RESOLVE_LIMIT_MS = P.id === 'youtube' ? 40_000 : 100_000;
 
+/** Play URLs that end within this long are replaced before they are used (a failure and a retry cost more). */
+const URL_MARGIN_MS = 5 * 60_000;
+const urlsExpiring = (item: FeedItem): boolean => item.formats.length > 0 && item.formats.every((f) => f.expiresAt !== undefined && f.expiresAt * 1000 < Date.now() + URL_MARGIN_MS);
+
 /**
  * Items from a guest search carry no play URLs: ask the resolver for them (same formats as the feed)
  * before the player is attached. False when TikTok has nothing playable for it.
  */
 function ensureFormats(entry: Entry): Promise<boolean> {
+  if (!entry.player && !entry.resolving && urlsExpiring(entry.item)) {
+    console.debug(`[feed] ${entry.item.id}: play URLs about to expire; getting fresh ones first`);
+    entry.item.formats = [];
+  }
   if (entry.item.formats.length) return Promise.resolve(true);
   if (!entry.resolving) {
     entry.resolving = api
@@ -2069,6 +2098,67 @@ function warmNeighbours(): void {
   for (const e of [state.entries[idx + 1], state.entries[idx - 1]]) {
     if (!e || e.failed) continue;
     void ensureFormats(e).then((ok) => ok && Math.abs(state.entries.indexOf(e) - state.active) === 1 && attachSource(e));
+  }
+  prepareAhead();
+}
+
+/**
+ * The two videos after the next one: their play URLs now (a saved or stale video needs a resolve,
+ * which would otherwise happen as it comes into view), and the first megabyte of each into the
+ * media cache, so the swipe to them starts from disk. Not on a connection that asks to save data.
+ */
+const PREPARE_AHEAD = [2, 3];
+const PREFETCH_BYTES = 1024 * 1024;
+const prefetching = new Set<string>();
+function prepareAhead(): void {
+  if (!state.started) return;
+  for (const d of PREPARE_AHEAD) {
+    const e = state.entries[state.active + d];
+    if (!e || e.failed) continue;
+    void ensureFormats(e).then((ok) => {
+      if (ok && Math.abs(state.entries.indexOf(e) - state.active) <= 3) void prefetchHead(e);
+    });
+  }
+}
+async function prefetchHead(entry: Entry): Promise<void> {
+  if (entry.player || prefetching.has(entry.item.id)) return;
+  const conn = (navigator as { connection?: { saveData?: boolean } }).connection;
+  if (conn?.saveData) return;
+  const pick = sourceCandidates(entry.item)[0];
+  if (!pick) return;
+  prefetching.add(entry.item.id);
+  try {
+    const key = fileKey(P.id, entry.item.id, 'video');
+    if (await getCached(key)) return;
+    // A plain request, read up to PREFETCH_BYTES and then dropped: a Range header would make the
+    // browser ask the CDN's permission first (a CORS preflight), which TikTok's CDN does not give.
+    const res = await fetch(pick.url, { mode: 'cors', credentials: 'same-origin' });
+    if (!res.ok || !res.body) return;
+    const total = Number(res.headers.get('content-length') || 0);
+    const reader = res.body.getReader();
+    const chunks: BlobPart[] = [];
+    let got = 0;
+    let ended = false;
+    while (got < PREFETCH_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) {
+        ended = true;
+        break;
+      }
+      chunks.push(value as BlobPart);
+      got += value.byteLength;
+    }
+    if (!ended) await reader.cancel().catch(() => undefined);
+    const complete = ended && (!total || got >= total);
+    if (!got || (!complete && !total)) return; // a head is only worth keeping with the file's size
+    const blob = new Blob(chunks, { type: 'video/mp4' });
+    if (await putCached({ key, itemKey: itemKey(P.id, entry.item.id), role: 'video', url: pick.url, bytes: blob.size, total: complete ? blob.size : total, complete, blob })) {
+      console.debug(`[feed] ${entry.item.id}: ${complete ? 'whole file' : `first ${fmtBytes(blob.size)}`} fetched ahead`);
+    }
+  } catch (e) {
+    console.debug(`[feed] ${entry.item.id}: fetch ahead failed (${errMsg(e)})`);
+  } finally {
+    prefetching.delete(entry.item.id);
   }
 }
 
@@ -2538,16 +2628,19 @@ void (async () => {
   const restored = !!saved && (saved.source === wanted || saved.source === 'explore' || P.loginRequired) && restoreFeed(saved);
   const restoredFrom = restored ? saved!.source : undefined;
   // Explore first, For You once the account is confirmed – except on a sign-in-only platform, where
-  // either tab needs the account: there the feed the viewer will get is asked for right away.
-  if (savedForYou && !restored && !P.loginRequired) {
+  // either tab needs the account, and for an account the server reported signed in last time
+  // (trusted: For You is asked for straight away; the server's earlier For You videos come at once).
+  const trusted = !P.loginRequired && savedForYou && !restored && wanted === 'foryou' && lastSignedIn();
+  if (savedForYou && !restored && !P.loginRequired && !trusted) {
     prefs.source = 'explore';
     renderSourceUi();
   }
   // The first batch is asked for at once, before the session check: the server answers with
   // earlier videos when it has nothing ready, or with "not signed in" (which opens the sign-in panel).
-  // On a sign-in-only platform that batch is the account's feed, like a restored one (onSignedIn keeps it).
+  // On a sign-in-only platform, and for a trusted account, that batch is the account's feed, like a
+  // restored one (onSignedIn keeps it).
   const feedReady: Promise<unknown> = restored ? Promise.resolve() : loadMore();
-  if (P.loginRequired && !restored) restoredSource = prefs.source;
+  if ((P.loginRequired && !restored) || trusted) restoredSource = prefs.source;
   let resuming = false;
   try {
     resuming = localStorage.getItem(SIGNIN_KEY) === '1';
@@ -2599,7 +2692,8 @@ void (async () => {
       void openSessionPanel();
     }
   } else if (wanted === 'foryou') {
-    if (state.session?.state === 'logged_in' && restoredFrom === 'foryou') {
+    if (state.session?.state === 'logged_in' && (restoredFrom === 'foryou' || prefs.source === 'foryou')) {
+      // the saved For You feed, or the one a trusted account asked for at boot: it goes on
       savePrefs();
     } else if (state.session?.state === 'logged_in') {
       prefs.source = 'foryou';
@@ -2618,8 +2712,8 @@ void (async () => {
       // No session on the server: Explore for this visit. The saved preference is not touched, so a
       // server that is restarting (unreachable right now) cannot pin the account to Explore.
       toast(`Sign in (Profile) to see your ${P.tabs.foryou} feed; showing ${P.tabs.explore} meanwhile.`, false, 5000);
-      if (restoredFrom === 'foryou') {
-        // the saved For You videos cannot go on loading without the account
+      if (restoredFrom === 'foryou' || prefs.source === 'foryou') {
+        // the saved (or trusted) For You videos cannot go on loading without the account
         prefs.source = 'explore';
         renderSourceUi();
         void reload();

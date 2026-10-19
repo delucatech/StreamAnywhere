@@ -466,12 +466,21 @@ async function reservoirChecks(): Promise<void> {
     await new Promise((res) => setTimeout(res, 30));
     const fresh = await slow.take(10);
     check('once the source answers, takes are fresh again', fresh.items.length === 10 && !fresh.stale, { got: fresh.items.length, stale: fresh.stale });
+    await new Promise((res) => setTimeout(res, 60)); // the background top-up after the last take
+    const readyBefore = slow.ready;
+    const cheap = slow.takeCheap(3);
+    check('a prefetch takes from the stock without starting anything', !!cheap && cheap.items.length === 3 && cheap.fromStock && slow.ready === readyBefore - 3, { got: cheap?.items.length, readyBefore, ready: slow.ready });
+    const readyAfter = slow.ready;
     slow.stop();
-    await new Promise((res) => setTimeout(res, 50)); // the file write is asynchronous
+    await new Promise((res) => setTimeout(res, 700)); // the file writes are asynchronous (the stock one coalesced)
     check('the last good batch is on disk', fs.existsSync(staleFile), staleFile);
+    const again2 = new Reservoir('stale-test-2', source, { target: 20, low: 10, batch: 10, gapMs: 0, idleMs: 60_000, now: clock, persistKey: 'test-stale' });
+    check('a new reservoir starts with the stock the last one saved', again2.ready === readyAfter, { ready: again2.ready, readyAfter });
+    again2.stop();
   } finally {
     try {
       fs.rmSync(staleFile, { force: true });
+      fs.rmSync(path.join(lastFeedDir(), 'test-stale.stock.json'), { force: true });
     } catch {
       /* nothing written */
     }

@@ -1371,6 +1371,21 @@ button {
   object-fit: cover;
   display: block;
 }
+/* a result that is still on its way (search): a quiet shimmer in the tile's place */
+.v-tile.skeleton {
+  cursor: default;
+  background: linear-gradient(100deg, #15181f 30%, #1f232c 50%, #15181f 70%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes skeleton-shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
 .v-tile .v-meta {
   position: absolute;
   left: 6px;

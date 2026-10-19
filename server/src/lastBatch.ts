@@ -105,6 +105,49 @@ export function staleBatch(key: string, count = STALE_BATCH): FeedItem[] | undef
   return items;
 }
 
+// ---- the whole stock of a reservoir, so a restart begins with what was ready (not only the last batch)
+
+const stockFile = (key: string): string => path.join(lastFeedDir(), `${key.replace(/[^\w.-]+/g, '_')}.stock.json`);
+const stockTimers = new Map<string, NodeJS.Timeout>();
+
+/** The stock a reservoir had when it last saved it (expired items are dropped by the caller). */
+export function loadStock(key: string): FeedItem[] {
+  try {
+    const raw = JSON.parse(fs.readFileSync(stockFile(key), 'utf8')) as { savedAt: number; items: FeedItem[] };
+    if (raw && Array.isArray(raw.items) && Date.now() - raw.savedAt < MAX_AGE_MS) return raw.items;
+  } catch {
+    /* none yet */
+  }
+  return [];
+}
+
+/** Writes the stock soon (coalesced: a fill and the takes that follow make one write). */
+export function saveStock(key: string, items: () => FeedItem[]): void {
+  const t = stockTimers.get(key);
+  if (t) clearTimeout(t);
+  stockTimers.set(
+    key,
+    setTimeout(() => {
+      stockTimers.delete(key);
+      try {
+        fs.mkdirSync(lastFeedDir(), { recursive: true });
+        const tmp = `${stockFile(key)}.${process.pid}.tmp`;
+        fs.writeFile(tmp, JSON.stringify({ savedAt: Date.now(), items: items() }), (err) => {
+          if (err) return;
+          fs.rename(tmp, stockFile(key), () => undefined);
+        });
+      } catch {
+        /* no disk */
+      }
+    }, 500),
+  );
+}
+
+/** The feed items as the player needs them: without the diagnostics-only fields (big, unused outside the lab page). */
+export function slimItems<T extends { formats: MediaFormat[] }>(items: T[]): T[] {
+  return items.map((it) => ({ ...it, formats: it.formats.map(({ cookieBoundUrl: _c, serverProbe: _s, ...f }) => f) }));
+}
+
 /** Tests: forget everything in memory (the files stay). */
 export function resetLastBatches(): void {
   cache.clear();

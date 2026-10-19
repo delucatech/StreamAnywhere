@@ -12,13 +12,13 @@
  * 30 overlaps a previous one more and more as the hour goes on), and dropped once their play URLs
  * are about to expire.
  *
- * With a `persistKey`, the newest items handed out are kept on disk (lastBatch.ts): a take() for a
- * viewer with nothing on screen (`quick`) that finds the stock empty answers with a few of those
- * at once (`stale`), while the fill runs, so a viewer never waits for the source when the server
- * has served this feed before. A viewer who already has videos waits for fresh ones as before.
+ * With a `persistKey`, the stock itself and the newest items handed out are kept on disk
+ * (lastBatch.ts): a restart begins with the stock it had, and a take() for a viewer with nothing
+ * on screen (`quick`) that finds the stock empty answers with a few of the earlier videos at once
+ * (`stale`), while the fill runs. A viewer who already has videos waits for fresh ones as before.
  */
 import type { FeedItem } from '../../shared/types';
-import { rememberBatch, staleBatch } from './lastBatch';
+import { loadStock, rememberBatch, saveStock, staleBatch } from './lastBatch';
 
 export interface ReservoirFetch {
   items: FeedItem[];
@@ -53,7 +53,7 @@ export interface ReservoirOptions {
   dryMs?: number;
   /** How long a take() waits for a fill when the stock is empty */
   waitMs?: number;
-  /** Keep the last good batch on disk under this name, and answer an empty stock with it (see lastBatch.ts) */
+  /** Keep the stock and the last good batch on disk under this name, and answer an empty stock with the latter (see lastBatch.ts) */
   persistKey?: string;
   log?: (msg: string) => void;
   now?: () => number;
@@ -98,7 +98,8 @@ export class Reservoir {
       target: options.target ?? 60,
       low: options.low ?? 40,
       batch: options.batch ?? 30,
-      idleMs: options.idleMs ?? 3 * 60 * 1000,
+      // a feed left for a quarter of an hour is still topped up, so coming back finds it ready
+      idleMs: options.idleMs ?? 15 * 60 * 1000,
       recentMs: options.recentMs ?? 60 * 60 * 1000,
       gapMs: options.gapMs ?? 3000,
       dryBelow: options.dryBelow ?? 5,
@@ -108,6 +109,16 @@ export class Reservoir {
       log: options.log,
       persistKey: options.persistKey,
     };
+    if (options.persistKey) {
+      const now = this.opt.now();
+      this.stock = loadStock(options.persistKey).filter((it) => !expiredSoon(it, now));
+      for (const it of this.stock) this.recent.set(it.id, now);
+      if (this.stock.length) this.opt.log?.(`${this.name}: ${this.stock.length} ready from the last run`);
+    }
+  }
+
+  private persist(): void {
+    if (this.opt.persistKey) saveStock(this.opt.persistKey, () => this.stock);
   }
 
   /** Items ready right now (fresh ones only) */
@@ -146,9 +157,30 @@ export class Reservoir {
       this.scheduleFill();
       throw this.lastError;
     }
-    if (this.opt.persistKey && items.length) rememberBatch(this.opt.persistKey, items);
+    if (this.opt.persistKey && items.length) {
+      rememberBatch(this.opt.persistKey, items);
+      this.persist();
+    }
     this.scheduleFill();
     return { items, warnings, ready: this.stock.length, fromStock };
+  }
+
+  /**
+   * For the home screen filling a device's saved feeds ahead of time: what is ready now (the
+   * stock, else earlier videos), or undefined. Costs nothing – no fill is started, the feed is
+   * not marked active, nothing waits.
+   */
+  takeCheap(count: number): ReservoirTake | undefined {
+    this.prune();
+    if (this.stock.length) {
+      const items = this.stock.splice(0, Math.max(1, count));
+      if (this.opt.persistKey) {
+        rememberBatch(this.opt.persistKey, items);
+        this.persist();
+      }
+      return { items, warnings: [], ready: this.stock.length, fromStock: true };
+    }
+    return this.takeStale();
   }
 
   /**
@@ -250,6 +282,7 @@ export class Reservoir {
       this.lastWarnings = r.warnings;
       this.lastError = undefined;
       this.lastAdded = added;
+      if (added) this.persist();
       if (added >= this.opt.dryBelow) {
         this.failures = 0;
         this.backoffUntil = 0;
