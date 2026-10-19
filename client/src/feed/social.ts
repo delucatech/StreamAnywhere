@@ -5,6 +5,11 @@
  *
  * The panels do not play anything themselves: a tapped video hands a play list (the search results
  * or the account's videos, with the continuation) to the feed through SocialHost.play().
+ *
+ * Search remembers, per platform and on this device (localStorage): the phrases searched, shown
+ * under the box while typing (filtered by what is typed) with a ✕ to forget one, and the results
+ * of the recent ones. A phrase searched again shows its earlier results at once and the fresh
+ * search runs behind them (a status at the end of the list says so); fresh results then take over.
  */
 import type { ChatMessage, Conversation, FeedItem, FollowState, UserSummary } from '../../../shared/types';
 import { api, ApiError } from '../api';
@@ -41,8 +46,11 @@ const el = {
   searchInput: $<HTMLInputElement>('searchInput'),
   searchGo: $<HTMLButtonElement>('searchGo'),
   searchStatus: $('searchStatus'),
+  searchHistory: $('searchHistory'),
   searchUsers: $('searchUsers'),
   searchVideos: $('searchVideos'),
+  searchFresh: $('searchFresh'),
+  searchFreshText: $('searchFreshText'),
   searchMore: $<HTMLButtonElement>('searchMore'),
   profile: $('profile'),
   profileClose: $<HTMLButtonElement>('profileClose'),
@@ -160,15 +168,223 @@ function userRow(u: UserSummary): HTMLButtonElement {
   return b;
 }
 
+// ---------------------------------------------------------------- search memory
+
+interface CachedSearch {
+  at: number;
+  items: FeedItem[];
+  users: UserSummary[];
+  offset: number;
+  hasMore: boolean;
+}
+interface SearchMemory {
+  v: 1;
+  /** Newest first */
+  history: { q: string; at: number }[];
+  /** By the phrase in lower case */
+  results: Record<string, CachedSearch>;
+}
+const HISTORY_MAX = 40;
+const RESULTS_MAX = 12;
+const RESULT_ITEMS_MAX = 60;
+const RESULTS_MAX_AGE = 7 * 24 * 3600_000;
+const normQ = (q: string): string => q.trim().toLowerCase();
+let memory: SearchMemory | undefined;
+const memoryKey = (): string => `streamanywhere.search.${host.platform.id}`;
+function getMemory(): SearchMemory {
+  if (memory) return memory;
+  const empty: SearchMemory = { v: 1, history: [], results: {} };
+  try {
+    const m = JSON.parse(localStorage.getItem(memoryKey()) || 'null') as SearchMemory | null;
+    memory = m && m.v === 1 && Array.isArray(m.history) && m.results ? m : empty;
+  } catch {
+    memory = empty;
+  }
+  return memory;
+}
+function saveMemory(): void {
+  if (!memory) return;
+  try {
+    localStorage.setItem(memoryKey(), JSON.stringify(memory));
+  } catch {
+    // full: keep the phrases, drop the results
+    memory.results = {};
+    try {
+      localStorage.setItem(memoryKey(), JSON.stringify(memory));
+    } catch {
+      /* storage unavailable */
+    }
+  }
+}
+/** The results of an earlier search of this phrase, if recent enough. */
+function cachedSearch(q: string): CachedSearch | undefined {
+  const c = getMemory().results[normQ(q)];
+  return c && Date.now() - c.at < RESULTS_MAX_AGE && c.items.length ? c : undefined;
+}
+/** Remembers the phrase (newest first) and its results (the diagnostics-only fields are big and useless later). */
+function rememberSearch(q: string, items: FeedItem[], users: UserSummary[], offset: number, hasMore: boolean): void {
+  const m = getMemory();
+  const key = normQ(q);
+  m.history = [{ q: q.trim(), at: Date.now() }, ...m.history.filter((h) => normQ(h.q) !== key)].slice(0, HISTORY_MAX);
+  const slim = items.slice(0, RESULT_ITEMS_MAX).map((it) => ({ ...it, formats: it.formats.map(({ cookieBoundUrl: _c, serverProbe: _s, ...f }) => f) }));
+  m.results[key] = { at: Date.now(), items: slim, users, offset, hasMore };
+  // only the recent phrases keep their results
+  const keep = new Set(m.history.slice(0, RESULTS_MAX).map((h) => normQ(h.q)));
+  for (const k of Object.keys(m.results)) if (!keep.has(k)) delete m.results[k];
+  saveMemory();
+}
+function forgetSearch(q: string): void {
+  const m = getMemory();
+  const key = normQ(q);
+  m.history = m.history.filter((h) => normQ(h.q) !== key);
+  delete m.results[key];
+  saveMemory();
+}
+function forgetAllSearches(): void {
+  const m = getMemory();
+  m.history = [];
+  m.results = {};
+  saveMemory();
+}
+
+const CLOCK_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5" /><path d="M12 7.5V12l3 2" /></svg>';
+const esc = (s: string): string => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c] || c);
+
+/**
+ * The earlier phrases under the box: all of them (newest first) while the box is empty, otherwise
+ * the ones containing what is typed, the ones starting with it first, the match in bold.
+ */
+function renderHistory(typed: string): void {
+  const f = normQ(typed);
+  const all = getMemory().history;
+  const rows = f ? all.filter((h) => h.q.toLowerCase().includes(f)).sort((a, b) => Number(b.q.toLowerCase().startsWith(f)) - Number(a.q.toLowerCase().startsWith(f))) : all;
+  el.searchHistory.innerHTML = '';
+  if (!rows.length) {
+    el.searchHistory.classList.add('hidden');
+    return;
+  }
+  for (const h of rows) {
+    const row = document.createElement('div');
+    row.className = 'history-row';
+    row.setAttribute('role', 'option');
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'history-q';
+    b.title = `Search “${h.q}” again`;
+    const i = f ? h.q.toLowerCase().indexOf(f) : -1;
+    const text = i >= 0 ? `${esc(h.q.slice(0, i))}<b>${esc(h.q.slice(i, i + f.length))}</b>${esc(h.q.slice(i + f.length))}` : esc(h.q);
+    b.innerHTML = `${CLOCK_ICON}<span>${text}</span>`;
+    b.addEventListener('click', () => {
+      el.searchInput.value = h.q;
+      submitSearch();
+    });
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.className = 'history-del';
+    x.textContent = '✕';
+    x.title = 'Forget this search';
+    x.setAttribute('aria-label', `Forget “${h.q}”`);
+    x.addEventListener('click', (e) => {
+      e.stopPropagation();
+      forgetSearch(h.q);
+      renderHistory(el.searchInput.value);
+      el.searchInput.focus();
+    });
+    row.append(b, x);
+    el.searchHistory.appendChild(row);
+  }
+  if (!f && rows.length > 1) {
+    const clear = document.createElement('button');
+    clear.type = 'button';
+    clear.className = 'btn ghost small history-clear';
+    clear.textContent = 'Clear search history';
+    clear.addEventListener('click', () => {
+      forgetAllSearches();
+      renderHistory('');
+      el.searchInput.focus();
+    });
+    el.searchHistory.appendChild(clear);
+  }
+  el.searchHistory.classList.remove('hidden');
+}
+function hideHistory(): void {
+  el.searchHistory.classList.add('hidden');
+}
+el.searchInput.addEventListener('input', () => renderHistory(el.searchInput.value));
+el.searchInput.addEventListener('focus', () => renderHistory(el.searchInput.value));
+// ↓ from the box walks the earlier phrases; Escape in the box (the feed's keys leave inputs alone) hides them
+el.searchInput.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowDown') {
+    const first = el.searchHistory.querySelector<HTMLButtonElement>('.history-q');
+    if (first && !el.searchHistory.classList.contains('hidden')) {
+      e.preventDefault();
+      first.focus();
+    }
+  } else if (e.key === 'Escape') hideHistory();
+});
+el.searchHistory.addEventListener('keydown', (e) => {
+  const rows = [...el.searchHistory.querySelectorAll<HTMLButtonElement>('.history-q')];
+  const cur = (e.target as HTMLElement).closest('.history-row')?.querySelector<HTMLButtonElement>('.history-q');
+  const i = cur ? rows.indexOf(cur) : -1;
+  if (e.key === 'ArrowDown' && i >= 0 && i < rows.length - 1) {
+    e.preventDefault();
+    rows[i + 1].focus();
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (i > 0) rows[i - 1].focus();
+    else el.searchInput.focus();
+  } else if (e.key === 'Escape') {
+    hideHistory();
+    el.searchInput.focus();
+  }
+});
+// a tap anywhere else in the panel (the results, the status) puts the phrases away
+el.search.addEventListener('pointerdown', (e) => {
+  const t = e.target as HTMLElement;
+  if (!t.closest('#searchForm') && !t.closest('#searchHistory')) hideHistory();
+});
+
 // ---------------------------------------------------------------- search
 
-const search = { q: '', items: [] as FeedItem[], offset: 0, hasMore: false, busy: false };
+const search = { q: '', items: [] as FeedItem[], users: [] as UserSummary[], offset: 0, hasMore: false, busy: false, fromCache: false };
+/** One tile per video id, reused when the fresh results re-order the earlier ones (no image reload) */
+const tiles = new Map<string, HTMLButtonElement>();
 
 export function openSearch(): void {
   show(el.search);
   el.searchInput.focus();
   el.searchInput.select();
+  renderHistory(el.searchInput.value); // focus() fires no event in a background tab
 }
+
+function searchTile(it: FeedItem, q: string): HTMLButtonElement {
+  let t = tiles.get(it.id);
+  if (t) return t;
+  t = videoTile(it, () => {
+    closeAllPanels();
+    // the index is looked up on the tap: the fresh results may have re-ordered the list since
+    host.play({ kind: 'search', q, items: search.items.slice(), offset: search.offset, hasMore: search.hasMore }, Math.max(0, search.items.findIndex((x) => x.id === it.id)));
+  });
+  tiles.set(it.id, t);
+  return t;
+}
+/** Puts the grid in search.items order, reusing tiles; the accounts list is replaced. */
+function renderResults(q: string): void {
+  el.searchUsers.innerHTML = '';
+  for (const u of search.users) el.searchUsers.appendChild(userRow(u));
+  const grid = el.searchVideos;
+  const want = search.items.map((it) => searchTile(it, q));
+  for (const child of [...grid.children]) if (!want.includes(child as HTMLButtonElement)) child.remove();
+  want.forEach((t, i) => {
+    if (grid.children[i] !== t) grid.insertBefore(t, grid.children[i] || null);
+  });
+  el.searchMore.classList.toggle('hidden', !search.hasMore || !search.items.length);
+}
+function fresh(text: string): void {
+  el.searchFreshText.textContent = text;
+  el.searchFresh.classList.toggle('hidden', !text);
+}
+const countText = (n: number, users: number): string => `${n} video${n === 1 ? '' : 's'}${users ? `, ${users} account${users === 1 ? '' : 's'}` : ''}`;
 
 /** Back from a playing list to the panel it was tapped in (the results / the account stay as they were). */
 export function reopenPlayList(list: PlayList): void {
@@ -179,50 +395,70 @@ export function reopenPlayList(list: PlayList): void {
 async function runSearch(q: string, more: boolean): Promise<void> {
   if (search.busy) return;
   search.busy = true;
+  hideHistory();
   if (!more) {
     search.q = q;
     search.items = [];
+    search.users = [];
     search.offset = 0;
     search.hasMore = false;
+    search.fromCache = false;
+    tiles.clear();
     el.searchUsers.innerHTML = '';
     el.searchVideos.innerHTML = '';
     el.searchMore.classList.add('hidden');
-    status(el.searchStatus, `Searching for “${q}”…`);
+    // Searched before: those results right away; the fresh search runs behind them.
+    const c = cachedSearch(q);
+    if (c) {
+      search.fromCache = true;
+      search.items = c.items.slice();
+      search.users = c.users.slice();
+      search.offset = c.offset;
+      search.hasMore = c.hasMore;
+      renderResults(q);
+      status(el.searchStatus, `${countText(search.items.length, search.users.length)} for “${q}” from an earlier search · looking for fresh ones…`);
+      fresh(`Searching ${host.platform.name} for fresh results…`);
+    } else status(el.searchStatus, `Searching for “${q}”…`);
   } else status(el.searchStatus, 'Loading more…');
   try {
     const r = await api.search({ platform: host.platform.id, q, offset: more ? search.offset : 0 });
     if (search.q !== q) return;
     search.offset = r.offset;
     search.hasMore = r.hasMore;
-    if (!more) for (const u of r.users) el.searchUsers.appendChild(userRow(u));
-    const base = search.items.length;
-    const fresh = r.items.filter((it) => !search.items.some((x) => x.id === it.id));
-    search.items.push(...fresh);
-    fresh.forEach((it, i) =>
-      el.searchVideos.appendChild(
-        videoTile(it, () => {
-          closeAllPanels();
-          host.play({ kind: 'search', q, items: search.items.slice(), offset: search.offset, hasMore: search.hasMore }, base + i);
-        }),
-      ),
-    );
-    el.searchMore.classList.toggle('hidden', !search.hasMore || !fresh.length);
+    if (!more && search.fromCache) {
+      // Fresh results take over, in their order; earlier ones the search no longer returns stay at the end.
+      const earlier = search.items.filter((x) => !r.items.some((it) => it.id === x.id));
+      search.items = [...r.items, ...earlier];
+      search.users = r.users;
+      search.fromCache = false;
+    } else {
+      if (!more) search.users = r.users;
+      search.items.push(...r.items.filter((it) => !search.items.some((x) => x.id === it.id)));
+    }
+    renderResults(q);
+    rememberSearch(q, search.items, search.users, search.offset, search.hasMore);
     const n = search.items.length;
-    status(el.searchStatus, n || r.users.length ? `${n} video${n === 1 ? '' : 's'}${r.users.length && !more ? `, ${r.users.length} account${r.users.length === 1 ? '' : 's'}` : ''} for “${q}”` : `Nothing found for “${q}”`);
+    status(el.searchStatus, n || search.users.length ? `${countText(n, more ? 0 : search.users.length)} for “${q}”` : `Nothing found for “${q}”`);
     for (const w of r.warnings) console.warn('[search]', w);
   } catch (e) {
-    status(el.searchStatus, `Search failed: ${errMsg(e)}`, true);
+    if (search.fromCache && !more) status(el.searchStatus, `Showing the earlier results for “${q}” – the fresh search failed: ${errMsg(e)}`, true);
+    else status(el.searchStatus, `Search failed: ${errMsg(e)}`, true);
   } finally {
     search.busy = false;
+    fresh('');
   }
 }
 
-el.searchForm.addEventListener('submit', (e) => {
-  e.preventDefault();
+function submitSearch(): void {
   const q = el.searchInput.value.trim();
   if (!q) return;
+  hideHistory();
   el.searchInput.blur();
   pressed(el.searchGo, () => runSearch(q, false), { label: 'Searching' });
+}
+el.searchForm.addEventListener('submit', (e) => {
+  e.preventDefault();
+  submitSearch();
 });
 el.searchMore.addEventListener('click', () => pressed(el.searchMore, () => runSearch(search.q, true), { label: 'Loading' }));
 el.searchClose.addEventListener('click', () => hide(el.search));

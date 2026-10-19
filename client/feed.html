@@ -261,10 +261,17 @@
             <input id="searchInput" type="search" placeholder="Search videos and accounts" enterkeyhint="search" aria-label="Search" />
             <button id="searchGo" class="btn primary" type="submit">Search</button>
           </form>
+          <!-- Earlier searches on this device: shown under the box while typing (filtered by what is typed);
+               a row searches again, its ✕ forgets it. Filled in by social.ts. -->
+          <div id="searchHistory" class="search-history hidden" role="listbox" aria-label="Earlier searches"></div>
           <div id="searchStatus" class="panel-status hidden"></div>
           <div id="searchUsers" class="user-list"></div>
           <div id="searchVideos" class="video-grid"></div>
-          <div class="panel-foot"><button id="searchMore" class="btn hidden" type="button">More videos</button></div>
+          <div class="panel-foot search-foot">
+            <!-- while earlier results are on screen: the fresh search is still running -->
+            <div id="searchFresh" class="search-fresh hidden" role="status" aria-live="polite"><span class="spinner" aria-hidden="true"></span><span id="searchFreshText"></span></div>
+            <button id="searchMore" class="btn hidden" type="button">More videos</button>
+          </div>
         </div>
       </div>
       <!-- account profile -->
