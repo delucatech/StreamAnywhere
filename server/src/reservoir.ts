@@ -11,8 +11,13 @@
  * Items are deduplicated against the ids handed out within the last `recentMs` (a random batch of
  * 30 overlaps a previous one more and more as the hour goes on), and dropped once their play URLs
  * are about to expire.
+ *
+ * With a `persistKey`, the newest items handed out are kept on disk (lastBatch.ts): a take() that
+ * finds the stock empty answers with a few of those at once (`stale`), while the fill runs, so a
+ * viewer never waits for the source when the server has served this feed before.
  */
 import type { FeedItem } from '../../shared/types';
+import { rememberBatch, staleBatch } from './lastBatch';
 
 export interface ReservoirFetch {
   items: FeedItem[];
@@ -47,6 +52,8 @@ export interface ReservoirOptions {
   dryMs?: number;
   /** How long a take() waits for a fill when the stock is empty */
   waitMs?: number;
+  /** Keep the last good batch on disk under this name, and answer an empty stock with it (see lastBatch.ts) */
+  persistKey?: string;
   log?: (msg: string) => void;
   now?: () => number;
 }
@@ -66,6 +73,8 @@ export interface ReservoirTake {
   ready: number;
   /** Whether the answer came without waiting for the source */
   fromStock: boolean;
+  /** The items are from an earlier visit (the stock was empty); a fill is running */
+  stale?: boolean;
 }
 
 export class Reservoir {
@@ -81,7 +90,7 @@ export class Reservoir {
   private lastWarnings: string[] = [];
   private fillIndex = 0;
   private lastAdded: number | undefined;
-  private readonly opt: Required<Omit<ReservoirOptions, 'log'>> & { log?: (msg: string) => void };
+  private readonly opt: Required<Omit<ReservoirOptions, 'log' | 'persistKey'>> & { log?: (msg: string) => void; persistKey?: string };
 
   constructor(private readonly name: string, private readonly fetch: (ctx: ReservoirFillContext) => Promise<ReservoirFetch>, options: ReservoirOptions = {}) {
     this.opt = {
@@ -96,6 +105,7 @@ export class Reservoir {
       waitMs: options.waitMs ?? 25_000,
       now: options.now ?? Date.now,
       log: options.log,
+      persistKey: options.persistKey,
     };
   }
 
@@ -118,6 +128,13 @@ export class Reservoir {
     this.prune();
     const fromStock = this.stock.length > 0;
     if (!fromStock) {
+      // Served this feed before: a few of those videos now, the source meanwhile (no waiting).
+      const stale = this.opt.persistKey ? staleBatch(this.opt.persistKey) : undefined;
+      if (stale?.length) {
+        void this.fill(true);
+        this.opt.log?.(`${this.name}: stock empty, ${stale.length} earlier videos served while it fills`);
+        return { items: stale, warnings: [], ready: 0, fromStock: false, stale: true };
+      }
       await this.waitForFill();
       this.prune();
     }
@@ -127,6 +144,7 @@ export class Reservoir {
       this.scheduleFill();
       throw this.lastError;
     }
+    if (this.opt.persistKey && items.length) rememberBatch(this.opt.persistKey, items);
     this.scheduleFill();
     return { items, warnings, ready: this.stock.length, fromStock };
   }

@@ -15,6 +15,8 @@ export interface PlaybackClock {
   currentMediaUs(): number;
   pause(): Promise<void>;
   resume(): Promise<void>;
+  /** Media seconds per real second (1 = normal); takes effect at once, the position is kept */
+  setRate(rate: number): void;
   readonly running: boolean;
 }
 
@@ -23,6 +25,7 @@ export class WallClock implements PlaybackClock {
   private basePerf = 0;
   private _running = false;
   private pausedAtUs = 0;
+  private rate = 1;
   get running(): boolean {
     return this._running;
   }
@@ -34,7 +37,14 @@ export class WallClock implements PlaybackClock {
   }
   currentMediaUs(): number {
     if (!this._running) return this.pausedAtUs;
-    return this.baseMediaUs + (performance.now() - this.basePerf) * 1000;
+    return this.baseMediaUs + (performance.now() - this.basePerf) * 1000 * this.rate;
+  }
+  setRate(rate: number): void {
+    if (this._running) {
+      this.baseMediaUs = this.currentMediaUs();
+      this.basePerf = performance.now();
+    }
+    this.rate = rate;
   }
   async pause(): Promise<void> {
     if (!this._running) return;
@@ -60,7 +70,10 @@ export class AudioSink implements PlaybackClock {
   private baseCtxTime = 0;
   private baseMediaUs = 0;
   private started = false;
-  private sources = new Set<AudioBufferSourceNode>();
+  /** Media seconds per context second: the buffers play at this rate (pitch follows; Web Audio has no time-stretch) */
+  private rate = 1;
+  /** What is playing or scheduled, with the media time each buffer starts at (re-scheduled when the rate changes) */
+  private sources = new Map<AudioBufferSourceNode, { buffer: AudioBuffer; mediaUs: number }>();
   private pending: AudioData[] = [];
   /** Context time at which the last scheduled chunk ends; the next contiguous chunk starts exactly there */
   private nextStartTime = -1;
@@ -155,7 +168,27 @@ export class AudioSink implements PlaybackClock {
 
   currentMediaUs(): number {
     if (!this.started) return this.baseMediaUs;
-    return this.baseMediaUs + Math.max(0, this.ctx.currentTime - this.baseCtxTime) * 1e6;
+    return this.baseMediaUs + Math.max(0, this.ctx.currentTime - this.baseCtxTime) * 1e6 * this.rate;
+  }
+
+  /**
+   * Changes the speed without losing the position: the clock is re-based at the current media
+   * time, and every buffer that is playing or waiting is scheduled again at the new rate (from
+   * the right offset for the one under the playhead).
+   */
+  setRate(rate: number): void {
+    if (rate === this.rate) return;
+    if (!this.started) {
+      this.rate = rate;
+      return;
+    }
+    const nowUs = this.currentMediaUs();
+    const queued = [...this.sources.values()].sort((a, b) => a.mediaUs - b.mediaUs);
+    this.stopScheduled();
+    this.baseMediaUs = nowUs;
+    this.baseCtxTime = this.ctx.currentTime + 0.02;
+    this.rate = rate;
+    for (const q of queued) this.scheduleBuffer(q.buffer, q.mediaUs);
   }
 
   async pause(): Promise<void> {
@@ -187,35 +220,7 @@ export class AudioSink implements PlaybackClock {
         data.copyTo(plane, { planeIndex: ch, format: 'f32-planar' });
         buffer.copyToChannel(plane, ch);
       }
-      const nominal = this.baseCtxTime + (data.timestamp - this.baseMediaUs) / 1e6;
-      // Glue the chunk to the end of the previous one when the timestamps say they are adjacent:
-      // starting each buffer at its own rounded timestamp left one-sample gaps/overlaps that click.
-      const contiguous = this.nextStartTime >= 0 && Math.abs(nominal - this.nextStartTime) <= CONTIGUOUS_TOLERANCE_S;
-      const when = contiguous ? this.nextStartTime : nominal;
-      const now = this.ctx.currentTime;
-      const src = this.ctx.createBufferSource();
-      src.buffer = buffer;
-      src.connect(this.gain);
-      src.onended = () => this.sources.delete(src);
-      // A chunk whose start is already behind the clock (or before context time 0, which start()
-      // rejects) plays from the matching offset instead of being placed in the past.
-      if (when < now) {
-        const offset = now - when;
-        if (offset >= buffer.duration) {
-          this.droppedChunks++;
-          this.nextStartTime = -1;
-          return;
-        }
-        src.start(now, offset);
-      } else {
-        src.start(when);
-      }
-      const durationS = frames / data.sampleRate;
-      this.nextStartTime = when + durationS;
-      this.sources.add(src);
-      this.scheduledChunks++;
-      if (this.firstScheduledUs < 0 || data.timestamp < this.firstScheduledUs) this.firstScheduledUs = data.timestamp;
-      this.scheduledUntilUs = Math.max(this.scheduledUntilUs, data.timestamp + Math.round(durationS * 1e6));
+      this.scheduleBuffer(buffer, data.timestamp);
     } catch (e) {
       this.lastError = (e as Error).message;
       this.droppedChunks++;
@@ -225,9 +230,44 @@ export class AudioSink implements PlaybackClock {
     }
   }
 
+  /** Places one buffer (the sound from media time `mediaUs` on) on the context's timeline at the current rate. */
+  private scheduleBuffer(buffer: AudioBuffer, mediaUs: number): void {
+    const rate = this.rate;
+    const nominal = this.baseCtxTime + (mediaUs - this.baseMediaUs) / 1e6 / rate;
+    // Glue the chunk to the end of the previous one when the timestamps say they are adjacent:
+    // starting each buffer at its own rounded timestamp left one-sample gaps/overlaps that click.
+    const contiguous = this.nextStartTime >= 0 && Math.abs(nominal - this.nextStartTime) <= CONTIGUOUS_TOLERANCE_S;
+    const when = contiguous ? this.nextStartTime : nominal;
+    const now = this.ctx.currentTime;
+    const src = this.ctx.createBufferSource();
+    src.buffer = buffer;
+    src.playbackRate.value = rate;
+    src.connect(this.gain);
+    src.onended = () => this.sources.delete(src);
+    // A chunk whose start is already behind the clock (or before context time 0, which start()
+    // rejects) plays from the matching offset instead of being placed in the past.
+    if (when < now) {
+      const offset = (now - when) * rate; // seconds into the buffer, which plays `rate` times faster
+      if (offset >= buffer.duration) {
+        this.droppedChunks++;
+        this.nextStartTime = -1;
+        return;
+      }
+      src.start(now, offset);
+    } else {
+      src.start(when);
+    }
+    const durationS = buffer.duration / rate; // on the context's timeline
+    this.nextStartTime = when + durationS;
+    this.sources.set(src, { buffer, mediaUs });
+    this.scheduledChunks++;
+    if (this.firstScheduledUs < 0 || mediaUs < this.firstScheduledUs) this.firstScheduledUs = mediaUs;
+    this.scheduledUntilUs = Math.max(this.scheduledUntilUs, mediaUs + Math.round(buffer.duration * 1e6));
+  }
+
   /** Stop every buffer that is playing or scheduled; chunks still waiting in `pending` are kept. */
   private stopScheduled(): void {
-    for (const s of this.sources) {
+    for (const s of this.sources.keys()) {
       try {
         s.onended = null;
         s.stop();

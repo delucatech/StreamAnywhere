@@ -48,7 +48,9 @@ export class WebCodecsRenderer implements Renderer {
   private audio?: AudioSink;
   private audioEnabled = false;
   /** AudioContext could not be resumed (autoplay policy); wall clock drives video until Play is pressed */
-  private audioBlocked = false;
+  private _audioBlocked = false;
+  /** Media seconds per real second; applied to every clock this renderer makes */
+  private rate = 1;
   private _state: PlayerState = 'idle';
   private st: PlayerStats = emptyStats(this.name);
   private fps = new FpsCounter();
@@ -83,12 +85,21 @@ export class WebCodecsRenderer implements Renderer {
   get state(): PlayerState {
     return this._state;
   }
+  get audioBlocked(): boolean {
+    return this._audioBlocked;
+  }
   get currentTime(): number {
     const us = this.clockRunning ? this.clock.currentMediaUs() : this.pendingSeekUs ?? this.lastRenderedUs;
     return Math.min(this.durationUs || Infinity, Math.max(0, us)) / 1e6;
   }
   get duration(): number {
     return this.durationUs / 1e6;
+  }
+
+  private wallClock(): WallClock {
+    const c = new WallClock();
+    c.setRate(this.rate);
+    return c;
   }
 
   private setState(s: PlayerState): void {
@@ -235,6 +246,7 @@ export class WebCodecsRenderer implements Renderer {
         if (as.supported) {
           this.audio = new AudioSink(audio.audioConfig.sampleRate);
           this.audio.setVolume(this.volume);
+          this.audio.setRate(this.rate);
           this.clock = this.audio;
           this.audioDecoder = this.makeAudioDecoder(audio.audioConfig);
           this.audioEnabled = true;
@@ -251,7 +263,7 @@ export class WebCodecsRenderer implements Renderer {
     } else {
       this.st.audio = audio ? `no AudioDecoder (${audio.codec}) – wall clock` : 'no audio track – wall clock';
     }
-    if (!this.audioEnabled) this.clock = new WallClock();
+    if (!this.audioEnabled) this.clock = this.wallClock();
     this.setState('ready');
     this.pump();
   }
@@ -319,7 +331,7 @@ export class WebCodecsRenderer implements Renderer {
     this.audio?.destroy();
     this.audio = undefined;
     this.audioSamples = [];
-    this.clock = new WallClock();
+    this.clock = this.wallClock();
     this.st.audio = 'disabled after decoder error – wall clock';
     if (wasRunning) void this.clock.start(nowUs);
   }
@@ -410,7 +422,7 @@ export class WebCodecsRenderer implements Renderer {
     if (this._state === 'error') return;
     if (this._state === 'ended') this.seek(0);
     this.wantPlay = true;
-    if (this.audioBlocked && this.clockRunning) await this.unblockAudio();
+    if (this._audioBlocked && this.clockRunning) await this.unblockAudio();
     if (this.clockRunning && !this.clock.running) {
       await this.clock.resume();
       this.setState('playing');
@@ -469,6 +481,19 @@ export class WebCodecsRenderer implements Renderer {
   setVolume(v: number): void {
     this.volume = v;
     this.audio?.setVolume(v);
+  }
+
+  /** The speed, kept for the next load too; the running clock changes pace in place (no seek, no gap). */
+  setRate(rate: number): void {
+    if (!(rate > 0) || rate === this.rate) return;
+    this.rate = rate;
+    this.clock.setRate(rate);
+    if (this.audio && this.clock !== this.audio) this.audio.setRate(rate);
+  }
+
+  /** A touch or key from the viewer: sound that the autoplay policy held back may start now. */
+  userGesture(): void {
+    if (this._audioBlocked && this.clockRunning) void this.unblockAudio();
   }
 
   /** Picture file plus the separate sound file when there is one (YouTube); the sound counts once its size is known. */
@@ -548,7 +573,7 @@ export class WebCodecsRenderer implements Renderer {
     this.audio?.destroy();
     this.audio = undefined;
     this.audioEnabled = false;
-    this.clock = new WallClock();
+    this.clock = this.wallClock();
     this.clockRunning = false;
     this.wantPlay = false;
     this.demuxEnded = false;
@@ -591,17 +616,17 @@ export class WebCodecsRenderer implements Renderer {
     if (this.startingClock) return;
     this.startingClock = true;
     try {
-      if (this.audio && !this.audioBlocked) {
+      if (this.audio && !this._audioBlocked) {
         const ok = await this.audio.start(atUs);
         if (!ok) {
-          this.audioBlocked = true;
-          this.clock = new WallClock();
+          this._audioBlocked = true;
+          this.clock = this.wallClock();
           this.st.audio += ' – blocked by autoplay policy, press Play to enable';
           this.events.onLog('warn', 'AudioContext could not be resumed (no user gesture yet); video runs on a wall clock until Play is pressed');
         }
       }
       this.clockRunning = true;
-      if (!this.audio || this.audioBlocked) await this.clock.start(atUs);
+      if (!this.audio || this._audioBlocked) await this.clock.start(atUs);
       if (!this.wantPlay) {
         await this.clock.pause();
         return;
@@ -613,13 +638,23 @@ export class WebCodecsRenderer implements Renderer {
   }
 
   /** After a user gesture, hand the clock back to the audio sink if it was blocked earlier. */
+  private unblocking = false;
   private async unblockAudio(): Promise<void> {
-    if (!this.audio || !this.audioBlocked) return;
-    const nowUs = this.clock.currentMediaUs();
-    const ok = await this.audio.start(nowUs, 1500);
-    if (!ok) return;
-    this.audioBlocked = false;
+    if (!this.audio || !this._audioBlocked || this.unblocking) return;
+    this.unblocking = true;
+    const gen = this.generation;
+    const audio = this.audio;
+    let ok = false;
+    try {
+      ok = await audio.start(this.clock.currentMediaUs(), 1500);
+    } finally {
+      this.unblocking = false;
+    }
+    if (!ok || gen !== this.generation || this.audio !== audio) return;
+    this._audioBlocked = false;
     this.clock = this.audio;
+    // paused meanwhile (a tap while the sound was starting): the audio clock must not run on alone
+    if (!this.wantPlay || !this.clockRunning) void audio.pause();
     this.st.audio = this.st.audio.replace(' – blocked by autoplay policy, press Play to enable', ' (resumed after gesture)');
     this.events.onLog('info', 'AudioContext resumed after user gesture; audio clock is now master');
   }

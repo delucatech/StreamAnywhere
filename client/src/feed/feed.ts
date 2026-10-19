@@ -12,7 +12,7 @@
  *    ↑/↓ (or J/K) move, Space pauses, M mutes, F fullscreen, D downloads, A toggles auto-scroll,
  *    W hides the bars.
  *  - Right-hand action column: who posted it (profile), sound, save (download), auto-scroll,
- *    fullscreen. Bottom bar: Home, Friends, + (placeholders), Inbox (messages), Profile (sign-in:
+ *    playback speed (S: 0.5× to 2×, 1× on every visit), fullscreen. Bottom bar: Home, Friends, + (placeholders), Inbox (messages), Profile (sign-in:
  *    TikTok's QR code / window; YouTube's pasted cookies / window, see platforms.ts `signIn`).
  *  - Search (top bar) and account profiles (social.ts) hand the feed a play list: search results
  *    or an account's videos then play in place of the source, with a pill to go back. The video
@@ -78,6 +78,10 @@ const el = {
   actAuto: $<HTMLButtonElement>('actAuto'),
   actAutoLabel: $('actAutoLabel'),
   actFull: $<HTMLButtonElement>('actFull'),
+  actSpeed: $<HTMLButtonElement>('actSpeed'),
+  actSpeedIco: $('actSpeedIco'),
+  speed: $('speed'),
+  speedCard: $('speedCard'),
   fsExit: $<HTMLButtonElement>('fsExit'),
   navHome: $<HTMLButtonElement>('navHome'),
   navFriends: $<HTMLButtonElement>('navFriends'),
@@ -690,6 +694,47 @@ function toggleAutoscroll(): void {
   toast(prefs.autoscroll ? 'Auto-scroll on: next video plays when this one ends' : 'Auto-scroll off: videos loop');
 }
 
+// ---------- playback speed ----------
+// 1× on every visit (not remembered); applies to every player on the page, at once, keeping the
+// position. The Speed action (or S) opens the choices over a faded screen; a tap outside keeps the
+// current one. The WebCodecs path plays the sound faster rather than time-stretching it, so the
+// pitch rises with the speed (Web Audio has no pitch-preserving rate).
+let speed = 1;
+const fmtSpeed = (r: number): string => `${r}×`;
+function setSpeed(r: number): void {
+  speed = r;
+  for (const e of state.entries) e.player?.setRate(r);
+  el.actSpeedIco.textContent = fmtSpeed(r);
+  el.actSpeed.classList.toggle('on', r !== 1);
+  el.actSpeed.title = `Playback speed: ${fmtSpeed(r)} (S)`;
+  for (const b of el.speedCard.querySelectorAll<HTMLButtonElement>('.speed-opt')) b.classList.toggle('on', Number(b.dataset.rate) === r);
+}
+function speedMenuOpen(): boolean {
+  return !el.speed.classList.contains('hidden');
+}
+function openSpeedMenu(): void {
+  el.speed.classList.remove('hidden');
+  el.speedCard.querySelector<HTMLButtonElement>('.speed-opt.on')?.focus();
+}
+function closeSpeedMenu(): void {
+  el.speed.classList.add('hidden');
+  el.feed.focus();
+}
+el.actSpeed.addEventListener('click', () => (speedMenuOpen() ? closeSpeedMenu() : openSpeedMenu()));
+el.speed.addEventListener('click', (e) => {
+  if (e.target === el.speed) closeSpeedMenu();
+});
+for (const b of el.speedCard.querySelectorAll<HTMLButtonElement>('.speed-opt')) {
+  b.addEventListener('click', () => {
+    const r = Number(b.dataset.rate);
+    if (r > 0) {
+      setSpeed(r);
+      toast(r === 1 ? 'Normal speed' : `Playing at ${fmtSpeed(r)}`);
+    }
+    closeSpeedMenu();
+  });
+}
+
 // Full screen: the video takes all the room the window has (no bars, rail, Up next or actions;
 // .fullwindow in feed.css / theater.css), with an "Exit full screen" button over it. The browser's
 // own fullscreen is asked for as well where it is allowed; where it is refused (the car's browser)
@@ -723,6 +768,30 @@ function start(): void {
   if (cur) void playEntry(cur);
   syncWait();
 }
+
+/**
+ * "Tap to start" is skipped for a signed-in account: the first video plays as soon as it is on
+ * screen and the server has confirmed the sign-in (either may come first). A browser that allows
+ * no sound before a touch plays the picture silently; the first tap, swipe or key turns the sound
+ * on (see the gesture listeners below). A visitor who is not signed in keeps the tap: on a
+ * sign-in-only platform the sign-in panel is what shows, and Explore for guests starts on a tap.
+ * Returns true when it started the feed.
+ */
+function maybeAutoStart(): boolean {
+  if (state.started || state.session?.state !== 'logged_in' || !activeEntry() || overlayOpen()) return false;
+  start();
+  window.setTimeout(() => {
+    const p = activeEntry()?.player;
+    if (p?.audioBlocked && !prefs.muted) toast('Sound starts after your first tap or swipe (a browser rule)', false, 5000);
+  }, 2500);
+  return true;
+}
+// The first touch or key after an automatic start lets a sound that the browser held back begin.
+function onUserGesture(): void {
+  for (const e of state.entries) e.player?.userGesture();
+}
+document.addEventListener('pointerdown', onUserGesture, true);
+document.addEventListener('keydown', onUserGesture, true);
 
 // ---------- session ----------
 function renderSession(): void {
@@ -886,7 +955,10 @@ async function refreshSession(announce = false, recheck = false): Promise<Sessio
     const prevProbing = Boolean(state.session?.probing);
     state.session = await api.session(P.id, recheck);
     sessionPollFailures = 0;
-    if (state.session.state === 'logged_in') signedOutPanelShown = false;
+    if (state.session.state === 'logged_in') {
+      signedOutPanelShown = false;
+      maybeAutoStart();
+    }
     renderSession();
     if (announce) toast(state.session.message || state.session.state);
     if (state.session.state === 'logged_in' && (prev === 'login_pending' || (restoreForYou && prevProbing))) {
@@ -1324,13 +1396,16 @@ async function reload(preloaded?: FeedItem[], startIndex = 0): Promise<void> {
 }
 
 /** Appends new videos (duplicates and items without a playable URL are skipped); returns how many. */
-function addItems(items: FeedItem[]): number {
+/** `stale`: the server's last good batch (see FeedResponse.stale): like a saved video, a failing play URL is replaced from the video's page. */
+function addItems(items: FeedItem[], stale = false): number {
   let added = 0;
   for (const item of items) {
     // An item without formats (search results) is kept: its play URLs are resolved when it comes up.
     if (state.ids.has(item.id) || (item.formats.length && !sourceCandidates(item).length)) continue;
     state.ids.add(item.id);
-    state.entries.push(makeEntry(item));
+    const entry = makeEntry(item);
+    if (stale) entry.restored = true;
+    state.entries.push(entry);
     added++;
   }
   if (added) {
@@ -1430,7 +1505,7 @@ function renderQueue(): void {
 }
 
 /** The next batch for the current mode: the source, or the continuation of a play list. */
-async function fetchBatch(): Promise<{ items: FeedItem[]; warnings: string[]; hasMore: boolean }> {
+async function fetchBatch(): Promise<{ items: FeedItem[]; warnings: string[]; hasMore: boolean; stale?: boolean }> {
   const mode = state.mode;
   if (mode.kind === 'search') {
     if (!mode.hasMore) return { items: [], warnings: [], hasMore: false };
@@ -1447,7 +1522,7 @@ async function fetchBatch(): Promise<{ items: FeedItem[]; warnings: string[]; ha
     return { items: r.items, warnings: r.warnings, hasMore: r.hasMore };
   }
   const r = await api.feed({ platform: P.id, source: prefs.source, category: prefs.source === 'explore' ? prefs.category : undefined, count: BATCH });
-  return { items: r.items, warnings: r.warnings, hasMore: r.hasMore };
+  return { items: r.items, warnings: r.warnings, hasMore: r.hasMore, stale: r.stale };
 }
 
 /** The sign-in panel was opened because the For You feed reported a missing session (once per sign-out) */
@@ -1477,8 +1552,9 @@ async function loadMore(): Promise<number> {
     const r = await fetchBatch();
     if (gen !== state.generation) return 0;
     before = state.entries.length;
-    added = addItems(r.items);
+    added = addItems(r.items, r.stale);
     for (const w of r.warnings) console.warn('[feed]', w);
+    if (r.stale && added && !before) toast('Recent videos first – fresh ones are on their way', false, 4000);
     if (!added) {
       state.emptyBatches++;
       if (!r.hasMore) {
@@ -1732,6 +1808,7 @@ function ensurePlayer(entry: Entry): FeedPlayer {
   });
   player.loop = !prefs.autoscroll;
   player.setMuted(prefs.muted);
+  player.setRate(speed);
   entry.player = player;
   if (!playerModeAnnounced) {
     playerModeAnnounced = true;
@@ -1960,7 +2037,8 @@ function setActive(idx: number): void {
   const cur = state.entries[idx];
   cur.root.classList.add('active');
   syncAuthor(cur);
-  void playEntry(cur);
+  // the first video of a signed-in visit starts by itself (start() plays it); otherwise play here
+  if (!maybeAutoStart()) void playEntry(cur);
   syncWait();
   renderQueue();
   // Only the video in view and its two neighbours keep a player (each holds a decoder, an audio
@@ -2213,7 +2291,16 @@ document.addEventListener('keydown', (e) => {
     case 'W':
       toggleFullscreen();
       break;
+    case 's':
+    case 'S':
+      if (speedMenuOpen()) closeSpeedMenu();
+      else openSpeedMenu();
+      break;
     case 'Escape':
+      if (speedMenuOpen()) {
+        closeSpeedMenu();
+        break;
+      }
       if (isFullscreen()) {
         setFullscreen(false);
         break;

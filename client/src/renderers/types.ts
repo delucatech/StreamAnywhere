@@ -94,6 +94,12 @@ export interface Renderer {
   pause(): void;
   seek(seconds: number): void;
   setVolume(v: number): void;
+  /** Playback speed, media seconds per real second (1 = normal); kept across loads */
+  setRate?(rate: number): void;
+  /** True while the sound could not start for want of a user gesture (the picture runs on its own clock) */
+  readonly audioBlocked?: boolean;
+  /** The viewer has touched the page: a renderer whose sound was blocked may start it now */
+  userGesture?(): void;
   readonly currentTime: number;
   readonly duration: number;
   readonly state: PlayerState;

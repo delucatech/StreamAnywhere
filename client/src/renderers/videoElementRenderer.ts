@@ -233,6 +233,11 @@ export class VideoElementRenderer implements Renderer {
   setVolume(v: number): void {
     this.video.volume = v;
   }
+  setRate(rate: number): void {
+    // the default too: a new source resets playbackRate to it
+    this.video.defaultPlaybackRate = rate;
+    this.video.playbackRate = rate;
+  }
 
   /** A <video> element tells time ranges, not bytes: the share of the duration buffered from the playhead on. */
   download(): DownloadProgress {

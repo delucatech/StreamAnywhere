@@ -127,6 +127,9 @@ export class FeedPlayer {
    */
   async load(url: string, connection: ConnectionKind, label: string, extra: { audioUrl?: string; durationHint?: number; blob?: Blob; prefix?: MediaPrefix; audioPrefix?: MediaPrefix } = {}): Promise<void> {
     if (this.destroyed) return;
+    // play() may already have been asked for this source: the feed looks the media cache up before
+    // it hands the URL over, and the tap (or the automatic start) does not wait for that
+    const wanted = this.wantPlay;
     // a file stored in this browser (the Video Library) has no URL; `url` must still be truthy for play()
     this.url = url || (extra.blob ? `local:${label}` : url);
     this.wantPlay = false;
@@ -145,12 +148,16 @@ export class FeedPlayer {
     };
     this.renderer.setVolume(this.muted ? 0 : 1);
     this.startTicker();
+    const loaded = this.url;
     await this.renderer.load(src);
+    if (wanted && !this.destroyed && this.url === loaded && !this.wantPlay) await this.play();
   }
 
+  /** Starts playback; asked before the source is known, it starts as soon as load() has the source. */
   async play(): Promise<void> {
-    if (this.destroyed || !this.url) return;
+    if (this.destroyed) return;
     this.wantPlay = true;
+    if (!this.url) return;
     await this.renderer.play();
   }
 
@@ -169,6 +176,21 @@ export class FeedPlayer {
   setMuted(m: boolean): void {
     this.muted = m;
     this.renderer.setVolume(m ? 0 : 1);
+  }
+
+  /** Playback speed (1 = normal); the renderer keeps it for its next load too */
+  setRate(rate: number): void {
+    this.renderer.setRate?.(rate);
+  }
+
+  /** The sound could not start without a user gesture; the picture plays silently meanwhile */
+  get audioBlocked(): boolean {
+    return Boolean(this.renderer.audioBlocked);
+  }
+
+  /** The viewer touched the page: sound held back by the autoplay policy may start now */
+  userGesture(): void {
+    this.renderer.userGesture?.();
   }
 
   private startTicker(): void {

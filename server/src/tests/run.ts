@@ -20,7 +20,11 @@ import { cleanUserAgent, cookiesLookSignedIn, InstagramSessionError, parseInstag
 import { FACEBOOK_CATEGORIES, INSTAGRAM_CATEGORIES } from '../../../shared/types';
 import { extractReels, facebookVideoId, isFacebookUrl, pageFromQuery, pageSummary, planExploreFill as planFacebookFill, playable, reelToFeedItem, slugFromProfileUrl } from '../facebook';
 import { accountFromPage, cookieHeaderFor, FacebookSessionError, parseFacebookCookies, slugFromMeRedirect } from '../facebookSession';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { Reservoir, expiredSoon } from '../reservoir';
+import { lastFeedDir, resetLastBatches, STALE_BATCH } from '../lastBatch';
 import { buildOptions, downloadSourceOf, saveName } from '../downloader';
 import { canonicalize, normalizeUrl } from '../library';
 import type { FeedItem } from '../../../shared/types';
@@ -32,6 +36,9 @@ import type { ResolveResponse } from '../../../shared/types';
 const TEST_MP4 = 'https://mdn.github.io/learning-area/html/multimedia-and-embedding/video-and-audio-content/rabbit320.mp4';
 const TIKTOK_URL = process.env.TIKTOK_TEST_URL || 'https://www.tiktok.com/@tiktok/video/7693184538704416031';
 const skipNetwork = process.env.SKIP_NETWORK === '1';
+// The last good batches of a server running on this machine must not leak into these checks
+// (their proxy links belong to that process); the tests keep their own, empty, folder.
+process.env.LAST_FEED_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'streamanywhere-last-feed-'));
 
 let failures = 0;
 function check(name: string, cond: boolean, detail?: unknown): void {
@@ -433,6 +440,40 @@ async function reservoirChecks(): Promise<void> {
   const t3 = await r.take(5);
   check('the next take retries the source and recovers', t3.items.length === 5, { got: t3.items.length });
   r.stop();
+  // The last good batch: an empty stock answers with earlier videos at once, while the fill runs.
+  resetLastBatches();
+  const staleFile = path.join(lastFeedDir(), 'test-stale.json');
+  try {
+    const slow = new Reservoir('stale-test', source, { target: 20, low: 10, batch: 10, gapMs: 0, idleMs: 60_000, now: clock, persistKey: 'test-stale' });
+    const first = await slow.take(10);
+    check('persisted reservoir: first take fills and serves fresh items', first.items.length === 10 && !first.stale, { got: first.items.length });
+    await new Promise((res) => setTimeout(res, 30));
+    const servedBefore = new Set(first.items.map((i) => i.id));
+    while (slow.ready > 0) for (const i of (await slow.take(10)).items) servedBefore.add(i.id);
+    fail = 1; // the source refuses the next fill: the stale batch must not depend on it
+    const callsAtEmpty = calls;
+    const t0 = Date.now();
+    const stale = await slow.take(10);
+    check('empty stock answers at once with earlier videos (stale)', stale.stale === true && stale.items.length === STALE_BATCH && Date.now() - t0 < 500, { got: stale.items.length, stale: stale.stale, ms: Date.now() - t0 });
+    check('the stale items were served on an earlier take', stale.items.every((i) => servedBefore.has(i.id)), { ids: stale.items.map((i) => i.id) });
+    check('a fill was started alongside the stale answer', calls === callsAtEmpty + 1, { calls, callsAtEmpty });
+    await new Promise((res) => setTimeout(res, 30));
+    const again = await slow.take(10);
+    check('the next stale answer continues the batch without repeating', again.stale === true && again.items.every((i) => !stale.items.some((j) => j.id === i.id)), { ids: again.items.map((i) => i.id) });
+    now += 5000;
+    await new Promise((res) => setTimeout(res, 30));
+    const fresh = await slow.take(10);
+    check('once the source answers, takes are fresh again', fresh.items.length === 10 && !fresh.stale, { got: fresh.items.length, stale: fresh.stale });
+    slow.stop();
+    await new Promise((res) => setTimeout(res, 50)); // the file write is asynchronous
+    check('the last good batch is on disk', fs.existsSync(staleFile), staleFile);
+  } finally {
+    try {
+      fs.rmSync(staleFile, { force: true });
+    } catch {
+      /* nothing written */
+    }
+  }
   check('expiredSoon: unknown expiry is kept', !expiredSoon(fakeItem('a'), 1000));
   check('expiredSoon: far expiry is kept, near one dropped', !expiredSoon(fakeItem('a', 2000), 1000) && expiredSoon(fakeItem('a', 1), 1000));
 }

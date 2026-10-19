@@ -50,7 +50,7 @@ client/   Vite 4 + TypeScript front end (no framework)
   src/diagnostics.ts              the six experiments (measured, with explanations)
   src/main.ts                     UI, source/renderer selection, direct-vs-proxy decision
   home.html + src/home/home.ts    the launcher: one app icon per platform (src/platforms.ts), zoom-open animation
-  feed.html + src/feed/feed.ts    the feed page (feed.html?platform=tiktok|youtube|instagram|facebook): stream that follows the finger / mouse and snaps one video at a time (TikTok-like drag), tap-to-pause, auto-scroll, download
+  feed.html + src/feed/feed.ts    the feed page (feed.html?platform=tiktok|youtube|instagram|facebook): stream that follows the finger / mouse and snaps one video at a time (TikTok-like drag), tap-to-pause, auto-scroll, playback speed, download
 server/   Fastify 4 + TypeScript (Node 16 compatible)
   src/tiktok.ts                   native TikTok resolver (page JSON) + server-side CORS probe
   src/feed.ts                     Explore feed (unsigned TikTok API) + itemStruct → FeedItem conversion

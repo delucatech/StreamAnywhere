@@ -30,6 +30,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { FeedItem, LoginMode, SessionInputRequest, SessionStatus } from '../../shared/types';
 import { exploreApiUrl, isTikTokAd, itemToFeedItem, parseExploreBody, type ExploreResult } from './feed';
+import { rememberBatch, staleBatch } from './lastBatch';
 
 type Browser = import('puppeteer-core').Browser;
 type Page = import('puppeteer-core').Page;
@@ -1997,6 +1998,8 @@ export async function logout(): Promise<SessionStatus> {
 export interface ForYouResult {
   items: FeedItem[];
   warnings: string[];
+  /** Videos served on an earlier visit (nothing was ready); the page is loading fresh ones */
+  stale?: boolean;
 }
 
 /** How many captured For You items the pump keeps ready while someone is watching */
@@ -2071,6 +2074,18 @@ export async function fetchForYou(count: number, log: (m: string) => void): Prom
     if ((s.state as SessionStatus['state']) !== 'logged_in') throw new Error(s.error ? `Not signed in (${s.error})` : 'Not signed in to TikTok. Use "Sign in" first.');
   }
   forYouAskedAt = Date.now();
+  // Nothing ready yet (a cold page, a restart): videos from the last visit go out at once while the
+  // page loads; the next request gets the fresh ones. The page is still asked for, in the background.
+  if (!s.pending.length) {
+    const stale = staleBatch('tiktok-foryou');
+    if (stale?.length) {
+      void feedPage()
+        .then(() => startForYouPump())
+        .catch((e) => log(`For You: page not ready yet (${(e as Error).message})`));
+      log(`For You: nothing ready, ${stale.length} earlier videos served while the page loads`);
+      return { items: stale, warnings, stale: true };
+    }
+  }
   const page = await feedPage();
   startForYouPump();
   const deadline = Date.now() + 12_000;
@@ -2104,6 +2119,7 @@ export async function fetchForYou(count: number, log: (m: string) => void): Prom
     if (!s.pending.length) warnings.push(s.lastFeedError || 'TikTok did not deliver feed items; try again in a moment.');
   }
   const items = s.pending.splice(0, count);
+  if (items.length) rememberBatch('tiktok-foryou', items);
   return { items, warnings };
 }
 

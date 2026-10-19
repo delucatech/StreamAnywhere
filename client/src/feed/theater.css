@@ -392,6 +392,12 @@
   height: 52px;
   background: rgba(255, 255, 255, 0.08);
 }
+/* a switched-on action (Auto, a speed other than 1×) keeps the accent here too: this rule comes after
+   the one above, which used to win over feed.css's .act.on */
+.wide .act.on .ico,
+.wide .act.on:hover .ico {
+  background: var(--accent);
+}
 .wide .act .ico.avatar {
   border-color: var(--accent);
 }

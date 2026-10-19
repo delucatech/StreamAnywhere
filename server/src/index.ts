@@ -81,7 +81,7 @@ function exploreReservoir(category: number, log: (m: string) => void, warn: (err
         }
         return fetchExploreAny(cat, n, log, warn);
       },
-      { log },
+      { log, persistKey: `tiktok-explore-${category}` },
     );
     exploreReservoirs.set(category, r);
   }
@@ -152,7 +152,7 @@ function instagramReservoir(categoryId: number, log: (m: string) => void): Reser
   let r = instagramReservoirs.get(categoryId);
   if (!r) {
     const cat = instagramCategory(categoryId);
-    r = new Reservoir(`instagram ${cat.label}`, ({ count }) => exploreInstagram(cat.id, count, log), { log, batch: 30, target: 45, low: 25, gapMs: 4000, waitMs: 110_000 });
+    r = new Reservoir(`instagram ${cat.label}`, ({ count }) => exploreInstagram(cat.id, count, log), { log, batch: 30, target: 45, low: 25, gapMs: 4000, waitMs: 110_000, persistKey: `instagram-explore-${cat.id}` });
     instagramReservoirs.set(categoryId, r);
   }
   return r;
@@ -202,7 +202,7 @@ function facebookReservoir(categoryId: number, log: (m: string) => void): Reserv
   let r = facebookReservoirs.get(categoryId);
   if (!r) {
     const cat = facebookCategory(categoryId);
-    r = new Reservoir(`facebook ${cat.label}`, ({ count }) => exploreFacebook(cat.id, count, log), { log, batch: 24, target: 40, low: 20, gapMs: 2500, waitMs: 60_000 });
+    r = new Reservoir(`facebook ${cat.label}`, ({ count }) => exploreFacebook(cat.id, count, log), { log, batch: 24, target: 40, low: 20, gapMs: 2500, waitMs: 60_000, persistKey: `facebook-explore-${cat.id}` });
     facebookReservoirs.set(categoryId, r);
   }
   return r;
@@ -438,13 +438,13 @@ export async function buildServer() {
         if (!instagramSignedIn()) throw new FeedError('Instagram needs a sign-in: open Profile and sign in with the cookies of a signed-in browser.', 'instagram_not_signed_in', 401);
         if (source === 'foryou') {
           const r = await instagramForYouReservoir(log).take(count);
-          const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0 };
+          const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
           log(`instagram foryou: ${r.items.length} served ${r.fromStock ? 'from stock' : 'after a fill'}, ${r.ready} ready, ${resp.elapsedMs} ms`);
           return resp;
         }
         const cat = instagramCategory(b.category);
         const r = await instagramReservoir(cat.id, log).take(count);
-        const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0 };
+        const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
         log(`instagram explore ${cat.label}: ${r.items.length} served ${r.fromStock ? 'from stock' : 'after a fill'}, ${r.ready} ready, ${resp.elapsedMs} ms`);
         return resp;
       }
@@ -453,13 +453,13 @@ export async function buildServer() {
           await ensureFacebookSession();
           if (!facebookSignedIn()) throw new FeedError('Not signed in to Facebook: sign in from Profile to see your For You feed.', 'facebook_not_signed_in', 401);
           const r = await facebookForYouReservoir(log).take(count);
-          const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0 };
+          const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
           log(`facebook foryou: ${r.items.length} served ${r.fromStock ? 'from stock' : 'after a fill'}, ${r.ready} ready, ${resp.elapsedMs} ms`);
           return resp;
         }
         const cat = facebookCategory(b.category);
         const r = await facebookReservoir(cat.id, log).take(count);
-        const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0 };
+        const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
         log(`facebook explore ${cat.label}: ${r.items.length} served ${r.fromStock ? 'from stock' : 'after a fill'}, ${r.ready} ready, ${resp.elapsedMs} ms`);
         return resp;
       }
@@ -467,13 +467,13 @@ export async function buildServer() {
         if (source === 'foryou') {
           if (!youtubeCookieFile()) throw new FeedError('Not signed in to YouTube: sign in from Profile to see your For You feed.', 'youtube_not_signed_in', 401);
           const r = await youtubeForYouReservoir(log).take(count);
-          const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0 };
+          const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
           log(`youtube foryou: ${r.items.length} served ${r.fromStock ? 'from stock' : 'after a fill'}, ${r.ready} ready, ${resp.elapsedMs} ms`);
           return resp;
         }
         const cat = youTubeCategory(b.category);
         const r = await youtubeReservoir(cat.id, log).take(count);
-        const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0 };
+        const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
         log(`youtube explore ${cat.tag}: ${r.items.length} served ${r.fromStock ? 'from stock' : 'after a fill'}, ${r.ready} ready, ${resp.elapsedMs} ms`);
         return resp;
       }
@@ -482,12 +482,12 @@ export async function buildServer() {
         const norm = normalizeExploreOptions({ category, count });
         // Served from the stock (filled in the background); only an empty stock waits for TikTok.
         const r = await exploreReservoir(norm.category, log, warn).take(norm.count);
-        const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0 };
-        log(`explore ${norm.category}: ${r.items.length} served ${r.fromStock ? 'from stock' : 'after a fill'}, ${r.ready} ready, ${resp.elapsedMs} ms`);
+        const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
+        log(`explore ${norm.category}: ${r.items.length} served ${r.stale ? 'from the last good batch' : r.fromStock ? 'from stock' : 'after a fill'}, ${r.ready} ready, ${resp.elapsedMs} ms`);
         return resp;
       }
       const r = await fetchForYou(count, log);
-      const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0 };
+      const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
       return resp;
     } catch (e) {
       const err = e as Error;

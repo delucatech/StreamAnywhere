@@ -149,6 +149,7 @@
           <button class="act" id="actMute" type="button" title="Sound on/off (M)"><span class="ico" id="actMuteIco"></span><small>Sound</small></button>
           <button class="act" id="actDownload" type="button" title="Download this video (D)"><span class="ico" id="actDownloadIco"></span><small>Save</small></button>
           <button class="act" id="actAuto" type="button" title="Auto-scroll to the next video when one ends (A)"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 6l9 6-9 6z" /><path d="M18 6v12" /></svg></span><small id="actAutoLabel">Auto</small></button>
+          <button class="act" id="actSpeed" type="button" title="Playback speed (S)"><span class="ico" id="actSpeedIco">1×</span><small>Speed</small></button>
           <button class="act" id="actFull" type="button" title="Full screen (F)"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5" /><path d="M20 9V4h-5" /><path d="M4 15v5h5" /><path d="M20 15v5h-5" /></svg></span><small>Full</small></button>
         </aside>
       </div>
@@ -308,6 +309,18 @@
               <button id="inboxSend" class="btn primary" type="submit">Send</button>
             </form>
           </div>
+        </div>
+      </div>
+      <!-- Playback speed (the Speed action / S): tap a choice, or outside the card to keep the current one -->
+      <div id="speed" class="speed hidden" role="dialog" aria-label="Playback speed">
+        <div class="speed-card" id="speedCard">
+          <div class="speed-title">Playback speed</div>
+          <button class="speed-opt" type="button" data-rate="0.5">0.5×</button>
+          <button class="speed-opt" type="button" data-rate="0.75">0.75×</button>
+          <button class="speed-opt on" type="button" data-rate="1">1× <small>Normal</small></button>
+          <button class="speed-opt" type="button" data-rate="1.25">1.25×</button>
+          <button class="speed-opt" type="button" data-rate="1.5">1.5×</button>
+          <button class="speed-opt" type="button" data-rate="2">2×</button>
         </div>
       </div>
       <div id="start" class="start">

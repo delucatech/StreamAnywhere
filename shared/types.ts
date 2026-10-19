@@ -198,6 +198,12 @@ export interface FeedResponse {
   cursor?: string;
   warnings: string[];
   elapsedMs: number;
+  /**
+   * The server had nothing ready and answered with videos it served earlier (its last good batch,
+   * kept on disk) instead of making the viewer wait; fresh ones are being fetched. Their play URLs
+   * may have expired: the client gets new ones from the video's page when one fails.
+   */
+  stale?: boolean;
 }
 
 /** GET /api/feed/progress?platform=: the step a slow fill is on (no text when nothing is running). */
