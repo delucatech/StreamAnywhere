@@ -450,15 +450,17 @@ async function reservoirChecks(): Promise<void> {
     await new Promise((res) => setTimeout(res, 30));
     const servedBefore = new Set(first.items.map((i) => i.id));
     while (slow.ready > 0) for (const i of (await slow.take(10)).items) servedBefore.add(i.id);
-    fail = 1; // the source refuses the next fill: the stale batch must not depend on it
+    fail = 2; // the source refuses the next two fills (the wait, then the one behind the stale answer): the stale batch must not depend on it
     const callsAtEmpty = calls;
     const t0 = Date.now();
-    const stale = await slow.take(10);
+    check('a viewer with videos on screen gets no stale batch (waits for the source)', (await slow.take(10).then(() => false, () => true)) && Date.now() - t0 >= 0, { calls });
+    now += 5000;
+    const stale = await slow.take(10, true);
     check('empty stock answers at once with earlier videos (stale)', stale.stale === true && stale.items.length === STALE_BATCH && Date.now() - t0 < 500, { got: stale.items.length, stale: stale.stale, ms: Date.now() - t0 });
     check('the stale items were served on an earlier take', stale.items.every((i) => servedBefore.has(i.id)), { ids: stale.items.map((i) => i.id) });
-    check('a fill was started alongside the stale answer', calls === callsAtEmpty + 1, { calls, callsAtEmpty });
+    check('a fill was started alongside the stale answer', calls === callsAtEmpty + 2, { calls, callsAtEmpty });
     await new Promise((res) => setTimeout(res, 30));
-    const again = await slow.take(10);
+    const again = await slow.take(10, true);
     check('the next stale answer continues the batch without repeating', again.stale === true && again.items.every((i) => !stale.items.some((j) => j.id === i.id)), { ids: again.items.map((i) => i.id) });
     now += 5000;
     await new Promise((res) => setTimeout(res, 30));

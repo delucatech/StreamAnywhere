@@ -4,7 +4,7 @@ import rateLimit from '@fastify/rate-limit';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { EXPLORE_CATEGORIES, YOUTUBE_CATEGORIES, platformOf } from '../../shared/types';
-import type { ConversationRequest, DownloadProbeRequest, LibraryCategoryRequest, LibraryEntryPatch, LibrarySaveRequest, DownloadStartRequest, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ProbeRequest, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SendMessageRequest, SessionActionRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
+import type { ConversationRequest, DownloadProbeRequest, LibraryCategoryRequest, LibraryEntryPatch, LibrarySaveRequest, DownloadStartRequest, FeedItem, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ProbeRequest, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SendMessageRequest, SessionActionRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
 import { registerAuth } from './auth';
 import { config, findUp } from './config';
 import { registerProxyRoutes } from './proxy';
@@ -23,10 +23,10 @@ import { getProgress } from './progress';
 import { conversation, fetchProfile, followUser, inbox, inboxDebug, searchTikTok, sendMessage, SocialError } from './social';
 import { channelVideos, exploreYouTube, isYouTubeUrl, recommendedYouTube, resolveYouTube, searchYouTube, youTubeCategory, YouTubeError } from './youtube';
 import { exploreInstagram, forYouInstagram, instagramCategory, instagramStats, InstagramError, isInstagramUrl, pauseInstagramPages, profileInstagram, resolveInstagram, searchInstagram, setInstagramLogger, shutdownInstagram } from './instagram';
-import { instagramCancelLogin, instagramLogout, instagramSessionLog, ensureInstagramSession, instagramSessionLost, instagramSessionStatus, instagramSignedIn, instagramStartLogin, InstagramSessionError, setInstagramSessionLogger, shutdownInstagramSession } from './instagramSession';
+import { instagramCancelLogin, instagramLogout, instagramMaySignIn, instagramSessionLog, ensureInstagramSession, instagramSessionLost, instagramSessionStatus, instagramSignedIn, instagramStartLogin, InstagramSessionError, setInstagramSessionLogger, shutdownInstagramSession } from './instagramSession';
 import { setYouTubeSessionLogger, shutdownYouTubeSession, youtubeCancelLogin, youtubeCookieFile, youtubeLogout, youtubeSessionLog, youtubeSessionLost, youtubeSessionStatus, youtubeStartLogin, YouTubeSessionError } from './youtubeSession';
 import { exploreFacebook, facebookCategory, facebookStats, FacebookError, forYouFacebook, isFacebookUrl, profileFacebook, resolveFacebook, searchFacebook, setFacebookLogger } from './facebook';
-import { ensureFacebookSession, facebookCancelLogin, facebookLogout, facebookSessionLog, facebookSessionLost, facebookSessionStatus, facebookSignedIn, facebookStartLogin, FacebookSessionError, setFacebookSessionLogger, shutdownFacebookSession } from './facebookSession';
+import { ensureFacebookSession, facebookCancelLogin, facebookLogout, facebookMaySignIn, facebookSessionLog, facebookSessionLost, facebookSessionStatus, facebookSignedIn, facebookStartLogin, FacebookSessionError, setFacebookSessionLogger, shutdownFacebookSession } from './facebookSession';
 
 /** After the browser path rescued an explore request, prefer it for a while (datacenter IPs). */
 let exploreViaBrowserUntil = 0;
@@ -429,64 +429,62 @@ export async function buildServer() {
     const platform = platformOf(b.platform);
     const source = b.source === 'foryou' ? 'foryou' : 'explore';
     const count = Math.max(1, Math.min(30, Number(b.count) || 12));
+    // The viewer has nothing on screen: earlier videos beat waiting (reservoir.ts takeStale)
+    const quick = b.quick === true;
     const t0 = Date.now();
     const log = (msg: string) => app.log.info({ platform, source }, msg);
     const warn = (err: string, msg: string) => app.log.warn({ platform, source, err }, msg);
+    const served = (r: { items: FeedItem[]; warnings: string[]; stale?: boolean; fromStock?: boolean; ready?: number }, what: string): FeedResponse => {
+      const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
+      log(`${what}: ${r.items.length} served ${r.stale ? 'from the last good batch' : r.fromStock ? 'from stock' : 'after a fill'}, ${r.ready ?? 0} ready, ${resp.elapsedMs} ms`);
+      return resp;
+    };
     try {
       if (platform === 'instagram') {
+        const cat = instagramCategory(b.category);
+        const reservoir = source === 'foryou' ? instagramForYouReservoir(log) : instagramReservoir(cat.id, log);
+        const what = source === 'foryou' ? 'instagram foryou' : `instagram explore ${cat.label}`;
+        // A viewer with nothing on screen does not wait for the sign-in check (a browser start on the
+        // server): earlier videos go out now, and the check plus a fill run meanwhile.
+        const quickBatch = quick && instagramMaySignIn() ? reservoir.takeStale() : undefined;
+        if (quickBatch) {
+          void ensureInstagramSession().then((ok) => ok && reservoir.warm(), () => undefined);
+          return served(quickBatch, what);
+        }
         await ensureInstagramSession();
         if (!instagramSignedIn()) throw new FeedError('Instagram needs a sign-in: open Profile and sign in with the cookies of a signed-in browser.', 'instagram_not_signed_in', 401);
-        if (source === 'foryou') {
-          const r = await instagramForYouReservoir(log).take(count);
-          const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
-          log(`instagram foryou: ${r.items.length} served ${r.fromStock ? 'from stock' : 'after a fill'}, ${r.ready} ready, ${resp.elapsedMs} ms`);
-          return resp;
-        }
-        const cat = instagramCategory(b.category);
-        const r = await instagramReservoir(cat.id, log).take(count);
-        const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
-        log(`instagram explore ${cat.label}: ${r.items.length} served ${r.fromStock ? 'from stock' : 'after a fill'}, ${r.ready} ready, ${resp.elapsedMs} ms`);
-        return resp;
+        return served(await reservoir.take(count, quick), what);
       }
       if (platform === 'facebook') {
         if (source === 'foryou') {
+          const reservoir = facebookForYouReservoir(log);
+          const quickBatch = quick && facebookMaySignIn() ? reservoir.takeStale() : undefined;
+          if (quickBatch) {
+            void ensureFacebookSession().then((ok) => ok && reservoir.warm(), () => undefined);
+            return served(quickBatch, 'facebook foryou');
+          }
           await ensureFacebookSession();
           if (!facebookSignedIn()) throw new FeedError('Not signed in to Facebook: sign in from Profile to see your For You feed.', 'facebook_not_signed_in', 401);
-          const r = await facebookForYouReservoir(log).take(count);
-          const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
-          log(`facebook foryou: ${r.items.length} served ${r.fromStock ? 'from stock' : 'after a fill'}, ${r.ready} ready, ${resp.elapsedMs} ms`);
-          return resp;
+          return served(await reservoir.take(count, quick), 'facebook foryou');
         }
         const cat = facebookCategory(b.category);
-        const r = await facebookReservoir(cat.id, log).take(count);
-        const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
-        log(`facebook explore ${cat.label}: ${r.items.length} served ${r.fromStock ? 'from stock' : 'after a fill'}, ${r.ready} ready, ${resp.elapsedMs} ms`);
-        return resp;
+        return served(await facebookReservoir(cat.id, log).take(count, quick), `facebook explore ${cat.label}`);
       }
       if (platform === 'youtube') {
         if (source === 'foryou') {
           if (!youtubeCookieFile()) throw new FeedError('Not signed in to YouTube: sign in from Profile to see your For You feed.', 'youtube_not_signed_in', 401);
-          const r = await youtubeForYouReservoir(log).take(count);
-          const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
-          log(`youtube foryou: ${r.items.length} served ${r.fromStock ? 'from stock' : 'after a fill'}, ${r.ready} ready, ${resp.elapsedMs} ms`);
-          return resp;
+          return served(await youtubeForYouReservoir(log).take(count, quick), 'youtube foryou');
         }
         const cat = youTubeCategory(b.category);
-        const r = await youtubeReservoir(cat.id, log).take(count);
-        const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
-        log(`youtube explore ${cat.tag}: ${r.items.length} served ${r.fromStock ? 'from stock' : 'after a fill'}, ${r.ready} ready, ${resp.elapsedMs} ms`);
-        return resp;
+        return served(await youtubeReservoir(cat.id, log).take(count, quick), `youtube explore ${cat.tag}`);
       }
       if (source === 'explore') {
         const category = b.category !== undefined && Number.isInteger(Number(b.category)) ? Number(b.category) : undefined;
         const norm = normalizeExploreOptions({ category, count });
         // Served from the stock (filled in the background); only an empty stock waits for TikTok.
-        const r = await exploreReservoir(norm.category, log, warn).take(norm.count);
-        const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
-        log(`explore ${norm.category}: ${r.items.length} served ${r.stale ? 'from the last good batch' : r.fromStock ? 'from stock' : 'after a fill'}, ${r.ready} ready, ${resp.elapsedMs} ms`);
-        return resp;
+        return served(await exploreReservoir(norm.category, log, warn).take(norm.count, quick), `explore ${norm.category}`);
       }
-      const r = await fetchForYou(count, log);
+      const r = await fetchForYou(count, log, quick);
       const resp: FeedResponse = { source, items: r.items, hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
       return resp;
     } catch (e) {

@@ -189,6 +189,13 @@ export interface FeedRequest {
   count?: number;
   /** Opaque continuation from the previous response */
   cursor?: string;
+  /**
+   * The viewer has nothing on screen: a server with nothing ready answers with videos it served
+   * earlier (FeedResponse.stale) instead of making them wait. Not sent while videos are on screen
+   * (a saved feed, an earlier batch): those were the server's last videos anyway, and the viewer
+   * wants fresh ones, prefetched ahead, so the wait for the source costs them nothing.
+   */
+  quick?: boolean;
 }
 
 export interface FeedResponse {

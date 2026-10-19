@@ -212,6 +212,8 @@ function earlierVerified(userId: string | undefined): string | undefined {
 }
 
 export const instagramSignedIn = (): boolean => s.state === 'logged_in';
+/** Signed in, or a saved sign-in not checked yet (a restart): worth showing earlier videos while the check runs. */
+export const instagramMaySignIn = (): boolean => s.state === 'logged_in' || (s.state === 'none' && !probed && fileExists());
 
 /** The Reels page came back for the saved cookies: Instagram accepts them (and may have named the account). */
 function confirmSignedIn(username?: string): void {

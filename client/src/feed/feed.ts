@@ -1219,26 +1219,6 @@ ${sec} s so far – still working`;
   render();
   void askServer();
 }
-/**
- * Platforms that serve nobody signed out (Instagram): before anything can load, the server checks
- * the saved sign-in, which can take a while (a browser start on a small VM). Shown until the feed
- * starts loading or the sign-in panel opens.
- */
-function startSessionCheckStatus(): void {
-  clearInterval(loadingTicker);
-  const t0 = Date.now();
-  const render = (): void => {
-    const sec = Math.round((Date.now() - t0) / 1000);
-    let detail = `Checking your ${P.name} sign-in on the server`;
-    if (sec >= 6) detail = `The server is checking the saved ${P.name} sign-in…
-(a fresh browser start on the server can take up to a minute)`;
-    if (sec >= 10) detail += `
-${sec} s so far – still working`;
-    showLoading(`Opening ${P.name}…`, detail);
-  };
-  render();
-  loadingTicker = window.setInterval(render, 1000);
-}
 function showRetryStatus(delayMs: number): void {
   clearInterval(loadingTicker);
   const until = Date.now() + delayMs;
@@ -1269,7 +1249,8 @@ function showRetryStatus(delayMs: number): void {
 // again when the video comes up; younger ones are kept, and re-fetched if they fail.
 const RESUME_KEY = `streamanywhere.resume.${P.id}`;
 const RESUME_AT_KEY = `${RESUME_KEY}.at`;
-const RESUME_MAX_AGE = 12 * 3600_000;
+const RESUME_MAX_AGE = 7 * 24 * 3600_000;
+/** A play URL that does not say when it expires is trusted this long */
 const RESUME_KEEP_URLS = 2 * 3600_000;
 const RESUME_BEHIND = 1;
 const RESUME_AHEAD = 30;
@@ -1330,7 +1311,11 @@ function loadResume(): Resume | undefined {
     const r = JSON.parse(localStorage.getItem(RESUME_KEY) || 'null') as Resume | null;
     if (!r || r.v !== 1 || !Array.isArray(r.items) || !r.items.length || Date.now() - r.savedAt > RESUME_MAX_AGE) return undefined;
     if (r.source !== 'explore' && r.source !== 'foryou') return undefined;
-    if (Date.now() - r.savedAt > RESUME_KEEP_URLS) for (const it of r.items) it.formats = [];
+    // Play URLs that have expired (or may have: no expiry known, saved long ago) are dropped; such a
+    // video gets fresh ones from its page when it comes up (ensureFormats). The others play at once.
+    const now = Date.now();
+    const old = now - r.savedAt > RESUME_KEEP_URLS;
+    for (const it of r.items) it.formats = it.formats.filter((f) => (f.expiresAt !== undefined ? f.expiresAt * 1000 > now + 60_000 : !old));
     r.index = Math.max(0, Math.min(r.items.length - 1, Number(r.index) || 0));
     return r;
   } catch {
@@ -1521,7 +1506,9 @@ async function fetchBatch(): Promise<{ items: FeedItem[]; warnings: string[]; ha
     mode.hasMore = r.hasMore;
     return { items: r.items, warnings: r.warnings, hasMore: r.hasMore };
   }
-  const r = await api.feed({ platform: P.id, source: prefs.source, category: prefs.source === 'explore' ? prefs.category : undefined, count: BATCH });
+  // Nothing on screen: the server may answer with earlier videos rather than make the viewer wait.
+  // With videos on screen (a saved feed, an earlier batch) it must not: those are the same videos.
+  const r = await api.feed({ platform: P.id, source: prefs.source, category: prefs.source === 'explore' ? prefs.category : undefined, count: BATCH, quick: state.entries.length === 0 });
   return { items: r.items, warnings: r.warnings, hasMore: r.hasMore, stale: r.stale };
 }
 
@@ -2037,8 +2024,12 @@ function setActive(idx: number): void {
   const cur = state.entries[idx];
   cur.root.classList.add('active');
   syncAuthor(cur);
-  // the first video of a signed-in visit starts by itself (start() plays it); otherwise play here
-  if (!maybeAutoStart()) void playEntry(cur);
+  // the first video of a signed-in visit starts by itself (start() plays it); otherwise play here –
+  // or, before "Tap to start", get it ready (fresh play URLs if needed, first frames) so the tap is instant
+  if (!maybeAutoStart()) {
+    if (state.started) void playEntry(cur);
+    else void ensureFormats(cur).then((ok) => ok && !state.started && activeEntry() === cur && attachSource(cur));
+  }
   syncWait();
   renderQueue();
   // Only the video in view and its two neighbours keep a player (each holds a decoder, an audio
@@ -2546,12 +2537,17 @@ void (async () => {
   const saved = loadResume();
   const restored = !!saved && (saved.source === wanted || saved.source === 'explore' || P.loginRequired) && restoreFeed(saved);
   const restoredFrom = restored ? saved!.source : undefined;
-  if (savedForYou && !restored) {
+  // Explore first, For You once the account is confirmed – except on a sign-in-only platform, where
+  // either tab needs the account: there the feed the viewer will get is asked for right away.
+  if (savedForYou && !restored && !P.loginRequired) {
     prefs.source = 'explore';
     renderSourceUi();
   }
-  // A platform that serves nobody signed out has nothing to load until the account is known.
-  const feedReady: Promise<unknown> = P.loginRequired || restored ? Promise.resolve() : loadMore();
+  // The first batch is asked for at once, before the session check: the server answers with
+  // earlier videos when it has nothing ready, or with "not signed in" (which opens the sign-in panel).
+  // On a sign-in-only platform that batch is the account's feed, like a restored one (onSignedIn keeps it).
+  const feedReady: Promise<unknown> = restored ? Promise.resolve() : loadMore();
+  if (P.loginRequired && !restored) restoredSource = prefs.source;
   let resuming = false;
   try {
     resuming = localStorage.getItem(SIGNIN_KEY) === '1';
@@ -2562,9 +2558,6 @@ void (async () => {
     // A sign-in was pending when the page was last open: show the panel right away, in the right step.
     el.session.classList.remove('hidden');
     el.sessionText.innerHTML = `<b>Resuming your ${esc(P.name)} sign-in…</b>\nChecking where it stands on the server.`;
-  } else if (P.loginRequired && !restored) {
-    // Nothing loads until the account is known: say so, with the time it takes, instead of a black screen.
-    startSessionCheckStatus();
   }
   const s = await refreshSession();
   if (s?.state === 'login_pending') {
@@ -2588,18 +2581,21 @@ void (async () => {
   // while the check still runs, so the switch to the account's feed (onSignedIn) knows it too.
   if (!state.session?.probing) restoredSource = undefined;
   if (P.loginRequired) {
-    if (state.session?.state === 'logged_in' && restored) {
+    if (state.session?.state === 'logged_in' && (restored || prefs.source === wanted)) {
+      // the feed on screen (restored, or asked for at boot) is the account's feed: it goes on
       savePrefs();
     } else if (state.session?.state === 'logged_in') {
       prefs.source = wanted;
       savePrefs();
       renderSourceUi();
+      await feedReady;
       toast(`Signed in as @${state.session.username || '?'} – loading your ${wanted === 'foryou' ? P.tabs.foryou : P.tabs.explore} feed`);
       void reload();
     } else if (state.session?.probing) {
       restoreForYou = true;
       pollSession();
-    } else if (state.session?.state !== 'login_pending') {
+    } else if (state.session?.state !== 'login_pending' && el.session.classList.contains('hidden')) {
+      // (the first batch's "not signed in" answer may have opened the panel already)
       void openSessionPanel();
     }
   } else if (wanted === 'foryou') {

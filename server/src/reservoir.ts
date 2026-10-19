@@ -12,9 +12,10 @@
  * 30 overlaps a previous one more and more as the hour goes on), and dropped once their play URLs
  * are about to expire.
  *
- * With a `persistKey`, the newest items handed out are kept on disk (lastBatch.ts): a take() that
- * finds the stock empty answers with a few of those at once (`stale`), while the fill runs, so a
- * viewer never waits for the source when the server has served this feed before.
+ * With a `persistKey`, the newest items handed out are kept on disk (lastBatch.ts): a take() for a
+ * viewer with nothing on screen (`quick`) that finds the stock empty answers with a few of those
+ * at once (`stale`), while the fill runs, so a viewer never waits for the source when the server
+ * has served this feed before. A viewer who already has videos waits for fresh ones as before.
  */
 import type { FeedItem } from '../../shared/types';
 import { rememberBatch, staleBatch } from './lastBatch';
@@ -122,18 +123,19 @@ export class Reservoir {
   /**
    * Hands out up to `count` items. Answers from the stock when it has any; otherwise waits for one
    * fill (or the one in flight). Throws the source's error only when nothing at all can be served.
+   * `quick`: the viewer has nothing on screen – an empty stock answers with earlier videos (takeStale).
    */
-  async take(count: number): Promise<ReservoirTake> {
+  async take(count: number, quick = false): Promise<ReservoirTake> {
     this.lastTakeAt = this.opt.now();
     this.prune();
     const fromStock = this.stock.length > 0;
     if (!fromStock) {
-      // Served this feed before: a few of those videos now, the source meanwhile (no waiting).
-      const stale = this.opt.persistKey ? staleBatch(this.opt.persistKey) : undefined;
-      if (stale?.length) {
-        void this.fill(true);
-        this.opt.log?.(`${this.name}: stock empty, ${stale.length} earlier videos served while it fills`);
-        return { items: stale, warnings: [], ready: 0, fromStock: false, stale: true };
+      if (quick) {
+        const stale = this.takeStale();
+        if (stale) {
+          this.warm();
+          return stale;
+        }
       }
       await this.waitForFill();
       this.prune();
@@ -147,6 +149,26 @@ export class Reservoir {
     if (this.opt.persistKey && items.length) rememberBatch(this.opt.persistKey, items);
     this.scheduleFill();
     return { items, warnings, ready: this.stock.length, fromStock };
+  }
+
+  /**
+   * Earlier videos for a viewer with nothing on screen, when the stock is empty and this feed was
+   * served before; undefined otherwise (then take() waits for the source). Starts no fill: the
+   * caller does (warm), after whatever check must come first (a sign-in on some platforms).
+   */
+  takeStale(): ReservoirTake | undefined {
+    this.prune();
+    if (this.stock.length || !this.opt.persistKey) return undefined;
+    const stale = staleBatch(this.opt.persistKey);
+    if (!stale?.length) return undefined;
+    this.opt.log?.(`${this.name}: stock empty, ${stale.length} earlier videos served while it fills`);
+    return { items: stale, warnings: [], ready: 0, fromStock: false, stale: true };
+  }
+
+  /** Starts a fill now (after a stale answer), as if a viewer had just asked. */
+  warm(): void {
+    this.lastTakeAt = this.opt.now();
+    void this.fill(true);
   }
 
   /** Forgets the stock (the source changed its mind, e.g. a sign-out). Keeps the recent-id window. */

@@ -2063,10 +2063,30 @@ function startForYouPump(): void {
  * Returns up to `count` not-yet-delivered items from the signed-in For You feed. The background
  * pump keeps the page loading; this waits (at most ~12 s) only when the stock is empty.
  */
-export async function fetchForYou(count: number, log: (m: string) => void): Promise<ForYouResult> {
+export async function fetchForYou(count: number, log: (m: string) => void, quick = false): Promise<ForYouResult> {
   feedLog = wrapLog(log);
   const warnings: string[] = [];
   if (!sessionSupported().ok) throw new Error(sessionSupported().reason);
+  // A viewer with nothing on screen, nothing ready here (a cold page, a restart, the sign-in not
+  // checked yet): videos from the last visit go out at once; the check, the page and the pump run
+  // meanwhile, and the next request gets fresh ones. Only while the saved sign-in may still hold –
+  // a sign-in known to be gone is reported, so the viewer is sent to sign in.
+  const maySignIn = s.state === 'logged_in' || (s.state === 'none' && !probed && profileExists()) || guestAllowed();
+  if (quick && !s.pending.length && maySignIn) {
+    const stale = staleBatch('tiktok-foryou');
+    if (stale?.length) {
+      forYouAskedAt = Date.now();
+      void (async () => {
+        if (s.state !== 'logged_in' && !guestAllowed()) await sessionProbe(true);
+        if ((s.state as SessionStatus['state']) === 'logged_in' || guestAllowed()) {
+          await feedPage();
+          startForYouPump();
+        }
+      })().catch((e) => log(`For You: page not ready yet (${(e as Error).message})`));
+      log(`For You: nothing ready, ${stale.length} earlier videos served while the page loads`);
+      return { items: stale, warnings, stale: true };
+    }
+  }
   // FORYOU_ALLOW_GUEST=1 lets the headless page run signed-out (TikTok's guest feed: a few videos,
   // then a login wall) – for testing the capture mechanism only.
   if (s.state !== 'logged_in' && !guestAllowed()) {
@@ -2074,18 +2094,6 @@ export async function fetchForYou(count: number, log: (m: string) => void): Prom
     if ((s.state as SessionStatus['state']) !== 'logged_in') throw new Error(s.error ? `Not signed in (${s.error})` : 'Not signed in to TikTok. Use "Sign in" first.');
   }
   forYouAskedAt = Date.now();
-  // Nothing ready yet (a cold page, a restart): videos from the last visit go out at once while the
-  // page loads; the next request gets the fresh ones. The page is still asked for, in the background.
-  if (!s.pending.length) {
-    const stale = staleBatch('tiktok-foryou');
-    if (stale?.length) {
-      void feedPage()
-        .then(() => startForYouPump())
-        .catch((e) => log(`For You: page not ready yet (${(e as Error).message})`));
-      log(`For You: nothing ready, ${stale.length} earlier videos served while the page loads`);
-      return { items: stale, warnings, stale: true };
-    }
-  }
   const page = await feedPage();
   startForYouPump();
   const deadline = Date.now() + 12_000;

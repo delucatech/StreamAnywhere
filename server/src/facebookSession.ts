@@ -223,6 +223,8 @@ function saveCookies(cookies: ParsedCookie[], userAgent?: string): void {
 }
 
 export const facebookSignedIn = (): boolean => s.state === 'logged_in';
+/** Signed in, or a saved sign-in not checked yet (a restart): worth showing earlier videos while the check runs. */
+export const facebookMaySignIn = (): boolean => s.state === 'logged_in' || (s.state === 'none' && !probed && fileExists());
 
 /** The handle shown for the account: the profile's address slug, else its name. */
 const nameOf = (acc: FacebookAccount): string => acc.slug || acc.name || acc.shortName || (acc.id ? `user${acc.id}` : 'facebook');
