@@ -1443,8 +1443,15 @@ let signedOutPanelShown = false;
 
 /** Videos per request: the server answers from its stock, and a bigger batch costs TikTok the same call. */
 const BATCH = 30;
-/** Keep at least this many unplayed videos ahead of the viewer. */
+/** Keep at least this many unplayed videos ahead of the viewer… */
 const AHEAD = 8;
+/**
+ * …and more as the list grows: the next batch is asked for once the viewer is 75 % of the way
+ * through the loaded videos, so it is there long before the last one. At most a batch's worth
+ * ahead, so one batch at a time.
+ */
+const AHEAD_FRACTION = 0.25;
+const aheadWanted = (): number => Math.min(BATCH, Math.max(AHEAD, Math.ceil(state.entries.length * AHEAD_FRACTION)));
 
 /** Fetches the next batch; returns how many videos were added. */
 async function loadMore(): Promise<number> {
@@ -1504,15 +1511,15 @@ async function loadMore(): Promise<number> {
 }
 
 /**
- * Like the app, the feed never ends: whenever fewer than AHEAD unplayed videos are left after the
- * current one, the next batch is requested. When the previous batch brought nothing (TikTok's
- * soft limits, duplicates), retry with a growing delay.
+ * Like the app, the feed never ends: whenever fewer than aheadWanted() unplayed videos are left
+ * after the current one, the next batch is requested. When the previous batch brought nothing
+ * (TikTok's soft limits, duplicates), retry with a growing delay.
  */
 function scheduleMoreIfNeeded(): void {
   clearTimeout(state.retryTimer);
   if (state.exhausted || state.loading) return;
   const ahead = state.entries.length - 1 - state.active;
-  if (ahead >= AHEAD) return;
+  if (ahead >= aheadWanted()) return;
   const delay = Math.max(state.emptyBatches === 0 ? 0 : Math.min(20_000, 3000 * 2 ** (state.emptyBatches - 1)), state.pauseUntil - Date.now());
   if (delay) showRetryStatus(delay);
   state.retryTimer = window.setTimeout(() => void loadMore(), delay);
