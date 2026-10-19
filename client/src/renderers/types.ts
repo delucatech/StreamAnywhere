@@ -1,4 +1,5 @@
 import type { SourceKind } from '../../../shared/types';
+import type { MediaPrefix, MediaRecording } from '../media/demuxer';
 
 export type ConnectionKind = 'direct' | 'proxy' | 'test' | 'local' | 'embed';
 
@@ -30,6 +31,12 @@ export interface LoadSource {
    * `url` may then be empty (the <video> fallback makes its own object URL).
    */
   blob?: Blob;
+  /**
+   * The head of the file (or all of it) from the feed's media cache: played from disk first, the
+   * rest downloaded from `url`. `audioPrefix` is the same for the separate sound file (`audioUrl`).
+   */
+  prefix?: MediaPrefix;
+  audioPrefix?: MediaPrefix;
 }
 
 export type PlayerState = 'idle' | 'loading' | 'ready' | 'buffering' | 'playing' | 'paused' | 'ended' | 'error';
@@ -80,6 +87,8 @@ export interface Renderer {
   readonly name: string;
   /** Cheap enough to call several times a second (unlike stats()) */
   download?(): DownloadProgress;
+  /** What the renderer has of the file(s) from byte 0, for the feed's media cache (WebCodecs only) */
+  recording?(): { video?: MediaRecording; audio?: MediaRecording };
   load(src: LoadSource): Promise<void>;
   play(): Promise<void>;
   pause(): void;

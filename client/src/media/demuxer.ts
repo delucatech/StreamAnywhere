@@ -15,6 +15,13 @@
  *    of the fragments it has parsed, so a seek beyond the downloaded part is answered from the
  *    sidx index instead: the fetch restarts at that fragment's byte offset and mp4box is told to
  *    parse from there (its fragments carry tfdt timestamps, so the times stay absolute).
+ *  - Recording (the feed's media cache): the bytes received from the start of the file are kept
+ *    (up to RECORD_MAX) as long as they are contiguous; recording() hands them out as the parts
+ *    of a Blob, with whether they are the whole file. A download that jumps (moov at the end, a
+ *    seek past the downloaded part) freezes the recording at the prefix it has.
+ *  - A `prefix` (the cached head of the file from an earlier visit) is read with slice() like a
+ *    local file; when it ends before the file does, the download continues from the network at
+ *    that byte, so the first frames come from disk and the rest streams.
  */
 import { createFile, MP4BoxBuffer, type ISOFile, type Movie, type Sample } from 'mp4box';
 import { describeTrack, type TrackInfo } from './codecConfig';
@@ -43,6 +50,24 @@ export interface DemuxerStats {
 }
 
 const CHUNK_MERGE_TARGET = 256 * 1024;
+/** The recording stops growing past this (a prefix is still kept): memory on small devices */
+const RECORD_MAX = 32 * 1024 * 1024;
+
+/** The head of the file from the media cache: served first, the rest comes from `url`. */
+export interface MediaPrefix {
+  blob: Blob;
+  /** Size of the whole file (known from the earlier download) */
+  total: number;
+  /** The blob is the whole file: nothing is fetched */
+  complete: boolean;
+}
+/** What the demuxer has of the file, from byte 0, for the media cache */
+export interface MediaRecording {
+  parts: BlobPart[];
+  bytes: number;
+  total: number;
+  complete: boolean;
+}
 
 export class Mp4Demuxer {
   private file: ISOFile;
@@ -58,6 +83,11 @@ export class Mp4Demuxer {
   private fragmented = false;
   /** The current download reached EOF (every byte of the file went through mp4box) */
   private ended = false;
+  /** The bytes received from byte 0 on, contiguous (see recording()) */
+  private rec: BlobPart[] = [];
+  private recBytes = 0;
+  /** The download jumped (or the cap was reached): the recording stays the prefix it is */
+  private recFrozen = false;
   readonly stats: DemuxerStats = {
     bytesLoaded: 0,
     totalBytes: 0,
@@ -75,8 +105,15 @@ export class Mp4Demuxer {
     private readonly cb: DemuxerCallbacks,
     /** A file in this browser instead of a URL: read with slice() (a "Range" that never fails), no network */
     private readonly blob?: Blob,
+    /** The cached head of the file (feed media cache); `url` serves what comes after it */
+    private readonly prefix?: MediaPrefix,
   ) {
     this.file = createFile();
+    if (prefix && !blob) {
+      this.rec = [prefix.blob];
+      this.recBytes = prefix.blob.size;
+      if (prefix.total > 0) this.stats.totalBytes = prefix.total;
+    }
     this.file.onError = (e: unknown) => this.cb.onError(new Error(`mp4box: ${String(e)}`));
     this.file.onReady = (info: Movie) => this.handleReady(info);
     this.file.onSamples = (id: number, _user: unknown, samples: Sample[]) => {
@@ -88,6 +125,23 @@ export class Mp4Demuxer {
 
   get isReady(): boolean {
     return this.ready;
+  }
+
+  /** The file as far as it is here from byte 0 (the parts of a Blob); undefined when nothing is. */
+  recording(): MediaRecording | undefined {
+    if (this.blob || !this.recBytes) return undefined;
+    const total = this.stats.totalBytes;
+    return { parts: this.rec.slice(), bytes: this.recBytes, total, complete: total > 0 && this.recBytes >= total };
+  }
+
+  /** The local blob (the whole file, or the cached prefix) answers a read at `offset`. */
+  private localCovers(offset: number): boolean {
+    if (this.blob) return true;
+    if (!this.prefix) return false;
+    return this.prefix.complete || offset < this.prefix.blob.size;
+  }
+  private localBlob(): Blob {
+    return this.blob || this.prefix!.blob;
   }
 
   start(): void {
@@ -235,7 +289,7 @@ export class Mp4Demuxer {
    * (416 at or past the end), so the download loop below needs no second code path.
    */
   private openBlob(offset: number): Response {
-    const blob = this.blob!;
+    const blob = this.localBlob();
     const type = blob.type || 'video/mp4';
     if (offset >= blob.size) return new Response(null, { status: 416, headers: { 'content-range': `bytes */${blob.size}` } });
     const part = offset > 0 ? blob.slice(offset) : blob;
@@ -256,8 +310,16 @@ export class Mp4Demuxer {
     const headers = new Headers(this.fetchInit?.headers || {});
     if (offset > 0) headers.set('Range', `bytes=${offset}-`);
     let skipBytes = 0;
+    const fromLocal = this.localCovers(offset);
+    // a prefix read is not recorded (it is the recording's first part already); a network download
+    // from byte 0 starts a fresh recording
+    if (!fromLocal && offset === 0 && !this.prefix) {
+      this.rec = [];
+      this.recBytes = 0;
+      this.recFrozen = false;
+    }
     try {
-      const res = this.blob ? this.openBlob(offset) : await fetch(this.url, { ...(this.fetchInit || {}), headers, signal: ac.signal });
+      const res = fromLocal ? this.openBlob(offset) : await fetch(this.url, { ...(this.fetchInit || {}), headers, signal: ac.signal });
       if (gen !== this.fetchGen) return;
       this.stats.httpStatus = res.status;
       this.stats.contentType = res.headers.get('content-type') || '';
@@ -287,6 +349,8 @@ export class Mp4Demuxer {
         this.stats.totalBytes = len;
       }
       if (res.status === 206 && offset === 0) this.stats.rangeSupported = true;
+      // The cached head is shorter than the file: its Content-Length is not the file's size.
+      if (fromLocal && this.prefix && !this.prefix.complete) this.stats.totalBytes = this.prefix.total;
       if (!res.body) throw new Error('Response has no body stream');
       const reader = res.body.getReader();
       this.filePos = offset;
@@ -328,6 +392,12 @@ export class Mp4Demuxer {
         if (gen !== this.fetchGen) return;
         if (done) {
           if (!flushPending()) return;
+          if (fromLocal && this.prefix && !this.prefix.complete && (!this.stats.totalBytes || this.filePos < this.stats.totalBytes)) {
+            // The cached head is used up: the rest of the file comes from the network.
+            this.cb.onLog(`cached head of ${this.filePos} bytes played; downloading the rest`);
+            void this.startFetch(this.filePos);
+            return;
+          }
           this.ended = true;
           if (!this.stats.totalBytes || this.filePos > this.stats.totalBytes) this.stats.totalBytes = this.filePos;
           this.stats.downloadedTo = this.stats.totalBytes;
@@ -344,6 +414,13 @@ export class Mp4Demuxer {
           }
           chunk = chunk.subarray(skipBytes);
           skipBytes = 0;
+        }
+        if (!fromLocal && !this.recFrozen) {
+          // contiguous from byte 0 (and under the cap): the chunk joins the recording
+          if (this.filePos + pendingBytes === this.recBytes && this.recBytes < RECORD_MAX) {
+            this.rec.push(chunk);
+            this.recBytes += chunk.byteLength;
+          } else this.recFrozen = true;
         }
         pending.push(chunk);
         pendingBytes += chunk.byteLength;

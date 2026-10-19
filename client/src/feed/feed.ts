@@ -24,11 +24,18 @@
  * canvas 2D + Web Audio) paints each item's <canvas>; no <video> element is on the page. Where
  * WebCodecs is missing, a hidden <video> decodes and its frames are copied into the same canvas.
  * The active item and its two neighbours hold a player; the others are released.
+ *
+ * Media cache (mediaCache.ts): what a player downloaded is kept in IndexedDB when the download
+ * finishes or the player is released, and a video that comes up again (back to the previous one,
+ * back to this app from another, the saved feed after the page was closed) is fed from disk first,
+ * the rest from the network. A sweep between videos makes room (see mediaCache.ts).
  */
 import type { FeedItem, FeedSource, LoginMode, MediaFormat, SessionInputRequest, SessionStatus } from '../../../shared/types';
 import { api, ApiError, apiUrl } from '../api';
 import { pressed } from '../busy';
-import { currentPlatform, PLATFORMS, rememberApp } from '../platforms';
+import type { MediaPrefix } from '../media/demuxer';
+import { currentPlatform, PLATFORMS, rememberApp, type PlatformDef } from '../platforms';
+import { fileKey, getCached, itemKey, MAX_AGE as CACHE_MAX_AGE, overBudget, putCached, sweep, type CacheRole } from './mediaCache';
 import { FeedPlayer, feedPlayerMode } from './player';
 import { closeTopPanel, initSocial, openInbox, openProfile, openSearch, panelOpen, reopenPlayList, type PlayList } from './social';
 
@@ -173,6 +180,10 @@ interface Entry {
   reresolved?: boolean;
   /** Where the viewer was in this video when the page closed; applied once it plays */
   resumeAt?: number;
+  /** Bumped per attachSource: a cache lookup that finishes after the next one must not load */
+  loadGen: number;
+  /** Bytes of each file already handed to the media cache for this player (nothing is stored twice) */
+  stored: { video: number; audio: number };
 }
 
 const playerMode = feedPlayerMode();
@@ -446,7 +457,8 @@ for (const p of PLATFORMS) {
   name.className = 'rail-name';
   name.textContent = p.short;
   b.append(tile, name);
-  b.addEventListener('click', () => (inUse ? el.navHome.click() : location.assign(p.url)));
+  if (inUse) b.addEventListener('click', () => el.navHome.click());
+  else onTap(b, () => switchApp(p));
   el.railApps.appendChild(b);
 }
 onHomeTap(el.railLauncher);
@@ -1658,7 +1670,7 @@ function makeEntry(item: FeedItem): Entry {
   waitEl.append(waitSpin, waitText);
   root.appendChild(waitEl);
 
-  const entry: Entry = { item, root, canvas, progress: bar, downloaded, err, triedProxy: false, failed: false, isSeeking: () => seeking, waitEl, waitText, buffering: false, retrying: false };
+  const entry: Entry = { item, root, canvas, progress: bar, downloaded, err, triedProxy: false, failed: false, isSeeking: () => seeking, waitEl, waitText, buffering: false, retrying: false, loadGen: 0, stored: { video: 0, audio: 0 } };
 
   // Tap/click on the picture (poster or canvas) = pause/resume; on the edge of the previous / next
   // video showing above / below (wide screens) = go there. The info block and progress bar handle
@@ -1708,6 +1720,8 @@ function ensurePlayer(entry: Entry): FeedPlayer {
       if (!entry.isSeeking()) entry.progress.style.width = `${(100 * t) / d}%`;
       const dl = player.download();
       if (dl.fraction >= 0) entry.downloaded.style.width = `${Math.round(dl.fraction * 1000) / 10}%`;
+      // the whole file is here: into the media cache now (a page closed later cannot lose it)
+      if (dl.fraction >= 1 && dl.total > 0 && entry.stored.video < dl.total) storeRecording(entry);
       // Reopened page: back to where the viewer was in this video (once, when it is playing)
       if (entry.resumeAt !== undefined && !player.paused) {
         const at = entry.resumeAt;
@@ -1730,6 +1744,7 @@ function ensurePlayer(entry: Entry): FeedPlayer {
 /** Drops the entry's player (decoders, audio context, network) and shows the poster again. */
 function releasePlayer(entry: Entry): void {
   if (!entry.player) return;
+  storeRecording(entry);
   entry.player.destroy();
   entry.player = undefined;
   entry.src = undefined;
@@ -1747,9 +1762,78 @@ function attachSource(entry: Entry, which: 'direct' | 'proxy' | 'auto' = 'auto')
   entry.src = pick;
   entry.root.classList.remove('has-frame');
   const p = ensurePlayer(entry);
-  void p.load(pick.url, pick.kind, `${P.name} ${entry.item.id} (${pick.kind})`, { audioUrl: pick.audioUrl, durationHint: entry.item.duration });
+  entry.stored = { video: 0, audio: 0 };
+  const gen = ++entry.loadGen;
+  const label = `${P.name} ${entry.item.id} (${pick.kind})`;
+  const load = (prefix?: MediaPrefix, audioPrefix?: MediaPrefix) => {
+    if (entry.player !== p || entry.src !== pick || entry.loadGen !== gen) return;
+    if (prefix) console.debug(`[feed] ${entry.item.id}: ${prefix.complete ? 'whole file' : `first ${fmtBytes(prefix.blob.size)}`} from the media cache`);
+    void p.load(pick.url, pick.kind, label, { audioUrl: pick.audioUrl, durationHint: entry.item.duration, prefix, audioPrefix });
+  };
+  // What the media cache has of this video goes first (a few ms to look up); on any trouble, the network.
+  Promise.all([cachedPrefix(entry, 'video', pick.url), pick.audioUrl ? cachedPrefix(entry, 'audio', pick.audioUrl) : undefined]).then(([v, a]) => load(v, a), () => load());
   return true;
 }
+
+// ---------- media cache: the bytes of the videos seen, so they start from disk next time ----------
+/** The cached head (or whole) of the file, usable with `url`: a head only from the same URL. */
+async function cachedPrefix(entry: Entry, role: CacheRole, url: string): Promise<MediaPrefix | undefined> {
+  const rec = await getCached(fileKey(P.id, entry.item.id, role));
+  if (!rec || !(rec.complete || rec.url === url)) return undefined;
+  entry.stored[role] = rec.bytes; // what is there need not be written again
+  return { blob: rec.blob, total: rec.complete ? rec.bytes : rec.total, complete: rec.complete };
+}
+/** Hands what the player downloaded to the cache (once per length; complete files always). */
+function storeRecording(entry: Entry): void {
+  const p = entry.player;
+  const src = entry.src;
+  if (!p || !src) return;
+  const r = p.recording();
+  for (const role of ['video', 'audio'] as const) {
+    const rec = r[role];
+    const url = role === 'video' ? src.url : src.audioUrl;
+    if (!rec || !url || rec.bytes <= entry.stored[role]) continue;
+    entry.stored[role] = rec.bytes;
+    void putCached({ key: fileKey(P.id, entry.item.id, role), itemKey: itemKey(P.id, entry.item.id), role, url, bytes: rec.bytes, total: rec.total, complete: rec.complete, blob: new Blob(rec.parts, { type: 'video/mp4' }) }).then((written) => {
+      if (written && overBudget()) scheduleSweep(5000);
+    });
+  }
+}
+/**
+ * What no sweep may delete: the videos every app's saved feed still lists from the one before the
+ * viewer's on (they are what plays next there), and this feed's own from the previous one on.
+ */
+function protectedItems(): Set<string> {
+  const keep = new Set<string>();
+  for (const p of PLATFORMS) {
+    try {
+      const raw = localStorage.getItem(`streamanywhere.resume.${p.id}`);
+      if (!raw) continue;
+      const r = JSON.parse(raw) as Partial<Resume>;
+      if (!Array.isArray(r.items) || Date.now() - (r.savedAt || 0) > CACHE_MAX_AGE) continue;
+      const from = Math.max(0, (Number(r.index) || 0) - RESUME_BEHIND);
+      for (const it of r.items.slice(from)) if (it?.id) keep.add(itemKey(p.id, it.id));
+    } catch {
+      /* unreadable: nothing protected from it */
+    }
+  }
+  if (state.mode.kind === 'source') for (const e of state.entries.slice(Math.max(0, state.active - RESUME_BEHIND))) keep.add(itemKey(P.id, e.item.id));
+  return keep;
+}
+let sweepTimer = 0;
+/** A sweep of the media cache in a quiet moment (never on the critical path of a video start). */
+function scheduleSweep(delayMs: number): void {
+  clearTimeout(sweepTimer);
+  sweepTimer = window.setTimeout(() => {
+    sweepTimer = 0;
+    void sweep(protectedItems()).then((r) => {
+      if (r && (r.deleted || r.bytes > r.budget * 0.9)) console.info(`[feed] media cache: ${r.files} files, ${fmtBytes(r.bytes)} of ${fmtBytes(r.budget)}${r.deleted ? `, removed ${r.deleted} (${fmtBytes(r.freed)})` : ''}`);
+      if (r && r.bytes > r.budget) scheduleSweep(30_000); // still over: on, a few at a time
+    });
+  }, delayMs);
+}
+scheduleSweep(25_000);
+window.setInterval(() => scheduleSweep(1000), 10 * 60_000);
 
 function onPlayerError(entry: Entry, e: Error): void {
   const detail = e.message || 'unknown error';
@@ -2480,8 +2564,33 @@ function goHome(): void {
   for (const e of state.entries) releasePlayer(e);
   location.assign(el.homeLink.href);
 }
-/** A home control: goes home on release of a press that began on it (and on click: keyboard, mouse). */
-function onHomeTap(b: HTMLElement): void {
+/**
+ * Another app from the rail: like going home, the page answers the tap at once. The app's splash
+ * (the launcher's: its tile, its icon, "Opening …") covers this page right away and feed.html
+ * continues it from its first paint, every player is stopped so their downloads and decoding no
+ * longer hold up the thread and the network, the feed is saved, and the app's page is asked for.
+ */
+function switchApp(p: PlatformDef): void {
+  if (leaving) return;
+  leaving = true;
+  el.app.classList.add('leaving');
+  const launch = { tile: p.tile, icon: p.icon, name: p.name };
+  try {
+    sessionStorage.setItem('streamanywhere.launch', JSON.stringify(launch));
+  } catch {
+    /* storage unavailable: the app opens without the splash */
+  }
+  const splash = document.createElement('div');
+  splash.className = 'splash';
+  splash.style.background = launch.tile;
+  splash.innerHTML = `<div class="splash-icon">${launch.icon}</div><div class="splash-status"><span class="splash-spinner"></span><span>Opening ${esc(launch.name)}…</span></div>`;
+  document.body.appendChild(splash);
+  saveResume(true);
+  for (const e of state.entries) releasePlayer(e);
+  location.assign(p.url);
+}
+/** A control that leaves the page: acts on release of a press that began on it (and on click: keyboard, mouse). */
+function onTap(b: HTMLElement, fn: () => void): void {
   let down = -1;
   b.addEventListener('pointerdown', (e) => {
     if (e.isPrimary && e.button === 0) down = e.pointerId;
@@ -2490,13 +2599,16 @@ function onHomeTap(b: HTMLElement): void {
     if (e.pointerId !== down) return;
     down = -1;
     e.preventDefault();
-    goHome();
+    fn();
   });
   b.addEventListener('pointercancel', () => (down = -1));
   b.addEventListener('click', (e) => {
     e.preventDefault();
-    goHome();
+    fn();
   });
+}
+function onHomeTap(b: HTMLElement): void {
+  onTap(b, goHome);
 }
 onHomeTap(el.homeLink);
 // Back from the home screen into a page kept in the back/forward cache: its players were stopped.

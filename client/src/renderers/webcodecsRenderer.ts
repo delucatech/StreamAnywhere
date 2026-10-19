@@ -12,7 +12,7 @@
 import type { Sample } from 'mp4box';
 import { AudioSink, WallClock, type PlaybackClock } from '../media/audioOutput';
 import { shortCodecName, type TrackInfo } from '../media/codecConfig';
-import { Mp4Demuxer } from '../media/demuxer';
+import { Mp4Demuxer, type MediaRecording } from '../media/demuxer';
 import { emptyStats, FpsCounter, type DownloadProgress, type LoadSource, type PlayerState, type PlayerStats, type Renderer, type RendererEvents } from './types';
 
 const TARGET_DECODED_FRAMES = 12; // frames kept decoded ahead of the playhead
@@ -156,7 +156,7 @@ export class WebCodecsRenderer implements Renderer {
         this.fail(err);
       },
       onLog: (msg) => this.events.onLog('info', `[demux] ${msg}`),
-    }, src.blob);
+    }, src.blob, src.prefix);
     if (src.audioUrl) {
       this.audioDemuxer = new Mp4Demuxer(src.audioUrl, src.fetchInit, {
         onReady: (info, _video, audio) => {
@@ -180,7 +180,7 @@ export class WebCodecsRenderer implements Renderer {
           else this.disableAudio();
         },
         onLog: (msg) => this.events.onLog('info', `[demux audio] ${msg}`),
-      });
+      }, undefined, src.audioPrefix);
       this.audioDemuxer.start();
     }
     this.demuxer.start();
@@ -472,6 +472,10 @@ export class WebCodecsRenderer implements Renderer {
   }
 
   /** Picture file plus the separate sound file when there is one (YouTube); the sound counts once its size is known. */
+  recording(): { video?: MediaRecording; audio?: MediaRecording } {
+    return { video: this.demuxer?.recording(), audio: this.audioDemuxer?.recording() };
+  }
+
   download(): DownloadProgress {
     const v = this.demuxer?.stats;
     if (!v) return { loaded: 0, total: 0, fraction: -1 };

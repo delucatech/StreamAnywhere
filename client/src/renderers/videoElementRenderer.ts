@@ -87,8 +87,10 @@ export class VideoElementRenderer implements Renderer {
     // A file stored in this browser: the element plays it from an object URL (revoked on the next load)
     this.revokeObjectUrl();
     let url = src.url;
-    if (src.blob) {
-      url = URL.createObjectURL(src.blob);
+    // (a cached head of the file is no use to a <video>; only the whole file is)
+    const local = src.blob || (src.prefix?.complete ? src.prefix.blob : undefined);
+    if (local) {
+      url = URL.createObjectURL(local);
       this.objectUrl = url;
     }
     const sameOrigin = url.startsWith('blob:') || new URL(url, location.href).origin === location.origin;
