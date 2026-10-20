@@ -29,7 +29,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { FeedItem, LoginMode, SessionInputRequest, SessionStatus } from '../../shared/types';
-import { exploreApiUrl, isTikTokAd, itemToFeedItem, parseExploreBody, type ExploreResult } from './feed';
+import { exploreApiUrl, FeedError, isTikTokAd, itemToFeedItem, parseExploreBody, type ExploreResult } from './feed';
 import { rememberBatch, staleBatch } from './lastBatch';
 import { getProgress } from './progress';
 
@@ -2136,7 +2136,13 @@ async function fetchForYouNow(count: number, log: (m: string) => void, quick = f
   // then a login wall) – for testing the capture mechanism only.
   if (s.state !== 'logged_in' && !guestAllowed()) {
     await sessionProbe(true);
-    if ((s.state as SessionStatus['state']) !== 'logged_in') throw new Error(s.error ? `Not signed in (${s.error})` : 'Not signed in to TikTok. Use "Sign in" first.');
+    if ((s.state as SessionStatus['state']) !== 'logged_in') {
+      // An inconclusive check (the browser still starting, an empty answer from TikTok) is not a
+      // sign-out: the client keeps asking on this code instead of opening the sign-in panel
+      // (2026-10-20: a viewer with a good saved sign-in was sent to the QR code for one).
+      if (!probed) throw new FeedError(`The saved sign-in is still being checked (${s.error || 'no answer from TikTok yet'})`, 'tiktok_session_pending', 503);
+      throw new FeedError(s.error ? `Not signed in (${s.error})` : 'Not signed in to TikTok. Use "Sign in" first.', 'tiktok_not_signed_in', 401);
+    }
   }
   forYouAskedAt = Date.now();
   const page = await feedPage();

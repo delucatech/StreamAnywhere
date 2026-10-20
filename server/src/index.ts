@@ -532,7 +532,9 @@ export async function buildServer() {
       const err = e as Error;
       req.log.warn({ source, err: err.message }, 'feed request failed');
       const status = err instanceof FeedError ? err.status : err instanceof YouTubeError || err instanceof InstagramError || err instanceof FacebookError ? err.status : 502;
-      return reply.code(status).send({ error: err.message, source, elapsedMs: Date.now() - t0 });
+      // `code` lets the client tell a sign-out (open the sign-in panel) from a check still running (ask again)
+      const code = (err as { code?: unknown }).code;
+      return reply.code(status).send({ error: err.message, code: typeof code === 'string' ? code : undefined, source, elapsedMs: Date.now() - t0 });
     }
   });
 

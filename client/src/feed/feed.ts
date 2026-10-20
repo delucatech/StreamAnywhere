@@ -772,20 +772,29 @@ function start(): void {
 }
 
 /**
- * "Tap to start" is skipped for a signed-in account: the first video plays as soon as it is on
- * screen and the server has confirmed the sign-in (either may come first). A browser that allows
- * no sound before a touch plays the picture silently; the first tap, swipe or key turns the sound
- * on (see the gesture listeners below). A visitor who is not signed in keeps the tap: on a
- * sign-in-only platform the sign-in panel is what shows, and Explore for guests starts on a tap.
- * Returns true when it started the feed.
+ * No "Tap to start": the first video plays as soon as it is on screen – a signed-in account's feed,
+ * a guest's Explore, a restored one alike. A browser that allows no sound before a touch plays the
+ * picture silently; the first tap, swipe or key turns the sound on (see the gesture listeners
+ * below). Only a panel over the feed holds it back: on a sign-in-only platform without an account
+ * that is the sign-in panel. Returns true when it started the feed.
  */
+const HINT_KEY = 'sa_feed_hint_shown';
 function maybeAutoStart(): boolean {
-  if (state.started || state.session?.state !== 'logged_in' || !activeEntry() || overlayOpen()) return false;
+  if (state.started || !activeEntry() || overlayOpen()) return false;
   start();
   window.setTimeout(() => {
     const p = activeEntry()?.player;
     if (p?.audioBlocked && !prefs.muted) toast('Sound starts after your first tap or swipe (a browser rule)', false, 5000);
   }, 2500);
+  // The gestures, once per device (they used to sit under the start button)
+  try {
+    if (!localStorage.getItem(HINT_KEY)) {
+      localStorage.setItem(HINT_KEY, '1');
+      window.setTimeout(() => toast('Swipe up/down for the next video · tap to pause · swipe right to go back · F for full screen', false, 7000), 6000);
+    }
+  } catch {
+    /* storage unavailable */
+  }
   return true;
 }
 // The first touch or key after an automatic start lets a sound that the browser held back begin.
@@ -1583,13 +1592,22 @@ async function loadMore(): Promise<number> {
     if (gen !== state.generation) return 0;
     state.emptyBatches++;
     const msg = errMsg(e);
+    const body = e instanceof ApiError ? (e.body as { code?: unknown } | undefined) : undefined;
+    const code = typeof body?.code === 'string' ? body.code : '';
+    // The server is still checking the saved sign-in (a browser start on the small VM can take a
+    // minute): not a sign-out – keep asking, and say so once instead of an error.
+    const pending = code === 'tiktok_session_pending';
+    // A sign-out by the server's code; by the message only for a server without codes (an old build)
+    const signedOut = code ? /_not_signed_in$/.test(code) : /not signed in|session|sign in|needs a sign-in/i.test(msg) && !/could not be checked|still being checked|retrying shortly/i.test(msg);
     console.warn('[feed] batch failed:', msg);
     reportProblem('feed batch', `${sourceLabel()}: ${msg}`);
     // A 429 means the platform is limiting the server: asking every few seconds only lengthens that.
     if (e instanceof ApiError && e.status === 429) state.pauseUntil = Date.now() + LIMITED_PAUSE_MS;
-    if (state.emptyBatches === 1 || state.emptyBatches % 4 === 0) toast(`Feed: ${msg} – ${state.pauseUntil > Date.now() ? `next try in ${Math.round((state.pauseUntil - Date.now()) / 1000)} s` : 'retrying'}`, true, 5000);
-    if (!state.entries.length && state.emptyBatches >= 3) showEmpty(`Feed failed: ${msg}`);
-    if ((prefs.source === 'foryou' || P.loginRequired) && /not signed in|session|sign in|needs a sign-in/i.test(msg)) {
+    if (pending) {
+      if (state.emptyBatches === 1) toast(`Checking your saved ${P.name} sign-in on the server…`, false, 4000);
+    } else if (state.emptyBatches === 1 || state.emptyBatches % 4 === 0) toast(`Feed: ${msg} – ${state.pauseUntil > Date.now() ? `next try in ${Math.round((state.pauseUntil - Date.now()) / 1000)} s` : 'retrying'}`, true, 5000);
+    if (!state.entries.length && state.emptyBatches >= 3 && !pending) showEmpty(`Feed failed: ${msg}`);
+    if (!pending && (prefs.source === 'foryou' || P.loginRequired) && signedOut) {
       // The TikTok session is gone: retrying every 20 s would only reopen this panel again and again.
       // Stop the loop (signing in or switching the source calls reload(), which starts it afresh).
       state.exhausted = true;
