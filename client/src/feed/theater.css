@@ -28,8 +28,11 @@
   --stage-h: calc(var(--vh) - 136px);
   /* room beside the panel inside the clip window, for its shadow */
   --feed-air: 32px;
-  /* beside the feed: rail, Up next, the stage's padding, the air, the gap and the action column, some air */
-  --side: calc(92px + var(--upnext-w) + 48px + 2 * var(--feed-air) + 18px + 76px + 16px);
+  --stage-pad: 24px;
+  /* beside the feed: rail, Up next, the stage's padding, the air, the gap and the action column, some air
+     (feed.ts fitStage sets --upnext-w and --feed-air smaller when the window is too narrow for a panel
+     of the stage's full height - the numbers here are its too) */
+  --side: calc(92px + var(--upnext-w) + 2 * var(--stage-pad) + 2 * var(--feed-air) + 18px + 76px + 16px);
   /* a panel: as tall as the stage allows, unless the width runs out first */
   --feed-h: min(var(--stage-h), calc((100vw - var(--side)) * 16 / 9));
   --feed-w: calc(var(--feed-h) * 9 / 16);
@@ -47,6 +50,18 @@
 .app.wide.no-row2 {
   --stage-h: calc(var(--vh) - 84px);
   grid-template-rows: 72px 0 minmax(0, 1fr);
+}
+/* A tall, narrow window (the car's browser beside the car panel is close to square): the side parts
+   give way so the panel keeps the stage's full height instead of sitting between two black bands -
+   the air and the stage padding shrink, Up next narrows, then goes (feed.ts fitStage). */
+.app.wide.tight {
+  --stage-pad: 12px;
+}
+.app.wide.no-upnext {
+  grid-template-columns: 92px minmax(0, 1fr) 0;
+}
+.app.wide.no-upnext .upnext {
+  display: none;
 }
 @supports (height: 100dvh) {
   .app.wide {
@@ -341,7 +356,7 @@
   gap: 18px;
   min-width: 0;
   min-height: 0;
-  padding: 0 24px 12px;
+  padding: 0 var(--stage-pad) 12px;
 }
 .wide .feed-col {
   display: flex;

@@ -217,7 +217,44 @@ function applyLayout(): boolean {
   const h = window.innerHeight;
   const wide = layoutPick === 'wide' || (layoutPick === 'auto' && w >= 760 && h >= 480 && w >= h);
   el.app.classList.toggle('wide', wide);
+  fitStage(wide, w, h);
   return wide;
+}
+/**
+ * The wide layout's panel is 9:16 and as tall as the stage – unless the width beside the rail, the
+ * Up next column and the action column runs out first: then it came out shorter and sat between
+ * two black bands (an 855x815 window, 2026-10-20). The side parts give way instead: the air beside
+ * the panel and the stage padding shrink, Up next narrows to 170 px, then goes. The numbers are
+ * theater.css's (--side); the result goes back to it as --upnext-w / --feed-air and two classes.
+ */
+function fitStage(wide: boolean, w: number, h: number): void {
+  const st = el.app.style;
+  if (!wide || el.app.classList.contains('fullwindow')) {
+    st.removeProperty('--upnext-w');
+    st.removeProperty('--feed-air');
+    el.app.classList.remove('tight', 'no-upnext');
+    return;
+  }
+  const stageH = h - (el.app.classList.contains('no-row2') ? 84 : 136);
+  const panelW = (stageH * 9) / 16;
+  const fixed = 92 + 18 + 76 + 16; // rail, gap, action column, air
+  const preferred = Math.min(300, Math.max(230, w * 0.24)); // the CSS clamp for Up next
+  let upnext = preferred;
+  let air = 32;
+  let pad = 24;
+  const spare = (): number => w - fixed - panelW - 2 * pad - 2 * air - upnext;
+  if (spare() < 0) {
+    air = 8;
+    pad = 12;
+  }
+  if (spare() < 0) upnext = Math.max(170, upnext + spare());
+  if (spare() < 0) upnext = 0;
+  el.app.classList.toggle('tight', air < 32);
+  el.app.classList.toggle('no-upnext', upnext === 0);
+  if (upnext === preferred) st.removeProperty('--upnext-w');
+  else st.setProperty('--upnext-w', `${Math.round(upnext)}px`);
+  if (air === 32) st.removeProperty('--feed-air');
+  else st.setProperty('--feed-air', `${air}px`);
 }
 window.addEventListener('resize', applyLayout);
 {
@@ -335,6 +372,7 @@ function renderSourceUi(): void {
   el.context.classList.toggle('hidden', !listMode);
   // nothing under the header (For You, and every tab without categories): the wide layout drops that row
   el.app.classList.toggle('no-row2', !chips && !listMode);
+  applyLayout(); // the stage's height changed with the row: the panel's width budget too (fitStage)
   if (state.mode.kind === 'search') el.contextLabel.textContent = `Search: ${state.mode.q}`;
   else if (state.mode.kind === 'profile') el.contextLabel.textContent = `@${state.mode.user}`;
   const back = state.mode.kind === 'profile' ? `Back to @${state.mode.user}` : 'Back to the search results';
@@ -747,6 +785,7 @@ function isFullscreen(): boolean {
 function setFullscreen(on: boolean): void {
   if (on === isFullscreen()) return;
   el.app.classList.toggle('fullwindow', on);
+  applyLayout(); // the side parts come back (or go) with the window: fitStage
   el.actFull.setAttribute('aria-pressed', String(on));
   const root = document.documentElement;
   if (on) {
