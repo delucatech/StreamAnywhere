@@ -547,6 +547,31 @@
   background: rgba(255, 255, 255, 0.18);
   transition: background 0.15s;
 }
+/* a narrowed Up next column (fitStage): the header stays on one line in smaller type */
+.app.wide.upnext-narrow .upnext {
+  padding-left: 10px;
+  padding-right: 8px;
+}
+.app.wide.upnext-narrow .upnext-head {
+  gap: 4px;
+  padding-right: 0;
+}
+.app.wide.upnext-narrow .upnext-title {
+  font-size: 13px;
+  white-space: nowrap;
+}
+.app.wide.upnext-narrow .upnext-auto {
+  gap: 5px;
+  font-size: 10.5px;
+}
+.app.wide.upnext-narrow .upnext-auto i {
+  width: 26px;
+  height: 16px;
+}
+.app.wide.upnext-narrow .upnext-auto i::after {
+  width: 12px;
+  height: 12px;
+}
 .wide .upnext-auto i::after {
   content: '';
   position: absolute;
@@ -563,6 +588,9 @@
 }
 .wide .upnext-auto.on i::after {
   transform: translateX(12px);
+}
+.app.wide.upnext-narrow .upnext-auto.on i::after {
+  transform: translateX(10px);
 }
 .wide .upnext-list {
   flex: 1 1 auto;

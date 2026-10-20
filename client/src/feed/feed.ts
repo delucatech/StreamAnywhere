@@ -232,7 +232,7 @@ function fitStage(wide: boolean, w: number, h: number): void {
   if (!wide || el.app.classList.contains('fullwindow')) {
     st.removeProperty('--upnext-w');
     st.removeProperty('--feed-air');
-    el.app.classList.remove('tight', 'no-upnext');
+    el.app.classList.remove('tight', 'no-upnext', 'upnext-narrow');
     return;
   }
   const stageH = h - (el.app.classList.contains('no-row2') ? 84 : 136);
@@ -251,6 +251,7 @@ function fitStage(wide: boolean, w: number, h: number): void {
   if (spare() < 0) upnext = 0;
   el.app.classList.toggle('tight', air < 32);
   el.app.classList.toggle('no-upnext', upnext === 0);
+  el.app.classList.toggle('upnext-narrow', upnext > 0 && upnext < preferred);
   if (upnext === preferred) st.removeProperty('--upnext-w');
   else st.setProperty('--upnext-w', `${Math.round(upnext)}px`);
   if (air === 32) st.removeProperty('--feed-air');
