@@ -31,6 +31,7 @@ import * as path from 'node:path';
 import type { FeedItem, LoginMode, SessionInputRequest, SessionStatus } from '../../shared/types';
 import { exploreApiUrl, isTikTokAd, itemToFeedItem, parseExploreBody, type ExploreResult } from './feed';
 import { rememberBatch, staleBatch } from './lastBatch';
+import { getProgress } from './progress';
 
 type Browser = import('puppeteer-core').Browser;
 type Page = import('puppeteer-core').Page;
@@ -1785,7 +1786,11 @@ async function closeHeadless(): Promise<void> {
  */
 export async function parkHeadlessBrowser(log?: (m: string) => void): Promise<boolean> {
   if (!s.headless || headlessLaunch || feedPageOpening) return false;
-  if (s.qrPage || work.busy || work.waiting || (forYouPump && Date.now() - forYouAskedAt < 60_000)) return false;
+  // The saved sign-in check and a feed request in flight use the browser too (2026-10-20 on the VM:
+  // Instagram's start closed it between the page load and the account call -> "Requesting main frame
+  // too early", and the viewer got a 502 for a sign-in that was fine).
+  if (probe || forYouInFlight > 0 || Date.now() - forYouAskedAt < 60_000) return false;
+  if (s.qrPage || work.busy || work.waiting) return false;
   await closeHeadless();
   (log || feedLog)?.('headless browser closed to free memory for another platform (it restarts on the next TikTok request)');
   return true;
@@ -2008,6 +2013,8 @@ const FORYOU_TARGET = 20;
 const FORYOU_IDLE_MS = 3 * 60 * 1000;
 let forYouAskedAt = 0;
 let forYouPump: Promise<void> | undefined;
+/** Feed requests being answered right now (the browser must not be parked under them) */
+let forYouInFlight = 0;
 
 export const forYouStock = (): { pending: number; pumping: boolean; lastError?: string } => ({ pending: s.pending.length, pumping: Boolean(forYouPump), lastError: s.lastFeedError });
 
@@ -2033,9 +2040,10 @@ function startForYouPump(): void {
     while (Date.now() - forYouAskedAt < FORYOU_IDLE_MS) {
       const page = s.feedPage;
       if (!page || page.isClosed() || !s.headless?.isConnected() || s.qrPage) break;
-      if (work.busy || work.waiting) {
-        // A search / profile / messages request is using the browser: the small VM has one core,
-        // so the feed page stays still until it is done.
+      if (work.busy || work.waiting || getProgress('instagram').text) {
+        // A search / profile / messages request is using the browser, or Instagram's browser is
+        // reading a page for a viewer: the small VM has one core, so the feed page stays still
+        // until it is done (2026-10-20: the Reels page took 134 s while this pump nudged).
         await new Promise((r) => setTimeout(r, 1000));
         continue;
       }
@@ -2090,9 +2098,20 @@ export function forYouCheap(count: number): ForYouResult | undefined {
  * pump keeps the page loading; this waits (at most ~12 s) only when the stock is empty.
  */
 export async function fetchForYou(count: number, log: (m: string) => void, quick = false): Promise<ForYouResult> {
+  forYouInFlight++;
+  try {
+    return await fetchForYouNow(count, log, quick);
+  } finally {
+    forYouInFlight--;
+  }
+}
+
+async function fetchForYouNow(count: number, log: (m: string) => void, quick = false): Promise<ForYouResult> {
   feedLog = wrapLog(log);
   const warnings: string[] = [];
   if (!sessionSupported().ok) throw new Error(sessionSupported().reason);
+  // From here on the browser is wanted: the sign-in check below runs on it (see parkHeadlessBrowser).
+  forYouAskedAt = Date.now();
   // A viewer with nothing on screen, nothing ready here (a cold page, a restart, the sign-in not
   // checked yet): videos from the last visit go out at once; the check, the page and the pump run
   // meanwhile, and the next request gets fresh ones. Only while the saved sign-in may still hold –

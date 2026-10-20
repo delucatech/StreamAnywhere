@@ -500,6 +500,35 @@ export const shutdownInstagram = (): Promise<void> => closeBrowser('shutdown');
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Sends the work page back to its blank robots.txt page when a job is done, and waits until it is
+ * there. A timed-out navigation is still in flight: an evaluate started on the page meanwhile dies
+ * with "Execution context was destroyed" when it commits (2026-10-20 on the VM: leaving the Reels
+ * page took 30+ s, and the embed lookup after it failed three fills running).
+ */
+async function parkPage(p: Page, timeoutMs = 30_000): Promise<void> {
+  const parked = (): boolean => safePath(p.url()) === '/robots.txt';
+  try {
+    await p.goto(`${ORIGIN}/robots.txt`, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+  } catch {
+    const t0 = Date.now();
+    while (!parked() && Date.now() - t0 < 60_000) await sleep(1000);
+    if (!parked()) note(`the work page is still leaving ${safePath(p.url()) || 'its page'} after ${Math.round((Date.now() - t0 + timeoutMs) / 1000)} s`);
+  }
+}
+
+/** Runs a script on the work page; once more when a navigation that was still settling destroyed the page's context. */
+async function evaluateSettled<T>(p: Page, js: string): Promise<T> {
+  try {
+    return (await p.evaluate(js)) as T;
+  } catch (e) {
+    if (!/Execution context was destroyed/i.test((e as Error).message)) throw e;
+    note('the page moved under a script; running it again');
+    await sleep(1500);
+    return (await p.evaluate(js)) as T;
+  }
+}
+
 // ---------------------------------------------------------------- embed pages (the playable files)
 
 export interface EmbedMedia {
@@ -598,7 +627,7 @@ export async function embedMany(codes: string[], log: (m: string) => void, pri =
     const part = todo.slice(i, i + EMBED_BATCH);
     const t0 = Date.now();
     if (pri > PRI_BACKGROUND) progress(`Looking up the video files: ${i} of ${todo.length} done…`);
-    const answers = (await withPage((p) => p.evaluate(EMBED_JS(part, 8)), pri)) as EmbedAnswer[];
+    const answers = await withPage((p) => evaluateSettled<EmbedAnswer[]>(p, EMBED_JS(part, 8)), pri);
     let ok = 0;
     for (const a of answers) {
       if (!a) continue;
@@ -781,7 +810,7 @@ async function scrapeProfile(handle: string, want: number, log: (m: string) => v
       // read it anyway. (A login redirect is handled by the loop below.)
       const here = safePath(p.url()).toLowerCase();
       if (!/timeout/i.test(msg) || !(here.startsWith(`/${handle.toLowerCase()}/`) || sentAway(p.url()))) {
-        await p.goto(`${ORIGIN}/robots.txt`, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => undefined);
+        await parkPage(p);
         throw /timeout/i.test(msg)
           ? new InstagramError(`@${handle}'s profile page did not load in ${secs()} s (the server is busy)`, 504, 'instagram_timeout')
           : new InstagramError(`@${handle}'s profile page failed to load (${msg})`, 502, 'instagram_error');
@@ -797,7 +826,7 @@ async function scrapeProfile(handle: string, want: number, log: (m: string) => v
         blockStreak++;
         blockedUntil = Date.now() + pause;
         note(`@${handle}: Instagram redirected to the login page (profile rate limit); no profile loads for ${Math.round(pause / 60000)} min`);
-        await p.goto(`${ORIGIN}/robots.txt`, { waitUntil: 'domcontentloaded' }).catch(() => undefined);
+        await parkPage(p);
         throw new InstagramError(`Instagram is limiting profile pages from this server's address; they are tried again in ${Math.round(pause / 60000)} min.`, 429, 'instagram_rate_limited');
       }
       if (/isn't available|page not found/i.test(st.title) || /Sorry, this page isn't available/i.test(st.text)) throw new InstagramError(`@${handle} was not found on Instagram`, 404, 'instagram_not_found');
@@ -817,7 +846,7 @@ async function scrapeProfile(handle: string, want: number, log: (m: string) => v
         if (!grew) break;
       }
     }
-    await p.goto(`${ORIGIN}/robots.txt`, { waitUntil: 'domcontentloaded' }).catch(() => undefined);
+    await parkPage(p);
     blockStreak = 0;
     log(`instagram @${handle}: ${st.codes.length} reels, ${Date.now() - t0} ms`);
     // Nothing found is not a listing worth keeping for hours (slow page, changed markup, an empty account).
@@ -1085,7 +1114,7 @@ export async function forYouInstagram(want: number, log: (m: string) => void): P
       return { codes: [...found], viewer };
     } finally {
       p.off('response', onResponse);
-      await p.goto(`${ORIGIN}/robots.txt`, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => undefined);
+      await parkPage(p);
     }
   }, PRI_FEED);
   log(`instagram foryou: ${codes.length} reel codes captured${viewer ? ' for @' + viewer : ''}`);
@@ -1320,7 +1349,7 @@ async function accountFromSettingsPage(p: Page, cookies?: ParsedCookie[]): Promi
     }
     const away = sentAway(st.url);
     const viewer = !away && code < 400 && /^\/accounts\/edit/.test(st.path) ? await viewerName(p) : '';
-    await p.goto(`${ORIGIN}/robots.txt`, { waitUntil: 'domcontentloaded' }).catch(() => undefined);
+    await parkPage(p);
     note(`settings page: ${code}${st.path ? ' ' + st.path : ''}${away ? ' (' + away.kind + ')' : ''}${viewer ? ', viewer @' + viewer : ''}`);
     if (code === 429 || away?.kind === 'limited') {
       // Pages are refused for the address: no signed-in page is loaded again for a while.
