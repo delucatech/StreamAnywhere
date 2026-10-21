@@ -69,6 +69,13 @@
 	<PropertyGroup Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">
 		<CodesignEntitlements>Platforms\iOS\Entitlements.plist</CodesignEntitlements>
 	</PropertyGroup>
+	<!-- Manual signing: the App Group entitlement rules out Visual Studio's wildcard profile, so the app and the
+	     extension each sign with their own development profile (Apple Developer portal, Physician Connection team). -->
+	<PropertyGroup Condition="'$(TargetFramework)'=='net10.0-ios'">
+	  <ProvisioningType>manual</ProvisioningType>
+	  <CodesignKey>Apple Development: Created via API (T2B684Z4S9)</CodesignKey>
+	  <CodesignProvision>StreamAnywhere Development</CodesignProvision>
+	</PropertyGroup>
 	<ItemGroup Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">
 		<Compile Include="..\StreamAnywhere.Broadcast\Shared\MirrorSettings.cs" Link="Mirror\Shared\MirrorSettings.cs" />
 		<Compile Include="..\StreamAnywhere.Broadcast\Shared\ServerApi.cs" Link="Mirror\Shared\ServerApi.cs" />

@@ -17,6 +17,10 @@
 		<Nullable>enable</Nullable>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<CodesignEntitlements>Entitlements.plist</CodesignEntitlements>
+		<!-- manual signing, same reason as the app: the App Group entitlement needs an explicit profile -->
+		<ProvisioningType>manual</ProvisioningType>
+		<CodesignKey>Apple Development: Created via API (T2B684Z4S9)</CodesignKey>
+		<CodesignProvision>StreamAnywhere Broadcast Development</CodesignProvision>
 		<!-- the extension's memory limit: keep the bundle small -->
 		<MtouchLink>SdkOnly</MtouchLink>
 		<UseInterpreter>false</UseInterpreter>
