@@ -44,6 +44,11 @@ comes out once a second).
 
 ## Building
 
+- `global.json` pins the .NET SDK to the 10.0.1xx band (currently 10.0.113), the same pin as FitnessPro:
+  that band's iOS workload (.NET for iOS 26.5) is the one the paired Mac's Xcode 26.6 accepts. Without
+  the pin Visual Studio picks another installed SDK and its iOS workload (26.0 wants Xcode 26.0, the
+  .NET 11 RC wants Xcode 27), and launching on the iPhone fails with "This version of .NET for iOS
+  requires Xcode ..." (seen 2026-10-21).
 - **Windows** builds the Windows target (`dotnet build -f net10.0-windows10.0.19041.0`), which shows the
   page with a "this is an iPhone feature" note, and compiles all the iOS C# (checked 2026-10-21: the
   extension and the app's iOS files compile against the iOS bindings).
