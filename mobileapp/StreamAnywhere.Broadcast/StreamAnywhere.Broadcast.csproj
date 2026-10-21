@@ -21,6 +21,12 @@
 		<MtouchLink>SdkOnly</MtouchLink>
 		<UseInterpreter>false</UseInterpreter>
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+		<!-- The app builds this project with its own RuntimeIdentifier as a global property (Visual Studio sets
+		     iossimulator-arm64 or ios-arm64 for the launch target), but restore runs this project on its own with
+		     the default simulator RID only, and the build then fails with NETSDK1047 (no target for that RID in
+		     project.assets.json). So restore for every iOS RID the app can ask for; restore-only (NuGet sets
+		     ExcludeRestorePackageImports while it evaluates the project), so a build without a RID keeps its default. -->
+		<RuntimeIdentifiers Condition="'$(ExcludeRestorePackageImports)' == 'true'">ios-arm64;iossimulator-arm64;iossimulator-x64</RuntimeIdentifiers>
 	</PropertyGroup>
 
 	<ItemGroup>
