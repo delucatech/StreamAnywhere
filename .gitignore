@@ -5,3 +5,11 @@ dist/
 .DS_Store
 .tiktok-profile/
 .env.local
+# .NET MAUI (mobileapp/) and Xcode (mirror/ios/) build output
+bin/
+obj/
+.vs/
+*.user
+xcuserdata/
+DerivedData/
+*.xcodeproj/

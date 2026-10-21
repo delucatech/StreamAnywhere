@@ -1,0 +1,243 @@
+:root {
+  color-scheme: dark;
+  --bg: #07080c;
+  --fg: #f2f4f8;
+  --muted: #9aa3b5;
+  --card: #141720;
+  --line: #262b38;
+  --accent: #4f8cff;
+  --ok: #2ee6a6;
+  --warn: #ffb547;
+}
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.4 system-ui, -apple-system, 'Segoe UI', sans-serif;
+  overflow: hidden;
+}
+button {
+  font: inherit;
+}
+
+/* ---- entry screen */
+.entry {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 24px 16px;
+}
+.entry-card {
+  width: 100%;
+  max-width: 520px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 28px 28px 24px;
+}
+.entry h1 {
+  margin: 0 0 6px;
+  font-size: 30px;
+  letter-spacing: 0.01em;
+}
+.entry h1 small {
+  display: block;
+  font-size: 15px;
+  font-weight: 400;
+  color: var(--muted);
+  margin-top: 4px;
+}
+.entry p {
+  color: var(--muted);
+  margin: 10px 0 18px;
+}
+.entry .row {
+  display: flex;
+  gap: 12px;
+  align-items: stretch;
+}
+#code {
+  flex: 1;
+  min-width: 0;
+  font: 600 34px/1 ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  text-align: center;
+  padding: 16px 12px 16px 20px;
+  border-radius: 14px;
+  border: 2px solid var(--line);
+  background: #0c0e14;
+  color: var(--fg);
+}
+#code:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.primary {
+  padding: 16px 26px;
+  border-radius: 14px;
+  border: 0;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 700;
+  font-size: 18px;
+  cursor: pointer;
+}
+.primary:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.entry .error {
+  color: #ff6b7a;
+  margin: 14px 0 0;
+}
+.home {
+  position: fixed;
+  top: 14px;
+  left: 14px;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 15px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+/* ---- player */
+.player {
+  position: fixed;
+  inset: 0;
+  background: #000;
+}
+.stage {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+.mirror-canvas,
+.mirror-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+.overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  text-align: center;
+  background: rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+}
+.overlay[hidden] {
+  display: none;
+}
+.overlay .text {
+  font-size: 28px;
+  font-weight: 600;
+}
+.overlay .sub {
+  color: var(--muted);
+  margin-top: 8px;
+  max-width: 70vw;
+}
+.overlay.spin .text::before {
+  content: '';
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  margin-right: 12px;
+  vertical-align: -2px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.25);
+  border-top-color: #fff;
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.hud {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 14px 16px calc(14px + env(safe-area-inset-bottom));
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  align-items: center;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.75), rgba(0, 0, 0, 0));
+  transition: opacity 0.25s, transform 0.25s;
+}
+.hud.hidden {
+  opacity: 0;
+  transform: translateY(12px);
+  pointer-events: none;
+}
+.badge {
+  padding: 5px 10px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: #30364a;
+}
+.badge[data-path='local'] {
+  background: var(--ok);
+  color: #04261b;
+}
+.badge[data-path='direct'] {
+  background: var(--accent);
+}
+.badge[data-path='relay'] {
+  background: var(--warn);
+  color: #2a1a00;
+}
+.hud .name {
+  font-weight: 600;
+}
+.hud .stats,
+.hud .links {
+  color: var(--muted);
+  font-size: 13px;
+}
+.hud .spacer {
+  flex: 1;
+}
+.hud button {
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(20, 23, 32, 0.8);
+  color: var(--fg);
+  cursor: pointer;
+}
+.hud button[hidden] {
+  display: none;
+}
+@media (max-width: 600px) {
+  .entry-card {
+    padding: 22px 18px;
+  }
+  #code {
+    font-size: 26px;
+  }
+  .primary {
+    padding: 14px 18px;
+    font-size: 16px;
+  }
+}

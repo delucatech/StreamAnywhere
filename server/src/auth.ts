@@ -17,6 +17,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import type { IncomingHttpHeaders } from 'node:http';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 
 const DEFAULT_HASH = 'scrypt:eb3fc89f8fc253c2e01a4a85d7c3530d:268de6a1156ad761dedda11285beb7e24f97f2edf61467cedb0d6cecb8fcd49c';
@@ -29,6 +30,8 @@ const PUBLIC_PATHS = new Set(['/login', '/api/health']);
 /** Set by registerAuth (read then, not at import, so tests can supply their own hash). */
 let passwordHash = DEFAULT_HASH;
 let cookieKey: Buffer = Buffer.alloc(0);
+/** APP_PASSWORD_HASH=off: everything is public */
+let passwordOff = false;
 
 function secretFilePath(): string {
   if (process.env.APP_COOKIE_SECRET_FILE) return process.env.APP_COOKIE_SECRET_FILE;
@@ -79,12 +82,23 @@ function tokenIssued(token: string | undefined): number | undefined {
   return a.length === b.length && crypto.timingSafeEqual(a, b) ? issued : undefined;
 }
 
-function readCookie(req: FastifyRequest, name: string): string | undefined {
-  for (const part of String(req.headers.cookie || '').split(';')) {
+function cookieValue(header: string | undefined, name: string): string | undefined {
+  for (const part of String(header || '').split(';')) {
     const i = part.indexOf('=');
     if (i > 0 && part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
   }
   return undefined;
+}
+
+const readCookie = (req: FastifyRequest, name: string): string | undefined => cookieValue(req.headers.cookie, name);
+
+/**
+ * WebSocket upgrades never reach the Fastify hooks: the Mirror relay checks the login cookie
+ * (or that the password is off) on the raw request itself.
+ */
+export function requestAuthorized(headers: IncomingHttpHeaders): boolean {
+  if (passwordOff) return true;
+  return tokenIssued(cookieValue(headers.cookie, COOKIE)) !== undefined;
 }
 
 function setAuthCookie(req: FastifyRequest, reply: FastifyReply): void {
@@ -148,7 +162,8 @@ ${wrong ? '<p class="err">Wrong password.</p>' : ''}
 
 export function registerAuth(app: FastifyInstance): void {
   passwordHash = (process.env.APP_PASSWORD_HASH || DEFAULT_HASH).trim();
-  if (/^(off|none|0|false)$/i.test(passwordHash)) {
+  passwordOff = /^(off|none|0|false)$/i.test(passwordHash);
+  if (passwordOff) {
     app.log.warn('APP_PASSWORD_HASH=off: the site is open to anyone');
     return;
   }

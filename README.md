@@ -31,6 +31,7 @@ Windows 10 (see **Test results** for exactly what was measured):
 | **Feed page** (`feed.html`): TikTok-style vertical stream, Explore feed without sign-in | **Working** (Node server and IIS handler) |
 | Feed page: personal **For You** feed after signing in to TikTok (QR code or window) | **Working mechanism** (signed-out test; QR rendered and refreshed); needs the Node server + Chrome/Edge/Chromium on that machine – see **Feed** |
 | **YouTube sign-in**: paste/upload the cookies of a signed-in browser (or a sign-in window on the server machine); **For You** = the account's recommendations | **Working mechanism** (built 2026-10-13; verified signed-out: cookie parsing, YouTube's account check, rejection paths. The signed-in feed itself awaits a real account) – see **YouTube** |
+| **Mirror** (built 2026-10-21): an iPhone's screen (ReplayKit broadcast extension) on the Tesla's browser, three ways: the phone's own page on its hotspot, a WebRTC direct link, the server's relay; WebCodecs or MSE on the viewer; a desktop sender page too | **Working** on the PC (relay, direct link, both decoders, with the desktop sender; 26 relay checks). The iOS app is written but **not yet built or run** (needs a Mac) – see [mirror/README.md](mirror/README.md) |
 | **Launcher** (`home.html`, the landing page): iPad-style icons that open each platform like an app | **Working** |
 | **YouTube, guest mode**: Shorts by hashtag, search, channels; picture + sound as two files played in sync | **Working** (Node server with yt-dlp) – see **YouTube** |
 | **Facebook** (built 2026-10-15): **Reels** = the latest reels of a rotation of public Pages, read from facebook.com's own pages over plain HTTPS (no browser, no yt-dlp, no sign-in); pasted reel links; **For You** = the account's Reels feed after a cookie sign-in; one progressive 720p MP4 per reel, fetched by the viewer itself (CORS `*`) | **Working** signed out (dev machine); the signed-in feed awaits a real account; untested from the VM's address – see **Facebook** |
@@ -38,7 +39,16 @@ Windows 10 (see **Test results** for exactly what was measured):
 
 ## Repository layout
 
+Three products share this repository: the **web platform** (the npm workspace at the root: the
+server, the browser client, the deploy scripts - every deploy path points here, so it stays at the
+root), the **mobile app** (`mobileapp/`, a .NET MAUI project: the feed player as a phone app, empty
+template so far) and **Mirror** (`mirror/`, the iPhone-screen-to-Tesla app: a Swift iOS app plus its
+viewer and relay in the web platform; see [mirror/README.md](mirror/README.md)).
+
 ```
+mobileapp/StreamAnywhere/         .NET MAUI app (iOS / Android / Windows / Mac Catalyst), Visual Studio
+mirror/README.md                  Mirror: how the three paths work, building the iOS app on a Mac
+mirror/ios/                       the Swift app + broadcast extension (XcodeGen project.yml)
 client/   Vite 4 + TypeScript front end (no framework)
   src/media/demuxer.ts            streaming fetch → mp4box.js, Range-based seeking, backpressure
   src/media/codecConfig.ts        avcC/hvcC/esds → VideoDecoderConfig / AudioDecoderConfig
@@ -50,6 +60,7 @@ client/   Vite 4 + TypeScript front end (no framework)
   src/diagnostics.ts              the six experiments (measured, with explanations)
   src/main.ts                     UI, source/renderer selection, direct-vs-proxy decision
   home.html + src/home/home.ts    the launcher: one app icon per platform (src/platforms.ts), zoom-open animation
+  mirror.html + src/mirror/       the Mirror viewer (relay + WebRTC direct link; WebCodecs or MSE decoding), mirror-send.html = a desktop sender
   feed.html + src/feed/feed.ts    the feed page (feed.html?platform=tiktok|youtube|instagram|facebook): stream that follows the finger / mouse and snaps one video at a time (TikTok-like drag), tap-to-pause, auto-scroll, playback speed, download
 server/   Fastify 4 + TypeScript (Node 16 compatible)
   src/tiktok.ts                   native TikTok resolver (page JSON) + server-side CORS probe
@@ -61,10 +72,12 @@ server/   Fastify 4 + TypeScript (Node 16 compatible)
   src/facebook.ts                 Facebook over plain HTTPS: Page listings (catalog), reel pages, explore/profile/search/For You
   src/facebookSession.ts          Facebook sign-in (cookies / window), settings-page account check
   src/ytdlp.ts                    yt-dlp fallback resolver
+  src/mirror.ts                   Mirror relay + signalling: /api/mirror/ws (WebSocket), rooms, ICE servers
   src/proxy.ts                    GET/HEAD /api/media/:id streaming relay with Range support
   src/ssrf.ts                     https-only, host allowlist, private-IP rejection
   src/tests/run.ts                executable checks (offline + live network)
 shared/types.ts                   API types shared by both sides
+shared/mirror.ts                  the Mirror wire protocol (mirror/1), shared with the viewer, the sender page and (as Swift) the iPhone app
 research/                         the Python probes used to measure TikTok CDN behaviour (+ redacted results)
 docs/RESEARCH.md                  detailed findings: cookies, CORS, Referer, expiry, signatures, Range
 ```

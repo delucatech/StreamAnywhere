@@ -50,7 +50,15 @@ const LIBRARY: App = {
   tile: 'linear-gradient(145deg, #2ee6a6 0%, #0b8f6a 100%)',
   icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2.5" fill="none" stroke="#fff" stroke-width="1.9"/><path fill="#fff" d="M10 9.2v5.6l4.8-2.8z"/><path fill="#fff" opacity=".85" d="M7 21h10v1.6H7z"/></svg>',
 };
-const APPS: App[] = [...PLATFORMS.map((p) => ({ id: p.id, name: p.short, url: p.url, tile: p.tile, icon: p.icon, platform: p })), LIBRARY, LAB];
+/** Mirror: an iPhone's (or a computer's) screen shown here (mirror.html; the phone runs the Mirror app) */
+const MIRROR: App = {
+  id: 'mirror',
+  name: 'Mirror',
+  url: 'mirror.html',
+  tile: 'linear-gradient(145deg, #7aa7ff 0%, #2b4fd6 100%)',
+  icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7.5" y="2.5" width="9" height="16" rx="2" fill="none" stroke="#fff" stroke-width="1.8"/><path d="M4 14.5v3.3A2.2 2.2 0 0 0 6.2 20h11.6a2.2 2.2 0 0 0 2.2-2.2v-3.3" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/><path d="M9.6 22h4.8" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="16.2" r="0.9" fill="#fff"/></svg>',
+};
+const APPS: App[] = [...PLATFORMS.map((p) => ({ id: p.id, name: p.short, url: p.url, tile: p.tile, icon: p.icon, platform: p })), MIRROR, LIBRARY, LAB];
 
 const badges = new Map<string, HTMLElement[]>();
 

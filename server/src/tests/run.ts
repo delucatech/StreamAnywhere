@@ -10,6 +10,7 @@
  * Network checks are skipped (not failed) when SKIP_NETWORK=1.
  */
 import { buildServer } from '../index';
+import { mirrorChecks } from './mirror';
 import { hostAllowed, ipIsPrivate, assertSafeUpstream } from '../ssrf';
 import { parseTikTokUrl } from '../tiktok';
 import { isTikTokAd, itemToFeedItem } from '../feed';
@@ -658,6 +659,7 @@ async function network(): Promise<void> {
       }
     }
   } finally {
+    await mirrorChecks(check, cookie, base, base.replace(/^http/, 'ws'));
     await app.close();
   }
 }

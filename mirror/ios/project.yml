@@ -1,0 +1,83 @@
+# XcodeGen project definition (https://github.com/yonaskolb/XcodeGen):
+#   brew install xcodegen && cd mirror/ios && xcodegen generate && open Mirror.xcodeproj
+# The .xcodeproj is generated, not committed. Change the bundle ids / team here, not in Xcode.
+name: Mirror
+options:
+  bundleIdPrefix: com.delucatech
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    DEVELOPMENT_TEAM: ""   # your Apple Developer team id (or pick it in Xcode once)
+    TARGETED_DEVICE_FAMILY: "1,2"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Automatic
+packages:
+  WebRTC:
+    # Google's WebRTC as an xcframework (data channels only are used here). Remove the two
+    # `package: WebRTC` lines below to build without it: the direct link is then simply never made.
+    url: https://github.com/stasel/WebRTC
+    from: "125.0.0"
+targets:
+  Mirror:
+    type: application
+    platform: iOS
+    sources:
+      - path: Mirror
+      - path: Shared
+        excludes:
+          - "Resources/**"
+    dependencies:
+      - target: MirrorBroadcast
+        embed: true
+      - package: WebRTC
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.delucatech.mirror
+        CODE_SIGN_ENTITLEMENTS: Mirror/Mirror.entitlements
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+    info:
+      path: Mirror/Info.plist
+      properties:
+        CFBundleDisplayName: Mirror
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        NSLocalNetworkUsageDescription: Mirror serves the viewer page to a Tesla or a computer on this phone's hotspot or Wi-Fi.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+  MirrorBroadcast:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: MirrorBroadcast
+      - path: Shared
+        excludes:
+          - "Resources/**"
+      - path: Shared/Resources/viewer.html
+        buildPhase: resources
+    dependencies:
+      - package: WebRTC
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.delucatech.mirror.broadcast
+        CODE_SIGN_ENTITLEMENTS: MirrorBroadcast/MirrorBroadcast.entitlements
+        # the extension's memory limit is 50 MB: no debug-only heap features
+        SWIFT_OPTIMIZATION_LEVEL: "-O"
+    info:
+      path: MirrorBroadcast/Info.plist
+      properties:
+        CFBundleDisplayName: Mirror
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.broadcast-services-upload
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).SampleHandler
+          RPBroadcastProcessMode: RPBroadcastProcessModeSampleBuffer
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true

@@ -32,6 +32,8 @@ export default defineConfig(({ mode }) => {
       '/api': {
         target: env.VITE_API_TARGET || 'http://localhost:8787',
         changeOrigin: true,
+        // the Mirror relay (/api/mirror/ws) is a WebSocket
+        ws: true,
       },
       // The site-password page (the server sets the cookie the /api calls then carry)
       '/login': {
@@ -54,6 +56,8 @@ export default defineConfig(({ mode }) => {
         feed: path.resolve(__dirname, 'feed.html'),
         download: path.resolve(__dirname, 'download.html'),
         library: path.resolve(__dirname, 'library.html'),
+        mirror: path.resolve(__dirname, 'mirror.html'),
+        mirrorSend: path.resolve(__dirname, 'mirror-send.html'),
       },
     },
   },

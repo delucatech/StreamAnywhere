@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build:mirror-local": "vite build --config vite.mirror-local.config.ts"
   },
   "dependencies": {
     "mp4box": "^2.4.1"

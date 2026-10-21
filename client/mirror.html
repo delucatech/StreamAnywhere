@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#07080c" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <title>Mirror – StreamAnywhere</title>
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/src/mirror/mirror.css" />
+  </head>
+  <body>
+    <a id="home" class="home" href="home.html">‹ Home</a>
+
+    <section id="entry" class="entry">
+      <div class="entry-card">
+        <h1>Mirror <small>An iPhone's screen, here</small></h1>
+        <p id="entry-note"></p>
+        <div class="row">
+          <input id="code" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="6" placeholder="CODE" aria-label="Room code" />
+          <button id="watch" class="primary" type="button" disabled>Watch</button>
+        </div>
+        <p id="entry-error" class="error" hidden></p>
+      </div>
+    </section>
+
+    <section id="player" class="player" hidden>
+      <div id="stage" class="stage"></div>
+      <div id="overlay" class="overlay spin" hidden>
+        <div id="overlay-text" class="text">Connecting…</div>
+        <div id="overlay-sub" class="sub"></div>
+      </div>
+      <div id="hud" class="hud">
+        <span id="hud-path" class="badge" data-path="relay">Relay</span>
+        <span id="hud-name" class="name"></span>
+        <span id="hud-stats" class="stats"></span>
+        <span id="hud-links" class="links"></span>
+        <span class="spacer"></span>
+        <button id="btn-retry" type="button" hidden>Try direct link</button>
+        <button id="btn-sound" type="button" aria-pressed="true">Sound on</button>
+        <button id="btn-full" type="button">Full screen</button>
+        <button id="btn-leave" type="button">Leave</button>
+      </div>
+    </section>
+    <script type="module" src="/src/mirror/mirror.ts"></script>
+  </body>
+</html>

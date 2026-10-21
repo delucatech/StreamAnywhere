@@ -6,6 +6,7 @@ import * as fs from 'node:fs';
 import { EXPLORE_CATEGORIES, YOUTUBE_CATEGORIES, platformOf } from '../../shared/types';
 import type { ConversationRequest, DownloadProbeRequest, LibraryCategoryRequest, LibraryEntryPatch, LibrarySaveRequest, DownloadStartRequest, FeedItem, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ProbeRequest, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SessionActionRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
 import { registerAuth } from './auth';
+import { mirrorStats, registerMirror, shutdownMirror } from './mirror';
 import { config, findUp } from './config';
 import { registerProxyRoutes } from './proxy';
 import { isTikTokUrl, probeUrl, resolveTikTokNative, TikTokError } from './tiktok';
@@ -265,6 +266,8 @@ export async function buildServer() {
 
   // Site password: everything below (pages, API, media) needs the login cookie.
   registerAuth(app);
+  // Mirror: the phone's screen to the Tesla through this server (relay + WebRTC signalling)
+  registerMirror(app);
   setYtDlpLogger((m) => app.log.info({ what: 'yt-dlp' }, m));
   setYouTubeSessionLogger((m) => app.log.info({ what: 'youtube-session' }, m));
   setInstagramSessionLogger((m) => app.log.info({ what: 'instagram-session' }, m));
@@ -869,7 +872,7 @@ export async function buildServer() {
     return reply.code(200).headers({ 'content-type': f.mime, 'cache-control': 'public, max-age=31536000, immutable' }).send(fs.createReadStream(f.path));
   });
 
-  app.get('/api/stats', async () => ({ downloads: downloaderStats(), library: libraryStats(), mediaRecords: mediaCount(), exploreStock: exploreStock(), youtubeStock: youtubeStock(), youtubeForYouStock: youtubeForYou?.stats, instagramStock: instagramStock(), instagramForYouStock: instagramForYou?.stats, instagram: instagramStats(), facebookStock: facebookStock(), facebookForYouStock: facebookForYou?.stats, facebook: facebookStats(), forYouStock: forYouStock(), workPage: workState(), uptimeSec: Math.round(process.uptime()) }));
+  app.get('/api/stats', async () => ({ downloads: downloaderStats(), library: libraryStats(), mediaRecords: mediaCount(), exploreStock: exploreStock(), youtubeStock: youtubeStock(), youtubeForYouStock: youtubeForYou?.stats, instagramStock: instagramStock(), instagramForYouStock: instagramForYou?.stats, instagram: instagramStats(), facebookStock: facebookStock(), facebookForYouStock: facebookForYou?.stats, facebook: facebookStats(), forYouStock: forYouStock(), mirror: mirrorStats(), workPage: workState(), uptimeSec: Math.round(process.uptime()) }));
 
   if (config.serveClient) {
     const dist = findUp(path.join('client', 'dist')) || findUp(path.join('client', 'dist'), process.cwd()) || path.resolve('client', 'dist');
@@ -903,6 +906,7 @@ if (require.main === module) {
           app.log.info({ sig }, 'shutting down');
           shutdownYtDlp();
           shutdownDownloader();
+          shutdownMirror();
           flushLibrary();
           void Promise.race([Promise.all([shutdownBrowsers(), shutdownYouTubeSession(), shutdownInstagram(), shutdownInstagramSession(), shutdownFacebookSession()]), new Promise((r) => setTimeout(r, 8000))]).finally(() => process.exit(0));
         });

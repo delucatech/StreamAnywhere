@@ -1,0 +1,47 @@
+<!doctype html>
+<!-- The viewer the phone itself serves on its hotspot (http://172.20.10.1:8420/). Built into one
+     self-contained file (npm run build:mirror-local) that the iOS app bundles. -->
+<html lang="en" data-mirror-local="1">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#07080c" />
+    <title>Mirror</title>
+    <link rel="stylesheet" href="/src/mirror/mirror.css" />
+  </head>
+  <body>
+    <a id="home" class="home" href="home.html" hidden>‹ Home</a>
+
+    <section id="entry" class="entry">
+      <div class="entry-card">
+        <h1>Mirror <small>This iPhone's screen, over its hotspot</small></h1>
+        <p id="entry-note"></p>
+        <div class="row">
+          <input id="code" type="text" hidden aria-label="Room code" />
+          <button id="watch" class="primary" type="button">Tap to watch</button>
+        </div>
+        <p id="entry-error" class="error" hidden></p>
+      </div>
+    </section>
+
+    <section id="player" class="player" hidden>
+      <div id="stage" class="stage"></div>
+      <div id="overlay" class="overlay spin" hidden>
+        <div id="overlay-text" class="text">Connecting…</div>
+        <div id="overlay-sub" class="sub"></div>
+      </div>
+      <div id="hud" class="hud">
+        <span id="hud-path" class="badge" data-path="local">Local</span>
+        <span id="hud-name" class="name"></span>
+        <span id="hud-stats" class="stats"></span>
+        <span id="hud-links" class="links"></span>
+        <span class="spacer"></span>
+        <button id="btn-retry" type="button" hidden>Try direct link</button>
+        <button id="btn-sound" type="button" aria-pressed="true">Sound on</button>
+        <button id="btn-full" type="button">Full screen</button>
+        <button id="btn-leave" type="button">Leave</button>
+      </div>
+    </section>
+    <script type="module" src="/src/mirror/mirror.ts"></script>
+  </body>
+</html>
