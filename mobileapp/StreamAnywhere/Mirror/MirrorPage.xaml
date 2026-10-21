@@ -8,36 +8,36 @@
              BackgroundColor="{StaticResource Bg}">
 
     <ContentPage.Resources>
-        <Style x:Key="Card" TargetType="Border">
+        <Style x:Key="CardStyle" TargetType="Border">
             <Setter Property="BackgroundColor" Value="{StaticResource Card}" />
-            <Setter Property="Stroke" Value="{StaticResource Line}" />
+            <Setter Property="Stroke" Value="{StaticResource LineBrush}" />
             <Setter Property="StrokeThickness" Value="1" />
             <Setter Property="StrokeShape" Value="RoundRectangle 20" />
             <Setter Property="Padding" Value="18,16" />
         </Style>
-        <Style x:Key="Field" TargetType="Border">
+        <Style x:Key="FieldStyle" TargetType="Border">
             <Setter Property="BackgroundColor" Value="{StaticResource Bg}" />
-            <Setter Property="Stroke" Value="{StaticResource Line}" />
+            <Setter Property="Stroke" Value="{StaticResource LineBrush}" />
             <Setter Property="StrokeThickness" Value="1" />
             <Setter Property="StrokeShape" Value="RoundRectangle 12" />
             <Setter Property="Padding" Value="12,0" />
         </Style>
-        <Style x:Key="Eyebrow" TargetType="Label">
+        <Style x:Key="EyebrowLabel" TargetType="Label">
             <Setter Property="FontSize" Value="12" />
             <Setter Property="CharacterSpacing" Value="1.5" />
             <Setter Property="TextColor" Value="{StaticResource Muted}" />
             <Setter Property="TextTransform" Value="Uppercase" />
         </Style>
-        <Style x:Key="Muted" TargetType="Label">
+        <Style x:Key="MutedLabel" TargetType="Label">
             <Setter Property="FontSize" Value="14" />
             <Setter Property="TextColor" Value="{StaticResource Muted}" />
             <Setter Property="LineHeight" Value="1.25" />
         </Style>
-        <Style x:Key="Body" TargetType="Label">
+        <Style x:Key="BodyLabel" TargetType="Label">
             <Setter Property="FontSize" Value="16" />
             <Setter Property="TextColor" Value="{StaticResource Fg}" />
         </Style>
-        <Style x:Key="Secondary" TargetType="Button">
+        <Style x:Key="SecondaryButton" TargetType="Button">
             <Setter Property="BackgroundColor" Value="{StaticResource CardRaised}" />
             <Setter Property="TextColor" Value="{StaticResource Fg}" />
             <Setter Property="FontSize" Value="17" />
@@ -47,7 +47,7 @@
             <Setter Property="BorderColor" Value="{StaticResource Line}" />
             <Setter Property="BorderWidth" Value="1" />
         </Style>
-        <Style x:Key="Ghost" TargetType="Button">
+        <Style x:Key="GhostButton" TargetType="Button">
             <Setter Property="BackgroundColor" Value="Transparent" />
             <Setter Property="TextColor" Value="{StaticResource Accent}" />
             <Setter Property="FontSize" Value="15" />
@@ -55,7 +55,7 @@
             <Setter Property="Padding" Value="4,8" />
             <Setter Property="MinimumHeightRequest" Value="36" />
         </Style>
-        <Style x:Key="Segment" TargetType="Button">
+        <Style x:Key="SegmentButton" TargetType="Button">
             <Setter Property="BackgroundColor" Value="Transparent" />
             <Setter Property="TextColor" Value="{StaticResource Muted}" />
             <Setter Property="FontSize" Value="14" />
@@ -64,12 +64,12 @@
             <Setter Property="HeightRequest" Value="40" />
             <Setter Property="Padding" Value="0" />
         </Style>
-        <Style x:Key="Stat" TargetType="Label">
+        <Style x:Key="StatLabel" TargetType="Label">
             <Setter Property="FontSize" Value="18" />
             <Setter Property="FontAttributes" Value="Bold" />
             <Setter Property="TextColor" Value="{StaticResource Fg}" />
         </Style>
-        <Style x:Key="StatName" TargetType="Label">
+        <Style x:Key="StatNameLabel" TargetType="Label">
             <Setter Property="FontSize" Value="12" />
             <Setter Property="TextColor" Value="{StaticResource Muted}" />
         </Style>
@@ -92,121 +92,121 @@
             <!-- header -->
             <Grid ColumnDefinitions="*,Auto" Margin="0,8,0,4">
                 <VerticalStackLayout Spacing="0">
-                    <Label Text="StreamAnywhere" Style="{StaticResource Eyebrow}" />
+                    <Label Text="StreamAnywhere" Style="{StaticResource EyebrowLabel}" />
                     <Label Text="Mirror" FontSize="34" FontAttributes="Bold" TextColor="{StaticResource Fg}" />
                 </VerticalStackLayout>
-                <Button Grid.Column="1" x:Name="SettingsToggle" Text="Settings" Style="{StaticResource Ghost}" VerticalOptions="End" Clicked="OnToggleSettings" />
+                <Button Grid.Column="1" x:Name="SettingsToggle" Text="Settings" Style="{StaticResource GhostButton}" VerticalOptions="End" Clicked="OnToggleSettings" />
             </Grid>
 
             <!-- what is going on -->
-            <Border Style="{StaticResource Card}">
+            <Border Style="{StaticResource CardStyle}">
                 <VerticalStackLayout Spacing="8">
                     <HorizontalStackLayout Spacing="10">
-                        <Ellipse x:Name="StateDot" WidthRequest="12" HeightRequest="12" Fill="{StaticResource Gray400}" VerticalOptions="Center" />
+                        <Ellipse x:Name="StateDot" WidthRequest="12" HeightRequest="12" Fill="{StaticResource Gray400Brush}" VerticalOptions="Center" />
                         <Label x:Name="StateLabel" Text="Not paired yet" FontSize="21" FontAttributes="Bold" TextColor="{StaticResource Fg}" VerticalOptions="Center" />
                     </HorizontalStackLayout>
-                    <Label x:Name="StateDetail" Style="{StaticResource Muted}" FontSize="15" Text="Pair this iPhone with the Tesla once; after that, just start." />
+                    <Label x:Name="StateDetail" Style="{StaticResource MutedLabel}" FontSize="15" Text="Pair this iPhone with the Tesla once; after that, just start." />
                     <Grid x:Name="StatsGrid" ColumnDefinitions="*,*,*" ColumnSpacing="10" Margin="0,8,0,0" IsVisible="False">
                         <Border Grid.Column="0" BackgroundColor="{StaticResource CardRaised}" StrokeThickness="0" StrokeShape="RoundRectangle 12" Padding="10,8">
                             <VerticalStackLayout Spacing="2">
-                                <Label x:Name="StatPicture" Style="{StaticResource Stat}" Text="–" />
-                                <Label Text="Picture" Style="{StaticResource StatName}" />
+                                <Label x:Name="StatPicture" Style="{StaticResource StatLabel}" Text="–" />
+                                <Label Text="Picture" Style="{StaticResource StatNameLabel}" />
                             </VerticalStackLayout>
                         </Border>
                         <Border Grid.Column="1" BackgroundColor="{StaticResource CardRaised}" StrokeThickness="0" StrokeShape="RoundRectangle 12" Padding="10,8">
                             <VerticalStackLayout Spacing="2">
-                                <Label x:Name="StatRate" Style="{StaticResource Stat}" Text="–" />
-                                <Label Text="Sending" Style="{StaticResource StatName}" />
+                                <Label x:Name="StatRate" Style="{StaticResource StatLabel}" Text="–" />
+                                <Label Text="Sending" Style="{StaticResource StatNameLabel}" />
                             </VerticalStackLayout>
                         </Border>
                         <Border Grid.Column="2" BackgroundColor="{StaticResource CardRaised}" StrokeThickness="0" StrokeShape="RoundRectangle 12" Padding="10,8">
                             <VerticalStackLayout Spacing="2">
-                                <Label x:Name="StatWatching" Style="{StaticResource Stat}" Text="–" />
-                                <Label Text="Watching" Style="{StaticResource StatName}" />
+                                <Label x:Name="StatWatching" Style="{StaticResource StatLabel}" Text="–" />
+                                <Label Text="Watching" Style="{StaticResource StatNameLabel}" />
                             </VerticalStackLayout>
                         </Border>
                     </Grid>
-                    <Label x:Name="StateMessage" Style="{StaticResource Muted}" IsVisible="False" />
+                    <Label x:Name="StateMessage" Style="{StaticResource MutedLabel}" IsVisible="False" />
                 </VerticalStackLayout>
             </Border>
 
             <!-- the two actions -->
             <mirror:BroadcastPickerView x:Name="Picker" HeightRequest="58" Margin="0,6,0,0" />
-            <Label x:Name="Unsupported" Style="{StaticResource Muted}" Text="Mirroring the screen is an iPhone feature: install this app on an iPhone." IsVisible="False" />
-            <Label x:Name="StartHint" Style="{StaticResource Muted}" HorizontalTextAlignment="Center" />
+            <Label x:Name="Unsupported" Style="{StaticResource MutedLabel}" Text="Mirroring the screen is an iPhone feature: install this app on an iPhone." IsVisible="False" />
+            <Label x:Name="StartHint" Style="{StaticResource MutedLabel}" HorizontalTextAlignment="Center" />
 
-            <Button x:Name="PairButton" Text="Pair with the Tesla" Style="{StaticResource Secondary}" Clicked="OnPair" />
-            <Label x:Name="PairHint" Style="{StaticResource Muted}" HorizontalTextAlignment="Center" Text="On the Tesla, open StreamAnywhere → Mirror and scan the code it shows. The Camera app works too." />
-            <Label x:Name="PairResult" Style="{StaticResource Muted}" HorizontalTextAlignment="Center" IsVisible="False" />
+            <Button x:Name="PairButton" Text="Pair with the Tesla" Style="{StaticResource SecondaryButton}" Clicked="OnPair" />
+            <Label x:Name="PairHint" Style="{StaticResource MutedLabel}" HorizontalTextAlignment="Center" Text="On the Tesla, open StreamAnywhere → Mirror and scan the code it shows. The Camera app works too." />
+            <Label x:Name="PairResult" Style="{StaticResource MutedLabel}" HorizontalTextAlignment="Center" IsVisible="False" />
 
             <!-- the hotspot way, when the phone has an address to show -->
-            <Border x:Name="LocalCard" Style="{StaticResource Card}" IsVisible="False">
+            <Border x:Name="LocalCard" Style="{StaticResource CardStyle}" IsVisible="False">
                 <VerticalStackLayout Spacing="6">
-                    <Label Text="Tesla on this phone's hotspot?" Style="{StaticResource Body}" FontAttributes="Bold" />
-                    <Label x:Name="LocalLabel" Style="{StaticResource Muted}" />
+                    <Label Text="Tesla on this phone's hotspot?" Style="{StaticResource BodyLabel}" FontAttributes="Bold" />
+                    <Label x:Name="LocalLabel" Style="{StaticResource MutedLabel}" />
                 </VerticalStackLayout>
             </Border>
 
             <!-- settings (folded away) -->
             <VerticalStackLayout x:Name="SettingsPanel" IsVisible="False" Spacing="14" Margin="0,8,0,0">
 
-                <Border Style="{StaticResource Card}">
+                <Border Style="{StaticResource CardStyle}">
                     <VerticalStackLayout Spacing="12">
-                        <Label Text="Picture" Style="{StaticResource Eyebrow}" />
+                        <Label Text="Picture" Style="{StaticResource EyebrowLabel}" />
                         <Border BackgroundColor="{StaticResource Bg}" StrokeThickness="0" StrokeShape="RoundRectangle 12" Padding="3">
                             <Grid ColumnDefinitions="*,*,*" ColumnSpacing="3">
-                                <Button Grid.Column="0" x:Name="QualitySaver" Text="Saver" Style="{StaticResource Segment}" Clicked="OnQuality" />
-                                <Button Grid.Column="1" x:Name="QualityBalanced" Text="Balanced" Style="{StaticResource Segment}" Clicked="OnQuality" />
-                                <Button Grid.Column="2" x:Name="QualitySharp" Text="Sharp" Style="{StaticResource Segment}" Clicked="OnQuality" />
+                                <Button Grid.Column="0" x:Name="QualitySaver" Text="Saver" Style="{StaticResource SegmentButton}" Clicked="OnQuality" />
+                                <Button Grid.Column="1" x:Name="QualityBalanced" Text="Balanced" Style="{StaticResource SegmentButton}" Clicked="OnQuality" />
+                                <Button Grid.Column="2" x:Name="QualitySharp" Text="Sharp" Style="{StaticResource SegmentButton}" Clicked="OnQuality" />
                             </Grid>
                         </Border>
-                        <Label x:Name="QualityHint" Style="{StaticResource Muted}" />
+                        <Label x:Name="QualityHint" Style="{StaticResource MutedLabel}" />
                         <Border BackgroundColor="{StaticResource Bg}" StrokeThickness="0" StrokeShape="RoundRectangle 12" Padding="3">
                             <Grid ColumnDefinitions="*,*,*,*" ColumnSpacing="3">
-                                <Button Grid.Column="0" x:Name="Fps15" Text="15 fps" Style="{StaticResource Segment}" Clicked="OnFps" />
-                                <Button Grid.Column="1" x:Name="Fps24" Text="24 fps" Style="{StaticResource Segment}" Clicked="OnFps" />
-                                <Button Grid.Column="2" x:Name="Fps30" Text="30 fps" Style="{StaticResource Segment}" Clicked="OnFps" />
-                                <Button Grid.Column="3" x:Name="Fps60" Text="60 fps" Style="{StaticResource Segment}" Clicked="OnFps" />
+                                <Button Grid.Column="0" x:Name="Fps15" Text="15 fps" Style="{StaticResource SegmentButton}" Clicked="OnFps" />
+                                <Button Grid.Column="1" x:Name="Fps24" Text="24 fps" Style="{StaticResource SegmentButton}" Clicked="OnFps" />
+                                <Button Grid.Column="2" x:Name="Fps30" Text="30 fps" Style="{StaticResource SegmentButton}" Clicked="OnFps" />
+                                <Button Grid.Column="3" x:Name="Fps60" Text="60 fps" Style="{StaticResource SegmentButton}" Clicked="OnFps" />
                             </Grid>
                         </Border>
                         <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto" RowSpacing="10">
-                            <Label Grid.Row="0" Text="Sound (the app's sound)" Style="{StaticResource Body}" VerticalOptions="Center" />
+                            <Label Grid.Row="0" Text="Sound (the app's sound)" Style="{StaticResource BodyLabel}" VerticalOptions="Center" />
                             <Switch Grid.Row="0" Grid.Column="1" x:Name="AudioSwitch" Toggled="OnSettingChanged" />
-                            <Label Grid.Row="1" Text="Microphone" Style="{StaticResource Body}" VerticalOptions="Center" />
+                            <Label Grid.Row="1" Text="Microphone" Style="{StaticResource BodyLabel}" VerticalOptions="Center" />
                             <Switch Grid.Row="1" Grid.Column="1" x:Name="MicSwitch" Toggled="OnSettingChanged" />
                         </Grid>
                     </VerticalStackLayout>
                 </Border>
 
-                <Border Style="{StaticResource Card}">
+                <Border Style="{StaticResource CardStyle}">
                     <VerticalStackLayout Spacing="12">
-                        <Label Text="Server" Style="{StaticResource Eyebrow}" />
+                        <Label Text="Server" Style="{StaticResource EyebrowLabel}" />
                         <Grid ColumnDefinitions="*,Auto">
-                            <Label Text="Use the StreamAnywhere server" Style="{StaticResource Body}" VerticalOptions="Center" />
+                            <Label Text="Use the StreamAnywhere server" Style="{StaticResource BodyLabel}" VerticalOptions="Center" />
                             <Switch Grid.Column="1" x:Name="UseServer" Toggled="OnSettingChanged" />
                         </Grid>
-                        <Label Style="{StaticResource Muted}" Text="The server relays the picture when the car and the phone cannot reach each other directly. Off = hotspot only." />
-                        <Label x:Name="PairedLabel" Style="{StaticResource Body}" />
-                        <Label Text="This phone's name" Style="{StaticResource StatName}" />
-                        <Border Style="{StaticResource Field}">
+                        <Label Style="{StaticResource MutedLabel}" Text="The server relays the picture when the car and the phone cannot reach each other directly. Off = hotspot only." />
+                        <Label x:Name="PairedLabel" Style="{StaticResource BodyLabel}" />
+                        <Label Text="This phone's name" Style="{StaticResource StatNameLabel}" />
+                        <Border Style="{StaticResource FieldStyle}">
                             <Entry x:Name="NameEntry" Placeholder="iPhone" Completed="OnSettingChanged" Unfocused="OnSettingChanged" />
                         </Border>
-                        <Label Text="Server address" Style="{StaticResource StatName}" />
-                        <Border Style="{StaticResource Field}">
+                        <Label Text="Server address" Style="{StaticResource StatNameLabel}" />
+                        <Border Style="{StaticResource FieldStyle}">
                             <Entry x:Name="ServerEntry" Placeholder="https://teslavplayer.duckdns.org" Keyboard="Url" Completed="OnSettingChanged" Unfocused="OnSettingChanged" />
                         </Border>
-                        <Button x:Name="PasswordToggle" Text="No code to scan? Sign in with the password" Style="{StaticResource Ghost}" HorizontalOptions="Start" Clicked="OnTogglePassword" />
+                        <Button x:Name="PasswordToggle" Text="No code to scan? Sign in with the password" Style="{StaticResource GhostButton}" HorizontalOptions="Start" Clicked="OnTogglePassword" />
                         <VerticalStackLayout x:Name="PasswordPanel" IsVisible="False" Spacing="10">
-                            <Border Style="{StaticResource Field}">
+                            <Border Style="{StaticResource FieldStyle}">
                                 <Entry x:Name="PasswordEntry" Placeholder="Site password" IsPassword="True" />
                             </Border>
-                            <Button x:Name="SignInButton" Text="Sign in" Style="{StaticResource Secondary}" HeightRequest="46" Clicked="OnSignIn" />
-                            <Label x:Name="SignInLabel" Style="{StaticResource Muted}" />
+                            <Button x:Name="SignInButton" Text="Sign in" Style="{StaticResource SecondaryButton}" HeightRequest="46" Clicked="OnSignIn" />
+                            <Label x:Name="SignInLabel" Style="{StaticResource MutedLabel}" />
                             <Grid ColumnDefinitions="*,Auto">
-                                <Label x:Name="RoomLabel" Style="{StaticResource Body}" VerticalOptions="Center" />
-                                <Button Grid.Column="1" Text="New code" Style="{StaticResource Ghost}" Clicked="OnNewCode" />
+                                <Label x:Name="RoomLabel" Style="{StaticResource BodyLabel}" VerticalOptions="Center" />
+                                <Button Grid.Column="1" Text="New code" Style="{StaticResource GhostButton}" Clicked="OnNewCode" />
                             </Grid>
-                            <Label Style="{StaticResource Muted}" Text="With a password instead of a scan, the car types this code on its Mirror page." />
+                            <Label Style="{StaticResource MutedLabel}" Text="With a password instead of a scan, the car types this code on its Mirror page." />
                         </VerticalStackLayout>
                     </VerticalStackLayout>
                 </Border>

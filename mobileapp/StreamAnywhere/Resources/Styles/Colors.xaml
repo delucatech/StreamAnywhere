@@ -40,6 +40,8 @@
     <Color x:Key="Gray900">#151923</Color>
     <Color x:Key="Gray950">#0b0d12</Color>
 
+    <SolidColorBrush x:Key="LineBrush" Color="{StaticResource Line}"/>
+    <SolidColorBrush x:Key="AccentBrush" Color="{StaticResource Accent}"/>
     <SolidColorBrush x:Key="PrimaryBrush" Color="{StaticResource Primary}"/>
     <SolidColorBrush x:Key="SecondaryBrush" Color="{StaticResource Secondary}"/>
     <SolidColorBrush x:Key="TertiaryBrush" Color="{StaticResource Tertiary}"/>

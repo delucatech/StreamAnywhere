@@ -41,18 +41,29 @@ public class BroadcastPickerHandler : ViewHandler<BroadcastPickerView, RPSystemB
     void Style()
     {
         var picker = PlatformView;
+        if (picker == null) return;
         var title = VirtualView?.Title ?? "Start mirroring";
         picker.BackgroundColor = VirtualView?.IsLive == true ? Live : Accent;
-        foreach (var sub in picker.Subviews)
+        try
         {
-            if (sub is not UIButton button) continue;
-            button.SetImage(null, UIControlState.Normal);
-            button.SetTitle(title, UIControlState.Normal);
-            button.SetTitleColor(UIColor.White, UIControlState.Normal);
-            button.TintColor = UIColor.White;
-            button.TitleLabel.Font = UIFont.SystemFontOfSize(19, UIFontWeight.Bold);
-            button.Frame = picker.Bounds;
-            button.AutoresizingMask = UIViewAutoresizing.FlexibleWidth | UIViewAutoresizing.FlexibleHeight;
+            foreach (var sub in picker.Subviews)
+            {
+                if (sub is not UIButton button) continue;
+                // the system button is a bare icon; give it our title (iOS 15+ buttons may carry a
+                // configuration instead of a title label - then only the image and tint can be changed)
+                button.SetImage(null, UIControlState.Normal);
+                button.SetTitle(title, UIControlState.Normal);
+                button.SetTitleColor(UIColor.White, UIControlState.Normal);
+                button.TintColor = UIColor.White;
+                if (button.TitleLabel != null) button.TitleLabel.Font = UIFont.SystemFontOfSize(19, UIFontWeight.Bold);
+                button.Frame = picker.Bounds;
+                button.AutoresizingMask = UIViewAutoresizing.FlexibleWidth | UIViewAutoresizing.FlexibleHeight;
+            }
+        }
+        catch (Exception e)
+        {
+            // cosmetics only: the button must still open the broadcast sheet
+            Console.WriteLine($"[Mirror] start button styling: {e.Message}");
         }
     }
 }
