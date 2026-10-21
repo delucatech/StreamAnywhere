@@ -105,6 +105,20 @@ iOS build too, which needs a paired Mac). Steps:
 - The Tesla's browser: WebCodecs in Chromium needs https (the server page has it); the hotspot page
   plays through MSE. Both were exercised in Chromium here, not in the car yet.
 
+## Pairing (the phone never types the password)
+
+The relay is behind the site password. `mirror.html`, already signed in on the car, asks
+`POST /api/mirror/pair` for a one-time token tied to its room and shows it as a QR code
+(`https://server/pair#TOKEN`, refreshed every four minutes), then waits in the room. The phone scans
+it (the StreamAnywhere app's **Pair with the Tesla**, or the Camera app, which opens the public
+landing page `/pair` and hands the token to the app through `streamanywhere://pair?…`) and claims it at
+`POST /api/mirror/pair/claim` (public; one claim per token, five minutes), which sets the same
+`sa_auth` cookie a password would have and names the room; the car's page gets a `paired` control.
+The room is remembered on both sides (`localStorage` on the car, the App Group on the phone), so after
+the first scan the phone just starts and the page switches to the picture by itself, and back to the
+code when the stream stops. The Swift app in `ios/` still signs in with the password (it predates
+pairing); `server/src/tests/mirror.ts` covers the pairing calls.
+
 ## Server settings
 
 `MIRROR_STUN_URLS` (default: Google's public STUN) and, optionally, `MIRROR_TURN_URLS` /

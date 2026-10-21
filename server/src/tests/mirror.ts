@@ -57,15 +57,24 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 export async function mirrorChecks(check: Check, cookie: string, base: string, wsBase: string): Promise<void> {
   console.log('\n== mirror relay');
   const http = await import('node:http');
-  const post = (p: string, headers: Record<string, string>) =>
+  const post = (p: string, headers: Record<string, string>, json?: unknown) =>
+    new Promise<{ status: number; body: string; setCookie: string }>((resolve, reject) => {
+      const payload = json === undefined ? undefined : JSON.stringify(json);
+      const req = http.request(base + p, { method: 'POST', headers: payload === undefined ? headers : { ...headers, 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(payload)) } }, (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => resolve({ status: res.statusCode || 0, body: Buffer.concat(chunks).toString(), setCookie: String(res.headers['set-cookie']?.[0] || '') }));
+      });
+      req.on('error', reject);
+      req.end(payload);
+    });
+  const get = (p: string, headers: Record<string, string>) =>
     new Promise<{ status: number; body: string }>((resolve, reject) => {
-      const req = http.request(base + p, { method: 'POST', headers }, (res) => {
+      http.get(base + p, { headers }, (res) => {
         const chunks: Buffer[] = [];
         res.on('data', (c) => chunks.push(c));
         res.on('end', () => resolve({ status: res.statusCode || 0, body: Buffer.concat(chunks).toString() }));
-      });
-      req.on('error', reject);
-      req.end();
+      }).on('error', reject);
     });
 
   const noCookie = await post('/api/mirror/rooms', {});
@@ -170,6 +179,34 @@ export async function mirrorChecks(check: Check, cookie: string, base: string, w
     }).on('error', reject);
   });
   check('room status (code normalised)', status.status === 200 && (JSON.parse(status.body) as { live: boolean; watchers: number }).live === true, status.body);
+
+  // ---- pairing: the car's page shows a code, the phone claims it and is signed in
+  const pairNoCookie = await post('/api/mirror/pair', {}, { room });
+  check('a pairing code needs the site password', pairNoCookie.status === 401, pairNoCookie.status);
+  const paired = await post('/api/mirror/pair', { cookie }, { room });
+  const pairInfo = JSON.parse(paired.body) as { room: string; token: string; url: string; expiresInMs: number };
+  check('a pairing code for the page\'s own room', paired.status === 200 && pairInfo.room === room && /^[A-Za-z0-9_-]{32}$/.test(pairInfo.token) && pairInfo.url === `${base}/pair#${pairInfo.token}` && pairInfo.expiresInMs > 60_000, pairInfo);
+  const fresh = await post('/api/mirror/pair', { cookie });
+  const freshInfo = JSON.parse(fresh.body) as { room: string; token: string };
+  check('a pairing code without a room makes a new room', fresh.status === 200 && isRoomCode(freshInfo.room) && freshInfo.room !== room && roomSnapshot(freshInfo.room) !== undefined, freshInfo);
+  const landing = await get('/pair', {});
+  check('the landing page is public and hands the token to the app', landing.status === 200 && landing.body.includes('streamanywhere://pair?server=') && landing.body.includes('Open StreamAnywhere'), landing.status);
+  const badClaim = await post('/api/mirror/pair/claim', {}, { token: 'nope-nope-nope-nope-nope', name: 'Phone' });
+  check('an unknown pairing code is refused', badClaim.status === 404, badClaim.status);
+  const claim = await post('/api/mirror/pair/claim', {}, { token: pairInfo.token, name: 'Scanned phone' });
+  const claimBody = JSON.parse(claim.body) as { room: string; server: string; signedIn: boolean };
+  const phoneCookie = claim.setCookie.split(';')[0];
+  check('the phone claims the code without a password and gets the room and the cookie', claim.status === 200 && claimBody.room === room && claimBody.signedIn === true && claimBody.server === base && phoneCookie.startsWith('sa_auth='), { status: claim.status, body: claimBody, cookie: phoneCookie.slice(0, 12) });
+  const pairedMsg = (await w1.next('paired')) as MirrorControl | undefined;
+  check('the car\'s page is told the phone paired', pairedMsg?.t === 'paired' && pairedMsg.name === 'Scanned phone', pairedMsg);
+  const again = await post('/api/mirror/pair/claim', {}, { token: pairInfo.token });
+  check('a pairing code works once', again.status === 404, again.status);
+  const withPhoneCookie = await post('/api/mirror/rooms', { cookie: phoneCookie });
+  check('the cookie from the claim is a real login', withPhoneCookie.status === 200, withPhoneCookie.status);
+  let phoneRefused = '';
+  const phoneSender = await connect(`${wsBase}/api/mirror/ws?room=${freshInfo.room}&role=sender&name=Paired`, { cookie: phoneCookie }).catch((e: Error) => (phoneRefused = e.message));
+  check('the paired phone can send', phoneRefused === '' && typeof phoneSender === 'object', phoneRefused);
+  if (typeof phoneSender === 'object') phoneSender.ws.close();
 
   w1.ws.close();
   sender2.ws.close();

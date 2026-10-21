@@ -13,15 +13,31 @@
   <body>
     <a id="home" class="home" href="home.html">‹ Home</a>
 
+    <!-- the lobby: the pairing code the phone scans; the picture takes over when the phone starts -->
     <section id="entry" class="entry">
-      <div class="entry-card">
-        <h1>Mirror <small>An iPhone's screen, here</small></h1>
-        <p id="entry-note"></p>
-        <div class="row">
-          <input id="code" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="6" placeholder="CODE" aria-label="Room code" />
-          <button id="watch" class="primary" type="button" disabled>Watch</button>
+      <div class="lobby">
+        <div class="qr-card">
+          <div id="qr" class="qr" aria-label="Pairing code"></div>
+          <div class="code-line">Code <b id="room-code">······</b></div>
         </div>
-        <p id="entry-error" class="error" hidden></p>
+        <div class="lobby-text">
+          <h1>Mirror <small>Your iPhone's screen, here</small></h1>
+          <ol class="steps">
+            <li>On the iPhone, open <b>StreamAnywhere</b> and tap <b>Pair with the Tesla</b> to scan this code (the Camera app works too).</li>
+            <li>Tap <b>Start mirroring</b> on the phone.</li>
+          </ol>
+          <p id="lobby-status" class="status"><span class="dot"></span><span id="lobby-status-text">Waiting for the phone…</span></p>
+          <p id="entry-note" class="note"></p>
+          <p id="entry-error" class="error" hidden></p>
+          <details class="manual">
+            <summary>Already paired with another code? Type it</summary>
+            <div class="row">
+              <input id="code" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="6" placeholder="CODE" aria-label="Room code" />
+              <button id="watch" class="primary" type="button" disabled>Watch</button>
+            </div>
+            <button id="new-code" class="link" type="button">Show a new code</button>
+          </details>
+        </div>
       </div>
     </section>
 

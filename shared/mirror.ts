@@ -88,6 +88,8 @@ export type MirrorControl =
   | { t: 'sender'; event: 'join' | 'leave'; name?: string }
   /** server -> watcher: how many are watching */
   | { t: 'watchers'; n: number }
+  /** server -> watcher: a phone scanned this page's pairing code (it is signed in and has the room; the picture follows when it starts) */
+  | { t: 'paired'; name?: string }
   /** watcher -> server: stop (or resume) copying frames to me - I am receiving them over the direct link */
   | { t: 'relay'; on: boolean }
   /** watcher -> server -> sender ("from" filled in by the server) and sender -> server -> watcher ("to") */
@@ -111,6 +113,66 @@ export interface MirrorRoomInfo {
   watchers: number;
   config?: MirrorConfig;
   startedAt?: number;
+}
+
+/**
+ * Pairing: the car's page (signed in) shows a QR code with a one-time token; the phone scans it and
+ * claims it, and the server signs the phone in and tells it the room. The link in the code is
+ * https://server/pair#TOKEN: a phone with the app scans it in the app; the Camera app opens the
+ * landing page, which hands the token to the app through its URL scheme.
+ */
+export const PAIR_PATH = '/pair';
+export const PAIR_URL_SCHEME = 'streamanywhere';
+export const PAIR_TOKEN_TTL_MS = 5 * 60 * 1000;
+
+export interface MirrorPairInfo {
+  room: string;
+  token: string;
+  /** what the QR code holds */
+  url: string;
+  expiresInMs: number;
+}
+
+export interface MirrorPairClaim {
+  room: string;
+  /** the server's own address, for the phone to keep */
+  server: string;
+  /** false when the site has no password (nothing to sign in to) */
+  signedIn: boolean;
+}
+
+export const pairUrl = (origin: string, token: string): string => `${origin}${PAIR_PATH}#${token}`;
+export const appPairUrl = (origin: string, token: string): string => `${PAIR_URL_SCHEME}://pair?server=${encodeURIComponent(origin)}&token=${encodeURIComponent(token)}`;
+
+/** The server and the token of a pairing link (either form), or undefined. */
+export function parsePairLink(text: string): { server: string; token: string } | undefined {
+  let u: URL;
+  try {
+    u = new URL(text.trim());
+  } catch {
+    return undefined;
+  }
+  const tokenOk = (t: string): boolean => /^[A-Za-z0-9_-]{16,64}$/.test(t);
+  const trimSlash = (p: string): string => (p.endsWith('/') ? p.slice(0, -1) : p);
+  if ((u.protocol === 'https:' || u.protocol === 'http:') && trimSlash(u.pathname) === PAIR_PATH) {
+    const token = u.hash.slice(1);
+    return tokenOk(token) ? { server: u.origin, token } : undefined;
+  }
+  if (u.protocol === PAIR_URL_SCHEME + ':') {
+    // "streamanywhere://pair?..." parses with host "pair"; be lenient about where the ? landed
+    const q = new URLSearchParams(u.search || u.href.slice(u.href.indexOf('?')));
+    const server = trimSlash(q.get('server') || '');
+    const token = q.get('token') || '';
+    let serverOk = false;
+    try {
+      const su = new URL(server);
+      serverOk = (su.protocol === 'https:' || su.protocol === 'http:') && su.origin === server;
+    } catch {
+      serverOk = false;
+    }
+    return serverOk && tokenOk(token) ? { server, token } : undefined;
+  }
+  return undefined;
 }
 
 export interface IceServer {

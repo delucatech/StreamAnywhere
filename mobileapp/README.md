@@ -4,11 +4,13 @@ The phone app. Its first feature is **Mirror**: the iPhone's screen (any app, wi
 Tesla's browser. Open `StreamAnywhere.slnx` in Visual Studio.
 
 ```
-StreamAnywhere/                 the MAUI app (iOS, Android, Windows, Mac Catalyst)
-  Mirror/MirrorPage.xaml        the home page: the room code the car types, the start button, status, settings
+StreamAnywhere/                 the MAUI app (iOS, Android, Windows, Mac Catalyst); dark theme only (App.xaml.cs + Resources/Styles/Colors.xaml)
+  Mirror/MirrorPage.xaml        the home page: what is going on, Start mirroring, Pair with the Tesla, settings folded away
+  Mirror/PairLink.cs            the pairing link in the car's QR code (https://server/pair#TOKEN, or streamanywhere://pair?…)
   Mirror/IMirrorPlatform.cs     what the page needs from the platform (+ the stub for non-iOS platforms)
   Mirror/BroadcastPickerView.cs the start button (iOS: the system's RPSystemBroadcastPickerView)
-  Platforms/iOS/MirrorPlatform.cs, BroadcastPickerHandler.cs, Entitlements.plist (the App Group)
+  Platforms/iOS/MirrorPlatform.cs, QrScannerController.cs (the camera), BroadcastPickerHandler.cs, Entitlements.plist (the App Group)
+  Platforms/iOS/Info.plist      the camera permission text and the streamanywhere:// URL scheme
 StreamAnywhere.Broadcast/       the iOS Broadcast Upload Extension (.NET for iOS, no MAUI): the mirroring itself
   SampleHandler.cs              ReplayKit's entry point (Info.plist: NSExtensionPrincipalClass)
   Broadcaster.cs                frames in, links out; keyframe requests; the relay's "no frames needed"
@@ -31,7 +33,25 @@ sound, encodes them (H.264 / AAC) and sends them two ways at once, in the wire p
 | Path | When | What the car opens |
 |---|---|---|
 | Local direct | The Tesla is on the iPhone's hotspot (or both on one Wi-Fi) | `http://172.20.10.1:8420/` – a page the phone serves itself; no internet, no data |
-| Relay | Anywhere else | StreamAnywhere → Mirror, type the six-letter code (or `mirror.html?room=CODE`) |
+| Relay | Anywhere else | StreamAnywhere → Mirror: the page shows a QR code and waits; the picture appears when the phone starts |
+
+### Pairing (no password on the phone)
+
+The relay sits behind the site password, so the phone needs the login cookie. Rather than typing the
+password into the app, the car vouches for the phone: the Tesla's Mirror page (already signed in) asks
+the server for a **one-time pairing code** tied to its room and shows it as a QR code
+(`https://server/pair#TOKEN`, refreshed every four minutes). On the phone, **Pair with the Tesla**
+opens the camera; the scanned token goes to `POST /api/mirror/pair/claim` (public: the token is the
+credential), which answers with the same `sa_auth` cookie a password would have given and the room
+the car is waiting in. The car's page is told ("paired"), and the extension connects to the relay like
+any signed-in client. The room is remembered on both sides, so the next day it is just **Start
+mirroring** on the phone and the picture shows on the car; scan again only to pair another phone or
+after "Show a new code".
+
+Scanning with iOS's Camera app works too: it opens the landing page `/pair` on the server (public),
+which hands the token to the app through the `streamanywhere://pair?server=…&token=…` URL scheme
+(Info.plist `CFBundleURLTypes`; `MauiProgram.cs` routes the open to `PairLink`). The password sign-in
+is still there under Settings for a server with no page to scan.
 
 The viewer page, the relay and the protocol live in the web platform (see
 [../mirror/README.md](../mirror/README.md), which also holds a Swift version of this app with a third
@@ -65,10 +85,14 @@ comes out once a second).
 
 ## What is verified and what is not
 
-- Verified: the relay, the viewer (WebCodecs and MSE), the protocol, with the desktop sender page in
-  a browser; the server's 26 relay checks; the C# compiles for iOS.
-- **Not yet run on a phone** (no Mac here): the extension itself. Expect a round of fixes. The soft
-  spots: the orientation mapping (`Broadcaster.RotationOf`; swap 90 and 270 if landscape comes out
-  turned the wrong way), the 50 MB memory limit of the extension with the .NET runtime (the
-  `MtouchLink=SdkOnly` setting keeps the bundle small; if iOS kills the broadcast, try the Saver
-  quality), and whether the Tesla's browser accepts the plain-http hotspot page.
+- Verified: the relay, the viewer (WebCodecs and MSE), the protocol, the pairing (the car's page
+  shows the code, a claim signs the phone in, the page switches to the picture by itself and back to
+  the code when the stream stops), with the desktop sender page in a browser; the server's 36 relay
+  checks; the C# compiles for iOS (2026-10-21).
+- **Not yet run on a phone** (no Mac here): the extension itself, the camera scanner, the URL-scheme
+  handoff. Expect a round of fixes. The soft spots: the orientation mapping (`Broadcaster.RotationOf`;
+  swap 90 and 270 if landscape comes out turned the wrong way), the 50 MB memory limit of the
+  extension with the .NET runtime (the `MtouchLink=SdkOnly` setting keeps the bundle small; if iOS
+  kills the broadcast, try the Saver quality), whether the Tesla's browser accepts the plain-http
+  hotspot page, and the restyled system start button on iOS 17+ (if it shows a bare icon, the title
+  styling in `BroadcastPickerHandler.Style` needs the button's `Configuration` cleared).

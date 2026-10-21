@@ -3,9 +3,15 @@
 // which only says that mirroring is an iPhone feature.
 namespace StreamAnywhere.Mirror;
 
-public sealed record MirrorSettingsView(string ServerUrl, string DeviceName, string Room, bool SignedIn, string Quality, int Fps, bool Audio, bool Microphone, bool UseServer);
+public sealed record MirrorSettingsView(string ServerUrl, string DeviceName, string Room, bool SignedIn, string Quality, int Fps, bool Audio, bool Microphone, bool UseServer)
+{
+    /// <summary>The phone can reach the relay: paired (or signed in), with a room the car knows</summary>
+    public bool Paired => UseServer && SignedIn && RoomCode.IsValid(Room);
+    public string ServerHost => Uri.TryCreate(ServerUrl.Trim(), UriKind.Absolute, out var u) ? u.Host : ServerUrl;
+}
 
-public sealed record MirrorStatusView(string State, string Message, int Kbps, int Width, int Height, int Rotation, string Relay, int Watchers, int LocalClients, bool Live);
+/// <summary>Fresh = written in the last seconds (the extension is running); Live = fresh and mirroring.</summary>
+public sealed record MirrorStatusView(string State, string Message, int Kbps, int Width, int Height, int Rotation, string Relay, int Watchers, int LocalClients, bool Fresh, bool Live);
 
 public interface IMirrorPlatform
 {
@@ -14,7 +20,14 @@ public interface IMirrorPlatform
     string ExtensionBundleId { get; }
     MirrorSettingsView Load();
     void Save(MirrorSettingsView s);
-    /// <summary>POST /login; keeps the cookie. Throws with a readable message when it fails.</summary>
+    /// <summary>Opens the camera on a QR scanner; the text of the first code seen, or null when the user cancelled.</summary>
+    Task<string?> ScanPairingCodeAsync();
+    /// <summary>
+    /// Claims a pairing code from the Tesla's screen: the server signs this phone in and names the car's
+    /// room; both are kept. Throws with a readable message when it fails.
+    /// </summary>
+    Task<MirrorSettingsView> PairAsync(string server, string token);
+    /// <summary>POST /login with the site password (the fallback when there is no code to scan); keeps the cookie.</summary>
     Task SignInAsync(string serverUrl, string password);
     /// <summary>A room code: from the server when it can be reached, otherwise made here.</summary>
     Task<string> NewRoomAsync();
@@ -32,6 +45,8 @@ public sealed class MirrorPlatformStub : IMirrorPlatform
     public string ExtensionBundleId => "";
     public MirrorSettingsView Load() => settings;
     public void Save(MirrorSettingsView s) => settings = s;
+    public Task<string?> ScanPairingCodeAsync() => Task.FromResult<string?>(null);
+    public Task<MirrorSettingsView> PairAsync(string server, string token) => throw new NotSupportedException("Mirroring the screen is an iPhone feature.");
     public Task SignInAsync(string serverUrl, string password) => throw new NotSupportedException("Mirroring the screen is an iPhone feature.");
     public Task<string> NewRoomAsync() => Task.FromResult("");
     public MirrorStatusView? Status() => null;

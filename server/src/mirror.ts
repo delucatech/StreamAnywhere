@@ -14,17 +14,25 @@
  *     through this socket ("signal"), and a watcher that receives the frames directly tells the
  *     relay to stop copying them ("relay": false) - the relay then costs nothing.
  *
- * Rooms are six-letter codes the phone shows and the Tesla types. POST /api/mirror/rooms reserves one;
- * a sender may also connect with a code of its own. A room lives while its sender is connected and a
- * few minutes beyond, for the phone to reconnect.
+ * Rooms are six-letter codes. POST /api/mirror/rooms reserves one; a sender may also connect with a
+ * code of its own. A room lives while its sender or a watcher is connected and a few minutes beyond,
+ * for the phone to reconnect.
+ *
+ * Pairing (how the phone gets in without the site password): the car's page, which is signed in,
+ * asks POST /api/mirror/pair for a one-time token tied to its room and shows it as a QR code
+ * (https://server/pair#TOKEN). The phone scans it - in the app, or with the Camera app, which opens
+ * GET /pair, a public landing page that hands the token to the app through its URL scheme - and
+ * the app claims it at POST /api/mirror/pair/claim (public: the token is the credential). The claim
+ * answers with the room and the same login cookie a password would have given, so the broadcast
+ * extension connects like any signed-in client, and the car's page is told ("paired").
  */
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import * as crypto from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { WebSocketServer, WebSocket } from 'ws';
-import { isKeyVideo, isRoomCode, MSG, normalizeRoomCode, ROOM_ALPHABET, ROOM_CODE_LENGTH, type IceServer, type MirrorConfig, type MirrorControl, type MirrorRoomInfo } from '../../shared/mirror';
-import { requestAuthorized } from './auth';
+import { appPairUrl, isKeyVideo, isRoomCode, MSG, normalizeRoomCode, PAIR_PATH, PAIR_TOKEN_TTL_MS, pairUrl, ROOM_ALPHABET, ROOM_CODE_LENGTH, type IceServer, type MirrorConfig, type MirrorControl, type MirrorPairClaim, type MirrorPairInfo, type MirrorRoomInfo } from '../../shared/mirror';
+import { issueAuthCookie, requestAuthorized } from './auth';
 
 const WS_PATH = '/api/mirror/ws';
 /** A watcher whose socket holds more than this is skipped until the next keyframe */
@@ -83,6 +91,83 @@ interface Room {
 
 const rooms = new Map<string, Room>();
 let log: (level: 'info' | 'warn', what: Record<string, unknown>, msg: string) => void = () => undefined;
+
+interface PairToken {
+  token: string;
+  room: string;
+  createdAt: number;
+  claimedAt?: number;
+}
+/** One-time pairing tokens (a few at a time: one per waiting car page, refreshed before it expires) */
+const pairTokens = new Map<string, PairToken>();
+const MAX_PAIR_TOKENS = 500;
+
+function sweepPairTokens(): void {
+  const now = Date.now();
+  for (const [t, p] of pairTokens) if (p.claimedAt || now - p.createdAt > PAIR_TOKEN_TTL_MS) pairTokens.delete(t);
+}
+
+function newPairToken(room: string): PairToken {
+  sweepPairTokens();
+  if (pairTokens.size >= MAX_PAIR_TOKENS) {
+    const oldest = [...pairTokens.values()].sort((a, b) => a.createdAt - b.createdAt)[0];
+    if (oldest) pairTokens.delete(oldest.token);
+  }
+  const p: PairToken = { token: crypto.randomBytes(24).toString('base64url'), room, createdAt: Date.now() };
+  pairTokens.set(p.token, p);
+  return p;
+}
+
+/** Where this server is reached (behind Caddy the request says https in X-Forwarded-Proto) */
+function publicOrigin(req: { protocol: string; hostname: string; headers: IncomingMessage['headers'] }): string {
+  const https = req.protocol === 'https' || String(req.headers['x-forwarded-proto'] || '').startsWith('https');
+  return `${https ? 'https' : 'http'}://${req.hostname}`;
+}
+
+/**
+ * The public landing page behind the QR code, for a phone that scanned it with the Camera app: hands
+ * the token (in the fragment, so it never reached this server) to the app through its URL scheme.
+ */
+function pairLandingPage(origin: string): string {
+  const appLink = appPairUrl(origin, '');
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#07080c"><title>Pair with the Tesla – StreamAnywhere</title>
+<style>
+:root{color-scheme:dark;--bg:#07080c;--fg:#f2f4f8;--muted:#9aa3b5;--card:#141720;--line:#262b38;--accent:#4f8cff}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;padding:20px;background:var(--bg);color:var(--fg);font:17px/1.45 -apple-system,system-ui,sans-serif}
+main{width:100%;max-width:420px;background:var(--card);border:1px solid var(--line);border-radius:20px;padding:28px 24px}
+h1{margin:0 0 6px;font-size:26px}h1 small{display:block;font-size:15px;font-weight:400;color:var(--muted);margin-top:4px}
+p{margin:14px 0;color:var(--muted)}
+a.btn{display:block;text-align:center;padding:16px;border-radius:14px;background:var(--accent);color:#fff;font-weight:700;font-size:18px;text-decoration:none;margin-top:20px}
+a.btn[hidden]{display:none}
+.err{color:#ff6b7a}
+ol{padding-left:20px;color:var(--muted)}li{margin:6px 0}
+</style></head>
+<body><main>
+<h1>Mirror <small>Pair this iPhone with the Tesla</small></h1>
+<p id="note">Opening the StreamAnywhere app…</p>
+<a id="open" class="btn" href="#" hidden>Open StreamAnywhere</a>
+<p id="help" hidden>No app yet? Install StreamAnywhere on this iPhone, then scan the code on the Tesla's screen again.</p>
+<script>
+(function(){
+  var token=(location.hash||'').slice(1);
+  var note=document.getElementById('note'),open=document.getElementById('open'),help=document.getElementById('help');
+  if(!/^[A-Za-z0-9_-]{16,64}$/.test(token)){note.textContent='This link has no pairing code in it. Scan the code on the Tesla\\u2019s screen again.';note.className='err';return;}
+  var link=${JSON.stringify(appLink)}+encodeURIComponent(token);
+  open.href=link;open.hidden=false;help.hidden=false;
+  note.textContent='Tap the button to open the StreamAnywhere app: it pairs this iPhone with the Tesla and you can start mirroring.';
+  setTimeout(function(){location.href=link;},300);
+})();
+</script>
+</main></body></html>`;
+}
+
+/** A phone claimed this room's pairing code: tell the car's page(s) */
+function notifyPaired(room: Room, name: string | undefined): void {
+  for (const w of room.watchers.values()) sendControl(w.ws, { t: 'paired', name });
+}
 
 const control = (m: MirrorControl): string => JSON.stringify(m);
 const sendControl = (ws: WebSocket, m: MirrorControl): void => {
@@ -320,9 +405,11 @@ function attachWatcher(room: Room, ws: WebSocket): void {
 }
 
 function sweepRooms(): void {
+  sweepPairTokens();
   const now = Date.now();
   for (const [code, room] of rooms) {
-    if (room.sender) continue;
+    // a car's page waits in its room with the pairing code up for as long as it likes
+    if (room.sender || room.watchers.size) continue;
     const idleSince = room.lastSenderAt || room.createdAt;
     const limit = room.lastSenderAt ? ROOM_IDLE_MS : ROOM_RESERVED_MS;
     if (now - idleSince < limit) continue;
@@ -444,6 +531,47 @@ export function registerMirror(app: FastifyInstance): void {
   });
 
   app.get('/api/mirror/ice', async () => ({ iceServers: iceServers() }));
+
+  // ---- pairing (see the header comment)
+
+  /** The car's page (signed in): a pairing code for its room - the remembered one, or a new one */
+  app.post<{ Body: { room?: string } | null }>('/api/mirror/pair', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (req, reply): Promise<MirrorPairInfo | undefined> => {
+    sweepRooms();
+    let code = normalizeRoomCode(String(req.body?.room || ''));
+    if (!isRoomCode(code)) {
+      if (rooms.size >= MAX_ROOMS) return reply.code(503).send({ error: 'Too many rooms right now' });
+      code = newRoomCode();
+    } else if (!rooms.has(code) && rooms.size >= MAX_ROOMS) return reply.code(503).send({ error: 'Too many rooms right now' });
+    const room = getOrCreateRoom(code);
+    room.createdAt = Date.now();
+    const p = newPairToken(room.code);
+    const origin = publicOrigin(req);
+    return { room: room.code, token: p.token, url: pairUrl(origin, p.token), expiresInMs: PAIR_TOKEN_TTL_MS };
+  });
+
+  /** The phone (no cookie): the token from the QR code buys the login cookie and the room */
+  app.post<{ Body: { token?: string; name?: string } | null }>('/api/mirror/pair/claim', { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } }, async (req, reply): Promise<MirrorPairClaim | undefined> => {
+    sweepPairTokens();
+    const token = String(req.body?.token || '');
+    const p = /^[A-Za-z0-9_-]{16,64}$/.test(token) ? pairTokens.get(token) : undefined;
+    if (!p || p.claimedAt) {
+      log('warn', { ip: req.ip }, 'mirror: pairing claim with an unknown or used code');
+      return reply.code(404).send({ error: 'This pairing code is not valid any more: scan the code on the Tesla again' });
+    }
+    p.claimedAt = Date.now();
+    const name = String(req.body?.name || '').slice(0, 60) || undefined;
+    const signedIn = issueAuthCookie(req, reply);
+    const room = getOrCreateRoom(p.room);
+    room.createdAt = Date.now();
+    notifyPaired(room, name);
+    log('info', { room: room.code, name, watchers: room.watchers.size }, 'mirror: phone paired');
+    return { room: room.code, server: publicOrigin(req), signedIn };
+  });
+
+  /** The landing page the Camera app opens (public; the token stays in the fragment) */
+  app.get(PAIR_PATH, async (req, reply) => {
+    return reply.type('text/html; charset=utf-8').header('cache-control', 'no-store').send(pairLandingPage(publicOrigin(req)));
+  });
 }
 
 /** For tests: the ids and counts of a room. */

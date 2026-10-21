@@ -42,6 +42,8 @@ export default defineConfig({
   base: './',
   // nothing from client/public: the phone serves this one file and nothing else
   publicDir: false,
+  // the QR encoder is for the server page's pairing code; the phone's page has no use for it
+  resolve: { alias: { qrcode: path.resolve(__dirname, 'src/mirror/qrcode-stub.ts') } },
   plugins: [inlineEverything()],
   build: {
     outDir: path.resolve(__dirname, '../mirror/ios/Shared/Resources'),

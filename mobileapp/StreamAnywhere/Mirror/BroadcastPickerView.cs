@@ -7,6 +7,8 @@ public class BroadcastPickerView : View
 {
     public static readonly BindableProperty TitleProperty = BindableProperty.Create(nameof(Title), typeof(string), typeof(BroadcastPickerView), "Start mirroring");
     public static readonly BindableProperty ExtensionBundleIdProperty = BindableProperty.Create(nameof(ExtensionBundleId), typeof(string), typeof(BroadcastPickerView), "");
+    /// <summary>Mirroring now: the button turns into the red "stop" one</summary>
+    public static readonly BindableProperty IsLiveProperty = BindableProperty.Create(nameof(IsLive), typeof(bool), typeof(BroadcastPickerView), false);
 
     public string Title
     {
@@ -18,5 +20,11 @@ public class BroadcastPickerView : View
     {
         get => (string)GetValue(ExtensionBundleIdProperty);
         set => SetValue(ExtensionBundleIdProperty, value);
+    }
+
+    public bool IsLive
+    {
+        get => (bool)GetValue(IsLiveProperty);
+        set => SetValue(IsLiveProperty, value);
     }
 }

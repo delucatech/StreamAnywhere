@@ -43,6 +43,8 @@ export interface WatchOptions {
   direct?: boolean;
   onStatus(s: WatchStatus): void;
   onConfig?(c: MirrorConfig): void;
+  /** A phone scanned this page's pairing code (relay only) */
+  onPaired?(name?: string): void;
 }
 
 const RELAY_RECONNECT_MIN_MS = 1000;
@@ -69,6 +71,8 @@ export class MirrorWatcher {
   private closed = false;
   private pendingCandidates: RTCIceCandidateInit[] = [];
   private config?: MirrorConfig;
+  /** false between the sender leaving and coming back: frames still in flight on the direct link must not bring the picture "live" again */
+  private senderPresent = true;
 
   constructor(
     private readonly sink: MediaSink,
@@ -105,6 +109,7 @@ export class MirrorWatcher {
   // ------------------------------------------------------------ frames
 
   private deliver(bytes: Uint8Array, path: PathKind): void {
+    if (!this.senderPresent) return;
     const msg = decodeMessage(bytes);
     this.status.bytes[path] += bytes.byteLength;
     if (msg.type === 'chunk') {
@@ -222,6 +227,7 @@ export class MirrorWatcher {
   private onControl(msg: MirrorControl, path: 'local' | 'relay'): void {
     switch (msg.t) {
       case 'ready':
+        this.senderPresent = path === 'local' || msg.live;
         this.emit({ senderName: msg.name, watchers: msg.watchers, state: msg.live ? (this.status.state === 'live' ? 'live' : 'connecting') : 'waiting', message: msg.live ? undefined : 'Waiting for the phone to start mirroring…' });
         if (msg.live && path === 'relay') this.tryDirect();
         break;
@@ -230,16 +236,22 @@ export class MirrorWatcher {
         break;
       case 'sender':
         if (msg.event === 'join') {
+          this.senderPresent = true;
           this.lastTs = { video: -1, audio: -1 };
           this.emit({ senderName: msg.name, state: 'connecting', message: undefined });
           if (path === 'relay') this.tryDirect();
         } else {
+          this.senderPresent = false;
           this.closeDirect('sender left');
           this.emit({ state: 'waiting', message: 'The phone stopped mirroring. Waiting for it to come back…' });
         }
         break;
       case 'watchers':
         this.emit({ watchers: msg.n });
+        break;
+      case 'paired':
+        this.emit({ senderName: msg.name || this.status.senderName, message: `${msg.name || 'The phone'} is paired. Tap Start mirroring on it.` });
+        this.opts.onPaired?.(msg.name);
         break;
       case 'signal':
         void this.onSignal(msg.data);

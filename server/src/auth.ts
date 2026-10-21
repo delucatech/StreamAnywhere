@@ -24,8 +24,12 @@ const DEFAULT_HASH = 'scrypt:eb3fc89f8fc253c2e01a4a85d7c3530d:268de6a1156ad761de
 const COOKIE = 'sa_auth';
 const MAX_AGE_SEC = 365 * 24 * 3600;
 const RENEW_AFTER_SEC = 7 * 24 * 3600;
-/** Reachable without the cookie: the login page itself and the deploy health check. */
-const PUBLIC_PATHS = new Set(['/login', '/api/health']);
+/**
+ * Reachable without the cookie: the login page itself, the deploy health check, and the Mirror pairing
+ * landing page + claim (the phone has no cookie yet: a one-time token from a signed-in page's QR code
+ * is what signs it in; server/src/mirror.ts).
+ */
+const PUBLIC_PATHS = new Set(['/login', '/api/health', '/pair', '/api/mirror/pair/claim']);
 
 /** Set by registerAuth (read then, not at import, so tests can supply their own hash). */
 let passwordHash = DEFAULT_HASH;
@@ -105,6 +109,16 @@ function setAuthCookie(req: FastifyRequest, reply: FastifyReply): void {
   // Behind Caddy the request arrives as http with X-Forwarded-Proto: https
   const https = req.protocol === 'https' || String(req.headers['x-forwarded-proto'] || '').startsWith('https');
   reply.header('set-cookie', `${COOKIE}=${makeToken()}; Path=/; Max-Age=${MAX_AGE_SEC}; HttpOnly; SameSite=Lax${https ? '; Secure' : ''}`);
+}
+
+/**
+ * Signs this response's client in (the Mirror pairing claim: a phone that scanned a signed-in page's
+ * code gets the same cookie a password would have given it). False when the site has no password.
+ */
+export function issueAuthCookie(req: FastifyRequest, reply: FastifyReply): boolean {
+  if (passwordOff) return false;
+  setAuthCookie(req, reply);
+  return true;
 }
 
 async function passwordMatches(input: string): Promise<boolean> {

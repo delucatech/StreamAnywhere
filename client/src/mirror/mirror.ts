@@ -2,33 +2,46 @@
  * The Mirror viewer (mirror.html): the Tesla's browser (or any browser) shows an iPhone's screen.
  *
  * Two ways in:
- *   - from the StreamAnywhere server: mirror.html, type the six-letter code the phone shows (or open
- *     mirror.html?room=CODE from the phone's QR code). The frames come over the server's relay and,
- *     when the networks allow it, straight from the phone over WebRTC (watch.ts decides).
+ *   - from the StreamAnywhere server: mirror.html shows a pairing code (a QR code) for its room and
+ *     waits in that room. The phone scans the code in the StreamAnywhere app (or with the Camera app),
+ *     which signs the phone in and gives it the room; when the phone starts mirroring, the picture
+ *     takes over here by itself. The room is remembered, so a phone that paired once just starts
+ *     next time. A code typed by hand (mirror.html?room=CODE) still works. The frames come over the
+ *     server's relay and, when the networks allow it, straight from the phone over WebRTC (watch.ts).
  *   - from the phone itself on its hotspot: http://172.20.10.1:8420/ serves this same page
  *     (mirror-local.html, built into one file for the app); the frames come over the local WebSocket.
  *
  * Decoding: WebCodecs onto a canvas where the page is secure (https), Media Source Extensions
  * into a <video> otherwise (sinks.ts).
  */
-import { IPHONE_HOTSPOT_ADDRESS, isRoomCode, MIRROR_LOCAL_PORT, normalizeRoomCode, type MirrorConfig } from '../../../shared/mirror';
+import QRCode from 'qrcode';
+import { IPHONE_HOTSPOT_ADDRESS, isRoomCode, MIRROR_LOCAL_PORT, normalizeRoomCode, type MirrorConfig, type MirrorPairInfo } from '../../../shared/mirror';
 import { createSink, mseAvailable, webCodecsAvailable, type MediaSink } from './sinks';
 import { MirrorWatcher, type WatchStatus } from './watch';
 
 const LOCAL = document.documentElement.dataset.mirrorLocal === '1';
 const LAST_ROOM_KEY = 'streamanywhere.mirror.lastRoom';
+/** A new pairing code before the old one expires (the server's tokens live five minutes) */
+const PAIR_REFRESH_MS = 4 * 60 * 1000;
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const e = document.getElementById(id);
   if (!e) throw new Error(`missing #${id}`);
   return e as T;
 };
+const $opt = <T extends HTMLElement = HTMLElement>(id: string): T | undefined => (document.getElementById(id) as T | null) || undefined;
 const el = {
   entry: $('entry'),
   code: $<HTMLInputElement>('code'),
   watch: $<HTMLButtonElement>('watch'),
   entryNote: $('entry-note'),
   entryError: $('entry-error'),
+  // the lobby (the server page only)
+  qr: $opt('qr'),
+  roomCode: $opt('room-code'),
+  lobbyStatus: $opt('lobby-status'),
+  lobbyStatusText: $opt('lobby-status-text'),
+  newCode: $opt<HTMLButtonElement>('new-code'),
   player: $('player'),
   stage: $('stage'),
   overlay: $('overlay'),
@@ -54,12 +67,17 @@ let hudTimer = 0;
 let statsTimer = 0;
 let lastStatus: WatchStatus | undefined;
 let config: MirrorConfig | undefined;
+/** The picture has shown in this watcher's life: a short reconnect keeps the player, not the lobby */
+let wasLive = false;
+let pairTimer = 0;
+let currentRoom = '';
 
 const params = new URLSearchParams(location.search);
 const preferDecoder = params.get('decoder') === 'mse' ? 'mse' : params.get('decoder') === 'webcodecs' ? 'webcodecs' : undefined;
 const directAllowed = params.get('direct') !== '0';
+const apiBase = params.get('api') || undefined;
 
-// ------------------------------------------------------------ entry screen
+// ------------------------------------------------------------ entry / lobby
 
 function describeSupport(): string {
   if (webCodecsAvailable()) return 'Plays with WebCodecs (lowest delay).';
@@ -74,13 +92,13 @@ function showEntry(error?: string): void {
   el.entryError.hidden = !error;
   el.entryNote.textContent = LOCAL
     ? `Connected to the phone over its hotspot. ${describeSupport()}`
-    : `Type the code the phone shows. On the phone's hotspot you can also open http://${IPHONE_HOTSPOT_ADDRESS}:${MIRROR_LOCAL_PORT}/ for the direct local link. ${describeSupport()}`;
-  if (!LOCAL) el.code.focus();
+    : `On the phone's hotspot, open http://${IPHONE_HOTSPOT_ADDRESS}:${MIRROR_LOCAL_PORT}/ instead: no internet needed. ${describeSupport()}`;
 }
 
 function rememberRoom(code: string): void {
   try {
-    localStorage.setItem(LAST_ROOM_KEY, code);
+    if (code) localStorage.setItem(LAST_ROOM_KEY, code);
+    else localStorage.removeItem(LAST_ROOM_KEY);
   } catch {
     /* ignore */
   }
@@ -93,15 +111,73 @@ function lastRoom(): string {
   }
 }
 
+function setLobbyStatus(text: string, kind: 'waiting' | 'paired' | 'error' = 'waiting'): void {
+  if (!el.lobbyStatus || !el.lobbyStatusText) return;
+  el.lobbyStatusText.textContent = text;
+  el.lobbyStatus.dataset.kind = kind;
+}
+
+/** Asks the server for a pairing code for the room (the remembered one, or a new one) and draws it. */
+async function refreshPairing(room: string): Promise<MirrorPairInfo | undefined> {
+  clearTimeout(pairTimer);
+  try {
+    const r = await fetch(new URL('/api/mirror/pair', apiBase || location.origin).toString(), {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ room: room || undefined }),
+    });
+    if (!r.ok) throw new Error(r.status === 401 ? 'Signed out: reload the page and sign in.' : `The server answered ${r.status}.`);
+    const info = (await r.json()) as MirrorPairInfo;
+    if (el.roomCode) el.roomCode.textContent = info.room;
+    if (el.qr) el.qr.innerHTML = await QRCode.toString(info.url, { type: 'svg', errorCorrectionLevel: 'M', margin: 0, color: { dark: '#000000', light: '#ffffff' } });
+    pairTimer = window.setTimeout(() => void refreshPairing(info.room), PAIR_REFRESH_MS);
+    return info;
+  } catch (e) {
+    setLobbyStatus(`No pairing code: ${(e as Error).message}`, 'error');
+    pairTimer = window.setTimeout(() => void refreshPairing(room), 10_000);
+    return undefined;
+  }
+}
+
+/** The server page's start: a pairing code for the room, and a watcher waiting in it. */
+async function openLobby(room: string): Promise<void> {
+  showEntry();
+  setLobbyStatus('Getting a pairing code…');
+  const info = await refreshPairing(room);
+  if (!info) return;
+  if (info.room !== currentRoom) {
+    rememberRoom(info.room);
+    startWatching(info.room);
+  }
+}
+
 el.code.addEventListener('input', () => {
   const v = normalizeRoomCode(el.code.value);
   if (v !== el.code.value) el.code.value = v;
   el.watch.disabled = !isRoomCode(v);
 });
 el.code.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && isRoomCode(el.code.value)) startWatching(el.code.value);
+  if (e.key === 'Enter' && isRoomCode(el.code.value)) watchTypedCode();
 });
-el.watch.addEventListener('click', () => startWatching(LOCAL ? 'LOCAL0' : el.code.value));
+el.watch.addEventListener('click', () => (LOCAL ? startWatching('LOCAL0') : watchTypedCode()));
+el.newCode?.addEventListener('click', () => {
+  rememberRoom('');
+  stopWatching();
+  void openLobby('');
+});
+
+function watchTypedCode(): void {
+  const code = el.code.value;
+  if (!isRoomCode(code)) return;
+  el.code.value = '';
+  el.watch.disabled = true;
+  stopWatching();
+  void openLobby(code);
+}
+
+// the browser plays sound only after a gesture: any tap on the page counts
+document.addEventListener('pointerdown', () => void sink?.unlock());
 
 // ------------------------------------------------------------ player
 
@@ -155,8 +231,34 @@ function pathLabel(s: WatchStatus): string {
   return 'Relay';
 }
 
+function showPlayer(): void {
+  if (!el.player.hidden) return;
+  el.entry.hidden = true;
+  el.player.hidden = false;
+  void sink?.unlock();
+  void keepAwake();
+  fitStage();
+}
+
 function renderStatus(s: WatchStatus): void {
   lastStatus = s;
+  if (s.state === 'live') wasLive = true;
+  // the lobby (with the pairing code) until the picture arrives; the player's own overlay for a blip after that
+  const inLobby = !LOCAL && s.state !== 'live' && (!wasLive || s.state === 'waiting' || s.state === 'ended');
+  if (inLobby) {
+    showEntry();
+    if (s.state === 'waiting') setLobbyStatus(s.message || 'Waiting for the phone…', s.message?.includes('paired') ? 'paired' : 'waiting');
+    else if (s.state === 'ended') setLobbyStatus(`${s.message || 'The stream ended'} – getting a new code…`, 'error');
+    else if (s.state === 'error') setLobbyStatus(s.message || 'Something went wrong', 'error');
+    else setLobbyStatus(s.message || 'Connecting to the server…');
+    if (s.state === 'ended' || s.state === 'error') {
+      // the room went away (or the link failed for good): a fresh code makes a fresh room
+      stopWatching();
+      window.setTimeout(() => void openLobby(lastRoom()), 2500);
+    }
+    return;
+  }
+  if (s.state === 'live') showPlayer();
   el.hudPath.textContent = pathLabel(s);
   el.hudPath.dataset.path = s.path;
   el.hudName.textContent = s.senderName ? s.senderName : '';
@@ -195,22 +297,27 @@ function renderStats(): void {
   el.hudStats.textContent = parts.join(' · ');
 }
 
+/** Joins the room: the sink and the watcher; the views follow the watcher's status. */
 function startWatching(code: string): void {
   if (!LOCAL && !isRoomCode(code)) return;
+  stopWatching();
   try {
     sink = createSink(preferDecoder);
   } catch (e) {
     showEntry((e as Error).message);
+    setLobbyStatus((e as Error).message, 'error');
     return;
   }
-  if (!LOCAL) rememberRoom(code);
-  el.entry.hidden = true;
-  el.player.hidden = false;
+  currentRoom = code;
+  wasLive = false;
   el.stage.replaceChildren(sink.element);
   sink.setMuted(muted);
-  void sink.unlock(); // from the tap on Watch
-  void keepAwake();
-  const apiBase = params.get('api') || undefined;
+  void sink.unlock(); // after a tap (Watch); otherwise the first tap on the page unlocks the sound
+  if (LOCAL) {
+    el.entry.hidden = true;
+    el.player.hidden = false;
+    void keepAwake();
+  }
   watcher = new MirrorWatcher(sink, {
     room: code,
     local: LOCAL,
@@ -220,6 +327,10 @@ function startWatching(code: string): void {
     onConfig: (c) => {
       config = c;
       fitStage();
+    },
+    onPaired: () => {
+      // the code is spent: show the next one
+      void refreshPairing(code);
     },
   });
   watcher.start();
@@ -239,18 +350,22 @@ function stopWatching(): void {
   sink?.destroy();
   sink = undefined;
   config = undefined;
+  currentRoom = '';
+  wasLive = false;
   void wakeLock?.release().catch(() => undefined);
   wakeLock = undefined;
   if (document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
-  if (!LOCAL) {
-    const u = new URL(location.href);
-    u.searchParams.delete('room');
-    history.replaceState(null, '', u.toString());
-  }
-  showEntry();
 }
 
-el.btnLeave.addEventListener('click', stopWatching);
+el.btnLeave.addEventListener('click', () => {
+  stopWatching();
+  if (LOCAL) {
+    showEntry();
+    return;
+  }
+  clearTimeout(pairTimer);
+  location.href = 'home.html';
+});
 el.btnRetry.addEventListener('click', () => watcher?.retryDirect());
 el.btnSound.addEventListener('click', () => {
   muted = !muted;
@@ -279,10 +394,7 @@ if (LOCAL) {
   el.home.hidden = true;
   showEntry();
 } else {
+  // a code in the link (typed on another device, or an old bookmark) wins; otherwise the remembered room
   const fromUrl = normalizeRoomCode(params.get('room') || '');
-  el.code.value = fromUrl || lastRoom();
-  el.watch.disabled = !isRoomCode(el.code.value);
-  showEntry();
-  // a scanned QR code brought the code along: one tap (the browser needs a gesture for sound) and it plays
-  if (isRoomCode(fromUrl)) el.watch.textContent = 'Tap to watch';
+  void openLobby(isRoomCode(fromUrl) ? fromUrl : lastRoom());
 }

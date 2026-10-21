@@ -4,6 +4,19 @@
 <dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>StreamAnywhere serves the mirror viewer page to a Tesla or a computer on this phone's hotspot or Wi-Fi.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>StreamAnywhere reads the pairing code on the Tesla's screen to connect this phone to it.</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.delucatech.streamanywhere</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>streamanywhere</string>
+			</array>
+		</dict>
+	</array>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
