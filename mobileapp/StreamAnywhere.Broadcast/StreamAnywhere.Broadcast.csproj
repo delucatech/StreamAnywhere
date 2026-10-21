@@ -21,12 +21,14 @@
 		<MtouchLink>SdkOnly</MtouchLink>
 		<UseInterpreter>false</UseInterpreter>
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-		<!-- The app builds this project with its own RuntimeIdentifier as a global property (Visual Studio sets
-		     iossimulator-arm64 or ios-arm64 for the launch target), but restore runs this project on its own with
-		     the default simulator RID only, and the build then fails with NETSDK1047 (no target for that RID in
-		     project.assets.json). So restore for every iOS RID the app can ask for; restore-only (NuGet sets
-		     ExcludeRestorePackageImports while it evaluates the project), so a build without a RID keeps its default. -->
-		<RuntimeIdentifiers Condition="'$(ExcludeRestorePackageImports)' == 'true'">ios-arm64;iossimulator-arm64;iossimulator-x64</RuntimeIdentifiers>
+		<!-- Restore runs this project on its own, with no RuntimeIdentifier, and must cover every RID the app can
+		     ask for: Visual Studio builds the app with RuntimeIdentifier=iossimulator-arm64 or ios-arm64 as a
+		     global property, which the iOS SDK's extension build inherits, and the app's own build passes its RID
+		     (StreamAnywhere.csproj, _ReferenceBroadcastExtension). With only the default RID restored, the
+		     build fails with NETSDK1047. Only when no RID is given (RuntimeIdentifier, or the IDE's
+		     _iOSRuntimeIdentifier that the SDK turns into one): with one, the SDK would drop this list anyway
+		     (with a warning), and it must never build all three at once (they mix device and simulator). -->
+		<RuntimeIdentifiers Condition="'$(RuntimeIdentifier)' == '' And '$(_iOSRuntimeIdentifier)' == ''">ios-arm64;iossimulator-arm64;iossimulator-x64</RuntimeIdentifiers>
 	</PropertyGroup>
 
 	<ItemGroup>

@@ -50,8 +50,12 @@ comes out once a second).
   .NET 11 RC wants Xcode 27), and launching on the iPhone fails with "This version of .NET for iOS
   requires Xcode ..." (seen 2026-10-21).
 - **Windows** builds the Windows target (`dotnet build -f net10.0-windows10.0.19041.0`), which shows the
-  page with a "this is an iPhone feature" note, and compiles all the iOS C# (checked 2026-10-21: the
-  extension and the app's iOS files compile against the iOS bindings).
+  page with a "this is an iPhone feature" note, and compiles all the iOS C# with
+  `dotnet build StreamAnywhere/StreamAnywhere.csproj -f net10.0-ios -r iossimulator-arm64` after a
+  `dotnet restore StreamAnywhere.slnx` (checked 2026-10-21: the extension and the app's iOS files compile
+  against the iOS bindings). Name the RID as Visual Studio does: the extension restores for all three iOS
+  RIDs and builds for the one it is given, and the `.csproj.user` Visual Studio writes for the app sets
+  its RID too late for a build without one (the output folder then says x64 while the RID is arm64).
 - **iOS** needs a Mac: Visual Studio's *Pair to Mac*, or the solution on a Mac. Automatic signing
   must create the two bundle ids (`com.delucatech.streamanywhere`, `.broadcast`) and the App Group on
   your Apple developer account; both projects' Entitlements.plist list the group. Run on a real

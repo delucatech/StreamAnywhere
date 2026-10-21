@@ -82,10 +82,13 @@
 	     reference out of the ProjectReference list and bundles the extension itself (Xamarin.Shared.targets,
 	     _SeparateAppExtensionReferences), so a static reference is one Visual Studio can never resolve and it
 	     marks the net10.0-ios dependencies with a warning. Added here, right before that target runs, it is
-	     built and bundled exactly the same (dotnet build -f net10.0-ios shows "StreamAnywhere.Broadcast ->"). -->
+	     built and bundled exactly the same (dotnet build -f net10.0-ios shows "StreamAnywhere.Broadcast ->").
+	     SetConfiguration is what the SDK passes to the extension's build when the app is built on its own
+	     (a solution build replaces it, but then the RID is a global property the extension inherits): the
+	     extension must build for the app's RuntimeIdentifier, and it restores for all of them (its csproj). -->
 	<Target Name="_ReferenceBroadcastExtension" BeforeTargets="_SeparateAppExtensionReferences;AssignProjectConfiguration" Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">
 		<ItemGroup>
-			<ProjectReference Include="..\StreamAnywhere.Broadcast\StreamAnywhere.Broadcast.csproj" IsAppExtension="true" />
+			<ProjectReference Include="..\StreamAnywhere.Broadcast\StreamAnywhere.Broadcast.csproj" IsAppExtension="true" SetConfiguration="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier)" />
 		</ItemGroup>
 	</Target>
 
