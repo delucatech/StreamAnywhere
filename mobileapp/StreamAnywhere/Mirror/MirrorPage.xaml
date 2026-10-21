@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:mirror="clr-namespace:StreamAnywhere.Mirror"
+             x:Class="StreamAnywhere.Mirror.MirrorPage"
+             Title="Mirror">
+
+    <ScrollView>
+        <VerticalStackLayout Padding="20,12,20,32" Spacing="18">
+
+            <!-- the code the car types -->
+            <Border StrokeThickness="0" BackgroundColor="{AppThemeBinding Light=#eef1f8, Dark=#1a1d26}" Padding="18" StrokeShape="RoundRectangle 16">
+                <VerticalStackLayout Spacing="8">
+                    <Label Text="On the Tesla: open StreamAnywhere → Mirror and type" FontSize="14" TextColor="{AppThemeBinding Light=#5b6473, Dark=#9aa3b5}" />
+                    <Label x:Name="RoomLabel" Text="······" FontSize="44" FontAttributes="Bold" FontFamily="Courier New" CharacterSpacing="6" />
+                    <Label x:Name="LinkLabel" FontSize="12" TextColor="{AppThemeBinding Light=#5b6473, Dark=#9aa3b5}" LineBreakMode="CharacterWrap" />
+                    <Button Text="New code" Clicked="OnNewCode" HorizontalOptions="Start" />
+                    <Label x:Name="LocalLabel" FontSize="13" Margin="0,6,0,0" TextColor="{AppThemeBinding Light=#5b6473, Dark=#9aa3b5}" IsVisible="False" />
+                </VerticalStackLayout>
+            </Border>
+
+            <!-- start -->
+            <VerticalStackLayout Spacing="8">
+                <mirror:BroadcastPickerView x:Name="Picker" HeightRequest="52" />
+                <Label x:Name="StartHint" FontSize="13" TextColor="{AppThemeBinding Light=#5b6473, Dark=#9aa3b5}" />
+                <Label x:Name="Unsupported" Text="Mirroring the screen is an iPhone feature: install this app on an iPhone." IsVisible="False" />
+            </VerticalStackLayout>
+
+            <!-- status -->
+            <Border StrokeThickness="0" BackgroundColor="{AppThemeBinding Light=#eef1f8, Dark=#1a1d26}" Padding="18" StrokeShape="RoundRectangle 16">
+                <VerticalStackLayout Spacing="4">
+                    <Label Text="Status" FontAttributes="Bold" />
+                    <Label x:Name="StatusLabel" Text="Not mirroring." />
+                </VerticalStackLayout>
+            </Border>
+
+            <!-- server -->
+            <VerticalStackLayout Spacing="10">
+                <Label Text="Server" FontAttributes="Bold" />
+                <HorizontalStackLayout Spacing="12">
+                    <Switch x:Name="UseServer" Toggled="OnSettingChanged" />
+                    <Label Text="Use the StreamAnywhere server (relay)" VerticalOptions="Center" />
+                </HorizontalStackLayout>
+                <Entry x:Name="ServerEntry" Placeholder="https://teslavplayer.duckdns.org" Keyboard="Url" Completed="OnSettingChanged" Unfocused="OnSettingChanged" />
+                <Entry x:Name="PasswordEntry" Placeholder="Site password" IsPassword="True" />
+                <Button x:Name="SignInButton" Text="Sign in" Clicked="OnSignIn" HorizontalOptions="Start" />
+                <Label x:Name="SignInLabel" FontSize="13" TextColor="{AppThemeBinding Light=#5b6473, Dark=#9aa3b5}" />
+                <Entry x:Name="NameEntry" Placeholder="This phone's name" Completed="OnSettingChanged" Unfocused="OnSettingChanged" />
+                <Label Text="The server relays the picture when the car and the phone cannot reach each other directly. Sign in with the site password once; the cookie is kept for the broadcast." FontSize="13" TextColor="{AppThemeBinding Light=#5b6473, Dark=#9aa3b5}" />
+            </VerticalStackLayout>
+
+            <!-- quality -->
+            <VerticalStackLayout Spacing="10">
+                <Label Text="Quality" FontAttributes="Bold" />
+                <Picker x:Name="QualityPicker" Title="Picture" SelectedIndexChanged="OnSettingChanged">
+                    <Picker.ItemsSource>
+                        <x:Array Type="{x:Type x:String}">
+                            <x:String>Saver (480p, 1.5 Mb/s)</x:String>
+                            <x:String>Balanced (720p, 3 Mb/s)</x:String>
+                            <x:String>Sharp (1080p, 6 Mb/s)</x:String>
+                        </x:Array>
+                    </Picker.ItemsSource>
+                </Picker>
+                <Picker x:Name="FpsPicker" Title="Frame rate" SelectedIndexChanged="OnSettingChanged">
+                    <Picker.ItemsSource>
+                        <x:Array Type="{x:Type x:String}">
+                            <x:String>15 fps</x:String>
+                            <x:String>24 fps</x:String>
+                            <x:String>30 fps</x:String>
+                            <x:String>60 fps</x:String>
+                        </x:Array>
+                    </Picker.ItemsSource>
+                </Picker>
+                <HorizontalStackLayout Spacing="12">
+                    <Switch x:Name="AudioSwitch" Toggled="OnSettingChanged" />
+                    <Label Text="Sound (the app's sound)" VerticalOptions="Center" />
+                </HorizontalStackLayout>
+                <HorizontalStackLayout Spacing="12">
+                    <Switch x:Name="MicSwitch" Toggled="OnSettingChanged" />
+                    <Label Text="Microphone" VerticalOptions="Center" />
+                </HorizontalStackLayout>
+                <Label Text="Saver suits the car's own LTE through the relay; Sharp suits the hotspot." FontSize="13" TextColor="{AppThemeBinding Light=#5b6473, Dark=#9aa3b5}" />
+            </VerticalStackLayout>
+
+        </VerticalStackLayout>
+    </ScrollView>
+
+</ContentPage>

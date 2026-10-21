@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="StreamAnywhere/StreamAnywhere.csproj" />
+  <Project Path="StreamAnywhere.Broadcast/StreamAnywhere.Broadcast.csproj" />
+</Solution>

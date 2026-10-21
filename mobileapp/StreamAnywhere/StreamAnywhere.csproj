@@ -40,7 +40,7 @@
 		<!-- To develop, package, and publish an app to the Microsoft Store, see: https://aka.ms/MauiTemplateUnpackaged -->
 		<WindowsPackageType>None</WindowsPackageType>
 
-		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">15.0</SupportedOSPlatformVersion>
+		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">16.0</SupportedOSPlatformVersion>
 		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'maccatalyst'">17.0</SupportedOSPlatformVersion>
 		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">21.0</SupportedOSPlatformVersion>
 		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'windows'">10.0.17763.0</SupportedOSPlatformVersion>
@@ -63,6 +63,20 @@
 
 		<!-- Raw Assets (also remove the "Resources\Raw" prefix) -->
 		<MauiAsset Include="Resources\Raw\**" LogicalName="%(RecursiveDir)%(Filename)%(Extension)" />
+	</ItemGroup>
+
+	<!-- iOS: the broadcast extension (Mirror: the screen to the Tesla), the App Group it shares with this app,
+	     and the code the two share (settings, status, the server calls) -->
+	<PropertyGroup Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">
+		<CodesignEntitlements>Platforms\iOS\Entitlements.plist</CodesignEntitlements>
+	</PropertyGroup>
+	<ItemGroup Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">
+		<ProjectReference Include="..\StreamAnywhere.Broadcast\StreamAnywhere.Broadcast.csproj" IsAppExtension="true" />
+		<Compile Include="..\StreamAnywhere.Broadcast\Shared\MirrorSettings.cs" Link="Mirror\Shared\MirrorSettings.cs" />
+		<Compile Include="..\StreamAnywhere.Broadcast\Shared\ServerApi.cs" Link="Mirror\Shared\ServerApi.cs" />
+	</ItemGroup>
+	<ItemGroup>
+		<Compile Include="..\StreamAnywhere.Broadcast\Shared\MirrorProtocol.cs" Link="Mirror\Shared\MirrorProtocol.cs" />
 	</ItemGroup>
 
 	<ItemGroup>

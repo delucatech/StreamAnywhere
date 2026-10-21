@@ -46,11 +46,20 @@ with a keyframe flag and a timestamp (f64 microseconds); `AUDIO` is one raw AAC-
 track must keep flowing (the MSE viewer waits for both), so the phone sends silence when the app is
 quiet. The same bytes go over all three links; data channels get them in 60 KB `CHUNK`s.
 
-## The iOS app (`ios/`)
+## The phone app: two versions
 
-Swift, no .NET: a **Broadcast Upload Extension** is the only way iOS lets an app capture the whole
-screen (other apps included), and that extension must be native. The MAUI app in `mobileapp/` is a
-different app (the feed player on a phone).
+The **.NET MAUI app** in [`../mobileapp/`](../mobileapp/README.md) is the one that lives with the rest
+of the mobile app (Visual Studio): its broadcast extension in C# does the hotspot path and the relay
+path, and it compiles for iOS on Windows (checked 2026-10-21; deploying still needs a Mac).
+
+The **Swift version** below (`ios/`) is the same design in Xcode, plus the WebRTC direct link (Google's
+WebRTC package; no .NET binding fits the extension's 50 MB limit). Both speak the same protocol to the
+same viewer; keep whichever you build with.
+
+## The Swift app (`ios/`)
+
+A **Broadcast Upload Extension** is the only way iOS lets an app capture the whole screen (other apps
+included); it runs as its own process and must be built by Xcode.
 
 | File | Role |
 |---|---|

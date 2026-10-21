@@ -31,7 +31,7 @@ Windows 10 (see **Test results** for exactly what was measured):
 | **Feed page** (`feed.html`): TikTok-style vertical stream, Explore feed without sign-in | **Working** (Node server and IIS handler) |
 | Feed page: personal **For You** feed after signing in to TikTok (QR code or window) | **Working mechanism** (signed-out test; QR rendered and refreshed); needs the Node server + Chrome/Edge/Chromium on that machine – see **Feed** |
 | **YouTube sign-in**: paste/upload the cookies of a signed-in browser (or a sign-in window on the server machine); **For You** = the account's recommendations | **Working mechanism** (built 2026-10-13; verified signed-out: cookie parsing, YouTube's account check, rejection paths. The signed-in feed itself awaits a real account) – see **YouTube** |
-| **Mirror** (built 2026-10-21): an iPhone's screen (ReplayKit broadcast extension) on the Tesla's browser, three ways: the phone's own page on its hotspot, a WebRTC direct link, the server's relay; WebCodecs or MSE on the viewer; a desktop sender page too | **Working** on the PC (relay, direct link, both decoders, with the desktop sender; 26 relay checks). The iOS app is written but **not yet built or run** (needs a Mac) – see [mirror/README.md](mirror/README.md) |
+| **Mirror** (built 2026-10-21): an iPhone's screen (ReplayKit broadcast extension) on the Tesla's browser, three ways: the phone's own page on its hotspot, a WebRTC direct link, the server's relay; WebCodecs or MSE on the viewer; a desktop sender page too | **Working** on the PC (relay, direct link, both decoders, with the desktop sender; 26 relay checks). The phone app exists twice: **.NET MAUI** (`mobileapp/`, compiles for iOS on Windows, hotspot + relay paths) and Swift (`mirror/ios/`, adds the WebRTC direct link); neither has **run on a phone yet** (needs a Mac to deploy) – see [mobileapp/README.md](mobileapp/README.md) |
 | **Launcher** (`home.html`, the landing page): iPad-style icons that open each platform like an app | **Working** |
 | **YouTube, guest mode**: Shorts by hashtag, search, channels; picture + sound as two files played in sync | **Working** (Node server with yt-dlp) – see **YouTube** |
 | **Facebook** (built 2026-10-15): **Reels** = the latest reels of a rotation of public Pages, read from facebook.com's own pages over plain HTTPS (no browser, no yt-dlp, no sign-in); pasted reel links; **For You** = the account's Reels feed after a cookie sign-in; one progressive 720p MP4 per reel, fetched by the viewer itself (CORS `*`) | **Working** signed out (dev machine); the signed-in feed awaits a real account; untested from the VM's address – see **Facebook** |
@@ -41,14 +41,15 @@ Windows 10 (see **Test results** for exactly what was measured):
 
 Three products share this repository: the **web platform** (the npm workspace at the root: the
 server, the browser client, the deploy scripts - every deploy path points here, so it stays at the
-root), the **mobile app** (`mobileapp/`, a .NET MAUI project: the feed player as a phone app, empty
-template so far) and **Mirror** (`mirror/`, the iPhone-screen-to-Tesla app: a Swift iOS app plus its
-viewer and relay in the web platform; see [mirror/README.md](mirror/README.md)).
+root), the **mobile app** (`mobileapp/`, .NET MAUI, Visual Studio: its first feature is **Mirror**, the
+iPhone's screen on the Tesla, with a .NET broadcast extension; see [mobileapp/README.md](mobileapp/README.md))
+and **Mirror's** web side plus a Swift twin of the phone app (`mirror/`; see [mirror/README.md](mirror/README.md)).
 
 ```
-mobileapp/StreamAnywhere/         .NET MAUI app (iOS / Android / Windows / Mac Catalyst), Visual Studio
-mirror/README.md                  Mirror: how the three paths work, building the iOS app on a Mac
-mirror/ios/                       the Swift app + broadcast extension (XcodeGen project.yml)
+mobileapp/StreamAnywhere/         .NET MAUI app (iOS / Android / Windows / Mac Catalyst): the Mirror page
+mobileapp/StreamAnywhere.Broadcast/  the iOS broadcast extension in C# (the mirroring itself)
+mirror/README.md                  Mirror: how the three paths work, the protocol, the pieces
+mirror/ios/                       the same phone app in Swift (XcodeGen project.yml), with the WebRTC direct link
 client/   Vite 4 + TypeScript front end (no framework)
   src/media/demuxer.ts            streaming fetch → mp4box.js, Range-based seeking, backpressure
   src/media/codecConfig.ts        avcC/hvcC/esds → VideoDecoderConfig / AudioDecoderConfig

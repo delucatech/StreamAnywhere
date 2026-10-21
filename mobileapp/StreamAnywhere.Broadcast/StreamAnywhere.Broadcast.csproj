@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<!-- The Broadcast Upload Extension: iOS hands it the screen's frames and the app's sound once the
+	     user starts a broadcast and picks "StreamAnywhere". It runs in its own process (50 MB limit)
+	     and talks to the app only through the App Group (settings in, status out).
+	     Embedded in the MAUI app through the ProjectReference in StreamAnywhere.csproj (IsAppExtension). -->
+	<PropertyGroup>
+		<TargetFramework>net10.0-ios</TargetFramework>
+		<OutputType>Library</OutputType>
+		<IsAppExtension>true</IsAppExtension>
+		<SupportedOSPlatformVersion>16.0</SupportedOSPlatformVersion>
+		<RootNamespace>StreamAnywhere.Broadcast</RootNamespace>
+		<ApplicationId>com.delucatech.streamanywhere.broadcast</ApplicationId>
+		<ApplicationTitle>StreamAnywhere</ApplicationTitle>
+		<ApplicationDisplayVersion>1.0</ApplicationDisplayVersion>
+		<ApplicationVersion>1</ApplicationVersion>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<CodesignEntitlements>Entitlements.plist</CodesignEntitlements>
+		<!-- the extension's memory limit: keep the bundle small -->
+		<MtouchLink>SdkOnly</MtouchLink>
+		<UseInterpreter>false</UseInterpreter>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<!-- the viewer page the phone serves on its hotspot (built by `npm run build:mirror-local -w client`) -->
+		<BundleResource Include="..\..\mirror\ios\Shared\Resources\viewer.html" Link="viewer.html" />
+	</ItemGroup>
+
+</Project>
