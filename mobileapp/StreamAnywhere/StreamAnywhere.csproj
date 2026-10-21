@@ -71,13 +71,23 @@
 		<CodesignEntitlements>Platforms\iOS\Entitlements.plist</CodesignEntitlements>
 	</PropertyGroup>
 	<ItemGroup Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">
-		<ProjectReference Include="..\StreamAnywhere.Broadcast\StreamAnywhere.Broadcast.csproj" IsAppExtension="true" />
 		<Compile Include="..\StreamAnywhere.Broadcast\Shared\MirrorSettings.cs" Link="Mirror\Shared\MirrorSettings.cs" />
 		<Compile Include="..\StreamAnywhere.Broadcast\Shared\ServerApi.cs" Link="Mirror\Shared\ServerApi.cs" />
 	</ItemGroup>
 	<ItemGroup>
 		<Compile Include="..\StreamAnywhere.Broadcast\Shared\MirrorProtocol.cs" Link="Mirror\Shared\MirrorProtocol.cs" />
 	</ItemGroup>
+
+	<!-- The extension is referenced from a target, not statically: the iOS SDK takes an IsAppExtension
+	     reference out of the ProjectReference list and bundles the extension itself (Xamarin.Shared.targets,
+	     _SeparateAppExtensionReferences), so a static reference is one Visual Studio can never resolve and it
+	     marks the net10.0-ios dependencies with a warning. Added here, right before that target runs, it is
+	     built and bundled exactly the same (dotnet build -f net10.0-ios shows "StreamAnywhere.Broadcast ->"). -->
+	<Target Name="_ReferenceBroadcastExtension" BeforeTargets="_SeparateAppExtensionReferences;AssignProjectConfiguration" Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">
+		<ItemGroup>
+			<ProjectReference Include="..\StreamAnywhere.Broadcast\StreamAnywhere.Broadcast.csproj" IsAppExtension="true" />
+		</ItemGroup>
+	</Target>
 
 	<ItemGroup>
 		<PackageReference Include="Microsoft.Maui.Controls" Version="$(MauiVersion)" />
