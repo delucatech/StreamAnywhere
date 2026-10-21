@@ -26,20 +26,24 @@ namespace StreamAnywhere
                 {
 #if IOS
                     // streamanywhere://pair?… from the pairing landing page (a code scanned with the Camera app)
+                    // (a plain launch carries no URL at all: every one of these may be null)
                     events.AddiOS(ios => ios
                         .OpenUrl((_, url, _) =>
                         {
-                            PairLink.Receive(url.AbsoluteString);
+                            PairLink.Receive(url?.AbsoluteString);
                             return true;
                         })
                         .SceneOpenUrl((_, contexts) =>
                         {
-                            foreach (var c in contexts) PairLink.Receive(c.Url.AbsoluteString);
+                            if (contexts != null)
+                                foreach (var c in contexts) PairLink.Receive(c?.Url?.AbsoluteString);
                             return true;
                         })
                         .SceneWillConnect((_, _, options) =>
                         {
-                            foreach (var c in options.UrlContexts) PairLink.Receive(c.Url.AbsoluteString);
+                            var contexts = options?.UrlContexts;
+                            if (contexts != null)
+                                foreach (var c in contexts) PairLink.Receive(c?.Url?.AbsoluteString);
                         }));
 #endif
                 });
