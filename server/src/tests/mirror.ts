@@ -201,6 +201,9 @@ export async function mirrorChecks(check: Check, cookie: string, base: string, w
   check('the car\'s page is told the phone paired', pairedMsg?.t === 'paired' && pairedMsg.name === 'Scanned phone', pairedMsg);
   const again = await post('/api/mirror/pair/claim', {}, { token: pairInfo.token });
   check('a pairing code works once', again.status === 404, again.status);
+  const beacon = await post('/api/mirror/beacon', {}, { event: 'started', room: room.toLowerCase(), name: 'Beacon phone', detail: 'signed in: no, shared settings: no' });
+  const beaconNote = (await w1.next('note')) as MirrorControl | undefined;
+  check('the extension\'s beacon needs no cookie and reaches the car\'s page', beacon.status === 200 && beaconNote?.t === 'note' && beaconNote.kind === 'info' && /Beacon phone started mirroring \(signed in: no/.test(beaconNote.message), { status: beacon.status, beaconNote });
   let lostPhone = '';
   await connect(`${wsBase}/api/mirror/ws?room=${room}&role=sender&name=Lost%20phone`, {}).catch((e: Error) => (lostPhone = e.message));
   const note = (await w1.next('note')) as MirrorControl | undefined;

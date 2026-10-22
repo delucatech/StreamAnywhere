@@ -89,6 +89,39 @@ public sealed class ServerApi
         }
     }
 
+    /// <summary>
+    /// A sign of life from the broadcast extension (POST /api/mirror/beacon, public): the server logs it
+    /// and tells the car's page. Fire and forget; nothing waits on it and nothing fails because of it.
+    /// </summary>
+    public static void Beacon(Uri server, string @event, string room, string name, string detail)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var http = new HttpClient(new SocketsHttpHandler { AllowAutoRedirect = false, UseCookies = false }) { Timeout = TimeSpan.FromSeconds(8) };
+                using var ms = new MemoryStream();
+                using (var w = new Utf8JsonWriter(ms))
+                {
+                    w.WriteStartObject();
+                    w.WriteString("event", @event);
+                    w.WriteString("room", room);
+                    w.WriteString("name", name);
+                    w.WriteString("detail", detail);
+                    w.WriteEndObject();
+                }
+                using var content = new ByteArrayContent(ms.ToArray());
+                content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+                using var resp = await http.PostAsync(new Uri(server, "/api/mirror/beacon"), content);
+                Console.WriteLine($"[Mirror] beacon {@event}: {(int)resp.StatusCode}");
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine("[Mirror] beacon failed: " + e.Message);
+            }
+        });
+    }
+
     public async Task<string> CreateRoomAsync()
     {
         using var resp = await http.PostAsync(new Uri(server, "/api/mirror/rooms"), null);

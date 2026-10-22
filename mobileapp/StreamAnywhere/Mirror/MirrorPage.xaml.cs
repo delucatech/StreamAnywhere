@@ -311,7 +311,7 @@ public partial class MirrorPage : ContentPage
                     // it runs and we hear it, but its status file never arrives: the shared container is missing on its side
                     SetState(DangerColor, "Mirroring runs, but the extension is cut off", "The extension is running (it signals this app), but it cannot reach the shared App Group container: its signed bundle lacks the group.com.delucatech.streamanywhere entitlement. It therefore has no pairing and no sign-in, and the server refuses it. Rebuild with the 'StreamAnywhere Broadcast Development' profile and the extension's Entitlements.plist.");
                 else
-                    SetState(DangerColor, "Broadcasting, but not through StreamAnywhere", "iOS is capturing the screen, yet the StreamAnywhere extension gives no sign of life. Either another app receives the broadcast, or the extension stopped as soon as it started (a crash, or iOS's 50 MB limit). Stop it with the button, then start again and pick StreamAnywhere.");
+                    SetState(DangerColor, "Broadcasting, but not through StreamAnywhere", "iOS is capturing the screen, yet the StreamAnywhere extension gives no sign of life. Either another app receives the broadcast, or the extension stopped as soon as it started. Stop it with the button, then start again and pick StreamAnywhere. If it happens again: Settings → Privacy & Security → Analytics & Improvements → Analytics Data, and look for entries named StreamAnywhere.Broadcast or JetsamEvent from this time - they say why.");
                 StartHint.Text = "Tap Stop mirroring to end the broadcast.";
                 return;
             }

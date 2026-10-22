@@ -29,7 +29,7 @@ const RENEW_AFTER_SEC = 7 * 24 * 3600;
  * landing page + claim (the phone has no cookie yet: a one-time token from a signed-in page's QR code
  * is what signs it in; server/src/mirror.ts).
  */
-const PUBLIC_PATHS = new Set(['/login', '/api/health', '/pair', '/api/mirror/pair/claim']);
+const PUBLIC_PATHS = new Set(['/login', '/api/health', '/pair', '/api/mirror/pair/claim', '/api/mirror/beacon']);
 
 /** Set by registerAuth (read then, not at import, so tests can supply their own hash). */
 let passwordHash = DEFAULT_HASH;

@@ -21,8 +21,10 @@ public class SampleHandler : RPBroadcastSampleHandler
     {
         // Anything that goes wrong here must reach the app's screen (the extension has no UI of its own):
         // the status file says what happened, and iOS gets the message with the failed broadcast.
-        // first of all: a sign of life the app hears even when nothing else here works
+        // first of all: signs of life that need nothing else here to work - the app hears the Darwin
+        // notification, the server (and the car's page) gets the beacon
         MirrorSignals.Post(MirrorSignals.Alive);
+        if (new MirrorSettings().Server is { } server) ServerApi.Beacon(server, "started", "", "", "extension launched");
         try
         {
             microphone = MirrorSettings.Load().Microphone;

@@ -24,6 +24,11 @@
 		<!-- the extension's memory limit: keep the bundle small -->
 		<MtouchLink>SdkOnly</MtouchLink>
 		<UseInterpreter>false</UseInterpreter>
+		<!-- No debugger support, Debug builds included: iOS launches the extension on its own, with no IDE
+		     attached, and the debug runtime would try to reach the development machine first (the hosts in
+		     MonoTouchDebugConfiguration.txt) - a wait that can look exactly like an extension that never
+		     starts - and costs memory the 50 MB limit does not allow. Console output is enough here. -->
+		<MtouchDebug>false</MtouchDebug>
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 		<!-- Restore runs this project on its own, with no RuntimeIdentifier, and must cover every RID the app can
 		     ask for: Visual Studio builds the app with RuntimeIdentifier=iossimulator-arm64 or ios-arm64 as a

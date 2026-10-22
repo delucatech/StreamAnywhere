@@ -31,7 +31,7 @@ import type { Duplex } from 'node:stream';
 import * as crypto from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { WebSocketServer, WebSocket } from 'ws';
-import { appPairUrl, isKeyVideo, isRoomCode, MSG, normalizeRoomCode, PAIR_PATH, PAIR_TOKEN_TTL_MS, pairUrl, ROOM_ALPHABET, ROOM_CODE_LENGTH, type IceServer, type MirrorConfig, type MirrorControl, type MirrorPairClaim, type MirrorPairInfo, type MirrorRoomInfo } from '../../shared/mirror';
+import { appPairUrl, BEACON_PATH, isKeyVideo, isRoomCode, MSG, normalizeRoomCode, PAIR_PATH, PAIR_TOKEN_TTL_MS, pairUrl, ROOM_ALPHABET, ROOM_CODE_LENGTH, type IceServer, type MirrorBeacon, type MirrorConfig, type MirrorControl, type MirrorPairClaim, type MirrorPairInfo, type MirrorRoomInfo } from '../../shared/mirror';
 import { issueAuthCookie, requestAuthorized } from './auth';
 
 const WS_PATH = '/api/mirror/ws';
@@ -584,6 +584,27 @@ export function registerMirror(app: FastifyInstance): void {
     notifyPaired(room, name);
     log('info', { room: room.code, name, watchers: room.watchers.size }, 'mirror: phone paired');
     return { room: room.code, server: publicOrigin(req), signedIn };
+  });
+
+  /** The phone's extension says it started / stopped / failed (public: it may have no sign-in to show); logged, and told to the room's watchers */
+  app.post<{ Body: MirrorBeacon | null }>(BEACON_PATH, { config: { rateLimit: { max: 60, timeWindow: '1 minute' } } }, async (req) => {
+    const b = req.body || ({} as MirrorBeacon);
+    const event = (['started', 'relay-error', 'error', 'stopped'] as const).find((e) => e === b.event) || 'started';
+    const code = normalizeRoomCode(String(b.room || ''));
+    const name = String(b.name || '').slice(0, 60) || 'The phone';
+    const detail = String(b.detail || '').slice(0, 300);
+    log(event === 'started' || event === 'stopped' ? 'info' : 'warn', { room: code || undefined, name, event, detail, ip: req.ip }, 'mirror: phone beacon');
+    const room = isRoomCode(code) ? rooms.get(code) : undefined;
+    if (room) {
+      const message =
+        event === 'started'
+          ? `${name} started mirroring${detail ? ` (${detail})` : ''}; the picture should follow.`
+          : event === 'stopped'
+            ? `${name} stopped mirroring.`
+            : `${name} reports: ${detail || event}.`;
+      for (const w of room.watchers.values()) sendControl(w.ws, { t: 'note', message, kind: event === 'started' || event === 'stopped' ? 'info' : 'error' });
+    }
+    return { ok: true, room: room ? room.code : undefined, watchers: room?.watchers.size ?? 0 };
   });
 
   /** The landing page the Camera app opens (public; the token stays in the fragment) */

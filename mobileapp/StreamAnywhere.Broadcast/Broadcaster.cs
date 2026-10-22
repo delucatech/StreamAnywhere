@@ -59,6 +59,9 @@ public sealed class Broadcaster
         status.Room = settings.Room;
         status.LocalAddresses = LocalAddresses.IPv4();
         status.Write();
+        // a word to the server (and through it the car's page) that needs neither the App Group nor a sign-in
+        if (settings.Server is { } beaconServer)
+            ServerApi.Beacon(beaconServer, "started", settings.Room, settings.DeviceName, $"signed in: {(settings.Cookie.Length > 0 ? "yes" : "no")}, shared settings: {(MirrorStatus.ContainerAvailable ? "yes" : "no")}");
 
         if (settings.Audio)
         {
@@ -100,6 +103,7 @@ public sealed class Broadcaster
                 Console.WriteLine("[Mirror] relay: " + why);
                 status.Write();
                 MirrorSignals.Post(MirrorSignals.RelayError);
+                ServerApi.Beacon(server, "relay-error", settings.Room, settings.DeviceName, why);
             };
             r.Connect();
             relay = r;
@@ -138,6 +142,7 @@ public sealed class Broadcaster
         status.State = "error";
         status.Message = message;
         status.Write();
+        if (settings.Server is { } s) ServerApi.Beacon(s, "error", settings.Room, settings.DeviceName, message);
         OnFatal?.Invoke(message);
     }
 
@@ -147,6 +152,7 @@ public sealed class Broadcaster
         {
             if (stopped) return;
             stopped = true;
+            if (settings.Server is { } s) ServerApi.Beacon(s, "stopped", settings.Room, settings.DeviceName, status.State == "error" ? status.Message : "");
             statusTimer?.Dispose();
             silenceTimer?.Dispose();
             relay?.Close();

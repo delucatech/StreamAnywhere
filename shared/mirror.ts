@@ -143,6 +143,20 @@ export interface MirrorPairClaim {
   signedIn: boolean;
 }
 
+/**
+ * A sign of life from the phone's broadcast extension (POST, public, no cookie): it has no screen of
+ * its own, and when it cannot reach its settings it has no sign-in either, so this is how it says
+ * "I started" (or why it stopped) to the server's log and to the car's page waiting in the room.
+ */
+export const BEACON_PATH = '/api/mirror/beacon';
+export interface MirrorBeacon {
+  event: 'started' | 'relay-error' | 'error' | 'stopped';
+  room?: string;
+  name?: string;
+  /** e.g. "signed in: yes, settings: yes" or the error */
+  detail?: string;
+}
+
 export const pairUrl = (origin: string, token: string): string => `${origin}${PAIR_PATH}#${token}`;
 export const appPairUrl = (origin: string, token: string): string => `${PAIR_URL_SCHEME}://pair?server=${encodeURIComponent(origin)}&token=${encodeURIComponent(token)}`;
 
