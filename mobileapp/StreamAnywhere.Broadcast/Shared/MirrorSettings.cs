@@ -76,6 +76,32 @@ public sealed class MirrorSettings
     }
 }
 
+/// <summary>
+/// Darwin notifications from the extension to the app: no payload, no App Group needed, so they get
+/// through even when the shared container does not (the one thing the status file cannot report).
+/// </summary>
+public static class MirrorSignals
+{
+    /// <summary>The extension is running (posted when the broadcast starts and once a second after)</summary>
+    public const string Alive = "com.delucatech.streamanywhere.mirror.alive";
+    /// <summary>The extension has no App Group container: it sees no pairing and can write no status</summary>
+    public const string NoGroup = "com.delucatech.streamanywhere.mirror.nogroup";
+    /// <summary>The server refused or dropped the link (the status file has the words)</summary>
+    public const string RelayError = "com.delucatech.streamanywhere.mirror.relayerror";
+
+    public static void Post(string name)
+    {
+        try
+        {
+            CoreFoundation.CFNotificationCenter.Darwin.PostNotification(name, null, null, true, true);
+        }
+        catch
+        {
+            /* a signal is a convenience */
+        }
+    }
+}
+
 /// <summary>What the extension is doing, for the app's screen (written once a second to the group container).</summary>
 public sealed class MirrorStatus
 {
@@ -106,6 +132,22 @@ public sealed class MirrorStatus
         {
             var url = NSFileManager.DefaultManager.GetContainerUrl(MirrorSettings.AppGroup);
             return url?.Path == null ? null : Path.Combine(url.Path, "status.json");
+        }
+    }
+
+    /// <summary>This process can reach the App Group container (its entitlement is in the signed bundle)</summary>
+    public static bool ContainerAvailable
+    {
+        get
+        {
+            try
+            {
+                return FilePath != null;
+            }
+            catch
+            {
+                return false;
+            }
         }
     }
 

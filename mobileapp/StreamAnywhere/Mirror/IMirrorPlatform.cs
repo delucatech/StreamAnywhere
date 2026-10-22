@@ -13,6 +13,13 @@ public sealed record MirrorSettingsView(string ServerUrl, string DeviceName, str
 /// <summary>Fresh = written in the last seconds (the extension is running); Live = fresh and mirroring.</summary>
 public sealed record MirrorStatusView(string State, string Message, int Kbps, int Width, int Height, int Rotation, string Relay, string RelayError, int Watchers, int LocalClients, bool Fresh, bool Live, bool Recent);
 
+/// <summary>The extension's signs of life that need no App Group (Darwin notifications): when it was last heard, and what it said.</summary>
+public sealed record MirrorSignalsView(DateTime? AliveAt, DateTime? NoGroupAt, DateTime? RelayErrorAt)
+{
+    public bool AliveRecently => AliveAt != null && (DateTime.UtcNow - AliveAt.Value).TotalSeconds < 6;
+    public bool NoGroupRecently => NoGroupAt != null && (DateTime.UtcNow - NoGroupAt.Value).TotalMinutes < 10;
+}
+
 public interface IMirrorPlatform
 {
     bool Supported { get; }
@@ -20,6 +27,10 @@ public interface IMirrorPlatform
     string ExtensionBundleId { get; }
     /// <summary>iOS is recording or broadcasting the screen right now (whatever is receiving it)</summary>
     bool ScreenCaptured { get; }
+    /// <summary>This app can reach the App Group container (its entitlement made it into the build)</summary>
+    bool AppGroupOk { get; }
+    /// <summary>What the extension signalled, App Group or not</summary>
+    MirrorSignalsView Signals();
     MirrorSettingsView Load();
     void Save(MirrorSettingsView s);
     /// <summary>Opens the camera on a QR scanner; the text of the first code seen, or null when the user cancelled.</summary>
@@ -46,6 +57,8 @@ public sealed class MirrorPlatformStub : IMirrorPlatform
     public bool Supported => false;
     public string ExtensionBundleId => "";
     public bool ScreenCaptured => false;
+    public bool AppGroupOk => true;
+    public MirrorSignalsView Signals() => new(null, null, null);
     public MirrorSettingsView Load() => settings;
     public void Save(MirrorSettingsView s) => settings = s;
     public Task<string?> ScanPairingCodeAsync() => Task.FromResult<string?>(null);

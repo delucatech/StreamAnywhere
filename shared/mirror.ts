@@ -90,6 +90,8 @@ export type MirrorControl =
   | { t: 'watchers'; n: number }
   /** server -> watcher: a phone scanned this page's pairing code (it is signed in and has the room; the picture follows when it starts) */
   | { t: 'paired'; name?: string }
+  /** server -> watcher: something to tell the viewer while waiting (a phone that reached the server but was refused) */
+  | { t: 'note'; message: string; kind?: 'info' | 'error' }
   /** watcher -> server: stop (or resume) copying frames to me - I am receiving them over the direct link */
   | { t: 'relay'; on: boolean }
   /** watcher -> server -> sender ("from" filled in by the server) and sender -> server -> watcher ("to") */

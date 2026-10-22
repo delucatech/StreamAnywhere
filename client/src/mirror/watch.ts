@@ -26,6 +26,8 @@ export interface WatchStatus {
   senderName?: string;
   watchers: number;
   message?: string;
+  /** The message is a note from the server about the phone (an error: it was refused) rather than this link's own state */
+  note?: 'info' | 'error';
   /** Bytes received, by path */
   bytes: Record<PathKind, number>;
   /** Frames received in the last second (any path) */
@@ -228,7 +230,7 @@ export class MirrorWatcher {
     switch (msg.t) {
       case 'ready':
         this.senderPresent = path === 'local' || msg.live;
-        this.emit({ senderName: msg.name, watchers: msg.watchers, state: msg.live ? (this.status.state === 'live' ? 'live' : 'connecting') : 'waiting', message: msg.live ? undefined : 'Waiting for the phone to start mirroring…' });
+        this.emit({ senderName: msg.name, watchers: msg.watchers, state: msg.live ? (this.status.state === 'live' ? 'live' : 'connecting') : 'waiting', message: msg.live ? undefined : 'Waiting for the phone to start mirroring…', note: undefined });
         if (msg.live && path === 'relay') this.tryDirect();
         break;
       case 'hello':
@@ -238,7 +240,7 @@ export class MirrorWatcher {
         if (msg.event === 'join') {
           this.senderPresent = true;
           this.lastTs = { video: -1, audio: -1 };
-          this.emit({ senderName: msg.name, state: 'connecting', message: undefined });
+          this.emit({ senderName: msg.name, state: 'connecting', message: undefined, note: undefined });
           if (path === 'relay') this.tryDirect();
         } else {
           this.senderPresent = false;
@@ -250,8 +252,11 @@ export class MirrorWatcher {
         this.emit({ watchers: msg.n });
         break;
       case 'paired':
-        this.emit({ senderName: msg.name || this.status.senderName, message: `${msg.name || 'The phone'} is paired. Tap Start mirroring on it.` });
+        this.emit({ senderName: msg.name || this.status.senderName, message: `${msg.name || 'The phone'} is paired. Tap Start mirroring on it.`, note: undefined });
         this.opts.onPaired?.(msg.name);
+        break;
+      case 'note':
+        this.emit({ message: msg.message, note: msg.kind || 'info' });
         break;
       case 'signal':
         void this.onSignal(msg.data);

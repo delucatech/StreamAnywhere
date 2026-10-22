@@ -254,8 +254,10 @@ public partial class MirrorPage : ContentPage
     {
         var s = platform.Status();
         var live = s != null && s.Live;
-        Picker.IsLive = live;
-        Picker.Title = live ? "Stop mirroring" : "Start mirroring";
+        var captured = platform.ScreenCaptured;
+        // the system button stops a running broadcast: say so whenever iOS is capturing, whoever receives it
+        Picker.IsLive = live || captured;
+        Picker.Title = live || captured ? "Stop mirroring" : "Start mirroring";
         StatsGrid.IsVisible = live;
         StateMessage.IsVisible = false;
         if (!platform.Supported)
@@ -264,7 +266,13 @@ public partial class MirrorPage : ContentPage
             StartHint.Text = "";
             return;
         }
-        var captured = platform.ScreenCaptured;
+        if (!platform.AppGroupOk)
+        {
+            SetState(DangerColor, "This build cannot share with the extension", "The App Group entitlement (group.com.delucatech.streamanywhere) did not make it into this app: the extension cannot see the pairing, and this screen cannot see what it does. Rebuild with the 'StreamAnywhere Development' profile and the app's Entitlements.plist.");
+            StartHint.Text = "";
+            return;
+        }
+        var signals = platform.Signals();
         if (live && s != null)
         {
             silentSince = null;
@@ -299,8 +307,12 @@ public partial class MirrorPage : ContentPage
             silentSince ??= DateTime.UtcNow;
             if ((DateTime.UtcNow - silentSince.Value).TotalSeconds > 4)
             {
-                SetState(DangerColor, "Broadcasting, but not through StreamAnywhere", "iOS is capturing the screen, yet the StreamAnywhere extension reports nothing. Either another app receives the broadcast, or the extension stopped as soon as it started. Stop it (the red indicator at the top), then start again and pick StreamAnywhere.");
-                StartHint.Text = "";
+                if (signals.NoGroupRecently || signals.AliveRecently)
+                    // it runs and we hear it, but its status file never arrives: the shared container is missing on its side
+                    SetState(DangerColor, "Mirroring runs, but the extension is cut off", "The extension is running (it signals this app), but it cannot reach the shared App Group container: its signed bundle lacks the group.com.delucatech.streamanywhere entitlement. It therefore has no pairing and no sign-in, and the server refuses it. Rebuild with the 'StreamAnywhere Broadcast Development' profile and the extension's Entitlements.plist.");
+                else
+                    SetState(DangerColor, "Broadcasting, but not through StreamAnywhere", "iOS is capturing the screen, yet the StreamAnywhere extension gives no sign of life. Either another app receives the broadcast, or the extension stopped as soon as it started (a crash, or iOS's 50 MB limit). Stop it with the button, then start again and pick StreamAnywhere.");
+                StartHint.Text = "Tap Stop mirroring to end the broadcast.";
                 return;
             }
         }

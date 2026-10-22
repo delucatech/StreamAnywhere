@@ -471,19 +471,37 @@ export function registerMirror(app: FastifyInstance): void {
       socket.destroy();
       return;
     }
-    if (!requestAuthorized(req.headers)) {
-      socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
-      socket.destroy();
-      return;
-    }
     const role = url.searchParams.get('role') === 'sender' ? 'sender' : 'watcher';
     const code = normalizeRoomCode(url.searchParams.get('room') || '');
-    if (!isRoomCode(code) || (role === 'watcher' && !rooms.has(code)) || (role === 'sender' && !rooms.has(code) && rooms.size >= MAX_ROOMS)) {
-      socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
+    const name = (url.searchParams.get('name') || '').slice(0, 60) || undefined;
+    const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+    // A refused connection is logged, and the room's watchers (the car's page, waiting with the
+    // pairing code up) are told when it was their phone: the phone itself has no screen to say so.
+    const refuse = (status: number, reason: string, tell?: string): void => {
+      log('warn', { room: code, role, name, ip, status, reason }, 'mirror: connection refused');
+      const room = rooms.get(code);
+      if (tell && room) for (const w of room.watchers.values()) sendControl(w.ws, { t: 'note', message: tell, kind: 'error' });
+      socket.write(`HTTP/1.1 ${status} ${status === 401 ? 'Unauthorized' : 'Not Found'}\r\nConnection: close\r\n\r\n`);
       socket.destroy();
+    };
+    if (!requestAuthorized(req.headers)) {
+      const hasCookie = /(^|;\s*)sa_auth=/.test(String(req.headers.cookie || ''));
+      refuse(401, hasCookie ? 'the login cookie is not valid (another server, or the password changed)' : 'no login cookie', role === 'sender' ? `${name || 'The phone'} reached the server, but its sign-in was refused${hasCookie ? '' : ' (it sent none)'}: pair it again with the code on this screen.` : undefined);
       return;
     }
-    const name = (url.searchParams.get('name') || '').slice(0, 60) || undefined;
+    if (!isRoomCode(code)) {
+      refuse(404, 'not a room code');
+      return;
+    }
+    if (role === 'watcher' && !rooms.has(code)) {
+      refuse(404, 'no such room');
+      return;
+    }
+    if (role === 'sender' && !rooms.has(code) && rooms.size >= MAX_ROOMS) {
+      refuse(404, 'too many rooms');
+      return;
+    }
+    log('info', { room: code, role, name, ip, known: rooms.has(code) }, 'mirror: connection accepted');
     wss.handleUpgrade(req, socket, head, (ws) => {
       const room = getOrCreateRoom(code);
       ws.on('error', (e) => log('warn', { room: code, role, err: e.message }, 'mirror: socket error'));

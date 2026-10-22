@@ -8,8 +8,33 @@ namespace StreamAnywhere.Mirror;
 
 public sealed class MirrorPlatform : IMirrorPlatform
 {
+    DateTime? aliveAt, noGroupAt, relayErrorAt;
+    readonly List<CoreFoundation.CFNotificationObserverToken> observers = new();
+
+    public MirrorPlatform()
+    {
+        // the extension's Darwin notifications: heard whether or not the two share an App Group
+        Listen(MirrorSignals.Alive, () => aliveAt = DateTime.UtcNow);
+        Listen(MirrorSignals.NoGroup, () => noGroupAt = DateTime.UtcNow);
+        Listen(MirrorSignals.RelayError, () => relayErrorAt = DateTime.UtcNow);
+    }
+
+    void Listen(string name, Action on)
+    {
+        try
+        {
+            observers.Add(CoreFoundation.CFNotificationCenter.Darwin.AddObserver(name, null, (_, _) => on(), CoreFoundation.CFNotificationSuspensionBehavior.DeliverImmediately));
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"[Mirror] cannot listen for {name}: {e.Message}");
+        }
+    }
+
     public bool Supported => true;
     public string ExtensionBundleId => MirrorSettings.BroadcastExtensionBundleId;
+    public bool AppGroupOk => MirrorStatus.ContainerAvailable;
+    public MirrorSignalsView Signals() => new(aliveAt, noGroupAt, relayErrorAt);
     // deprecated on iOS 17 for UITraitCollection.SceneCaptureState, which needs a window; this still answers
 #pragma warning disable CA1422
     public bool ScreenCaptured => UIKit.UIScreen.MainScreen.Captured;

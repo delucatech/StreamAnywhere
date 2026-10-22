@@ -247,7 +247,7 @@ function renderStatus(s: WatchStatus): void {
   const inLobby = !LOCAL && s.state !== 'live' && (!wasLive || s.state === 'waiting' || s.state === 'ended');
   if (inLobby) {
     showEntry();
-    if (s.state === 'waiting') setLobbyStatus(s.message || 'Waiting for the phone…', s.message?.includes('paired') ? 'paired' : 'waiting');
+    if (s.state === 'waiting') setLobbyStatus(s.message || 'Waiting for the phone…', s.note === 'error' ? 'error' : s.message?.includes('paired') ? 'paired' : 'waiting');
     else if (s.state === 'ended') setLobbyStatus(`${s.message || 'The stream ended'} – getting a new code…`, 'error');
     else if (s.state === 'error') setLobbyStatus(s.message || 'Something went wrong', 'error');
     else setLobbyStatus(s.message || 'Connecting to the server…');

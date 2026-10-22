@@ -47,6 +47,8 @@ public sealed class Broadcaster
 
     void StartOnQueue()
     {
+        MirrorSignals.Post(MirrorSignals.Alive);
+        if (!MirrorStatus.ContainerAvailable) MirrorSignals.Post(MirrorSignals.NoGroup);
         settings = MirrorSettings.Load();
         if (!RoomCode.IsValid(settings.Room))
         {
@@ -97,6 +99,7 @@ public sealed class Broadcaster
                 status.RelayError = why;
                 Console.WriteLine("[Mirror] relay: " + why);
                 status.Write();
+                MirrorSignals.Post(MirrorSignals.RelayError);
             };
             r.Connect();
             relay = r;
@@ -351,6 +354,7 @@ public sealed class Broadcaster
         status.UpdatedAt = DateTime.UtcNow;
         status.LocalAddresses = LocalAddresses.IPv4();
         status.Write();
+        MirrorSignals.Post(MirrorSignals.Alive);
     }
 
     /// <summary>ReplayKit marks each frame with the screen's orientation (CGImagePropertyOrientation); the viewer turns the picture clockwise by this.</summary>

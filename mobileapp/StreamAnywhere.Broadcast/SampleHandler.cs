@@ -21,6 +21,8 @@ public class SampleHandler : RPBroadcastSampleHandler
     {
         // Anything that goes wrong here must reach the app's screen (the extension has no UI of its own):
         // the status file says what happened, and iOS gets the message with the failed broadcast.
+        // first of all: a sign of life the app hears even when nothing else here works
+        MirrorSignals.Post(MirrorSignals.Alive);
         try
         {
             microphone = MirrorSettings.Load().Microphone;

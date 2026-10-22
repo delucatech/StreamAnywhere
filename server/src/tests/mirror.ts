@@ -201,6 +201,10 @@ export async function mirrorChecks(check: Check, cookie: string, base: string, w
   check('the car\'s page is told the phone paired', pairedMsg?.t === 'paired' && pairedMsg.name === 'Scanned phone', pairedMsg);
   const again = await post('/api/mirror/pair/claim', {}, { token: pairInfo.token });
   check('a pairing code works once', again.status === 404, again.status);
+  let lostPhone = '';
+  await connect(`${wsBase}/api/mirror/ws?room=${room}&role=sender&name=Lost%20phone`, {}).catch((e: Error) => (lostPhone = e.message));
+  const note = (await w1.next('note')) as MirrorControl | undefined;
+  check('the car\'s page is told when its phone is refused', /401/.test(lostPhone) && note?.t === 'note' && note.kind === 'error' && /Lost phone reached the server.*refused.*sent none/.test(note.message), { lostPhone, note });
   const withPhoneCookie = await post('/api/mirror/rooms', { cookie: phoneCookie });
   check('the cookie from the claim is a real login', withPhoneCookie.status === 200, withPhoneCookie.status);
   let phoneRefused = '';
