@@ -20,6 +20,8 @@ public partial class MirrorPage : ContentPage
     bool loading = true;
     bool pairing;
     IDispatcherTimer? timer;
+    /// <summary>Since when iOS has been capturing the screen with no word from the extension</summary>
+    DateTime? silentSince;
 
     public MirrorPage(IMirrorPlatform platform)
     {
@@ -262,9 +264,16 @@ public partial class MirrorPage : ContentPage
             StartHint.Text = "";
             return;
         }
+        var captured = platform.ScreenCaptured;
         if (live && s != null)
         {
-            SetState(OkColor, "Mirroring", s.Relay == "open" ? "The Tesla sees this screen. Open any app; the red indicator at the top means it is on." : $"Sending; server link {s.Relay}.");
+            silentSince = null;
+            if (s.Relay is "open" or "idle")
+                SetState(OkColor, "Mirroring", s.Watchers > 0 ? "The Tesla sees this screen. Open any app; the red indicator at the top means it is on." : "Sending to the server; nothing is watching yet. On the Tesla, open StreamAnywhere → Mirror.");
+            else if (s.Relay == "off")
+                SetState(OkColor, "Mirroring (hotspot only)", "The server is off: the car watches through this phone's own page (below).");
+            else
+                SetState(WarnColor, "Mirroring, but not to the server", s.RelayError.Length > 0 ? $"Server link {s.Relay}: {s.RelayError}." : $"Server link {s.Relay}; trying again.");
             StatPicture.Text = s.Width > 0 ? $"{s.Width}×{s.Height}" : "–";
             StatRate.Text = s.Kbps >= 1000 ? $"{s.Kbps / 1000.0:0.0} Mb/s" : $"{s.Kbps} kb/s";
             StatWatching.Text = (s.Watchers + s.LocalClients).ToString();
@@ -276,15 +285,35 @@ public partial class MirrorPage : ContentPage
             StartHint.Text = "Tap the button (or the red indicator) to stop.";
             return;
         }
-        if (s != null && s.State == "starting")
+        if (s != null && s.State == "starting" && s.Fresh)
         {
+            silentSince = null;
             SetState(WarnColor, "Starting…", "Connecting to the server.");
             StartHint.Text = "";
             return;
         }
-        if (s != null && s.State == "error" && s.Fresh)
+        // iOS is capturing the screen, but the extension says nothing: it is not the one receiving the
+        // frames, or it died at once (a crash, or iOS's 50 MB limit for broadcast extensions).
+        if (captured)
+        {
+            silentSince ??= DateTime.UtcNow;
+            if ((DateTime.UtcNow - silentSince.Value).TotalSeconds > 4)
+            {
+                SetState(DangerColor, "Broadcasting, but not through StreamAnywhere", "iOS is capturing the screen, yet the StreamAnywhere extension reports nothing. Either another app receives the broadcast, or the extension stopped as soon as it started. Stop it (the red indicator at the top), then start again and pick StreamAnywhere.");
+                StartHint.Text = "";
+                return;
+            }
+        }
+        else silentSince = null;
+        if (s != null && s.State == "error" && s.Recent)
         {
             SetState(DangerColor, "Stopped", s.Message.Length > 0 ? s.Message : "The broadcast ended with an error.");
+        }
+        else if (s != null && (s.State is "live" or "starting") && s.Recent)
+        {
+            // the extension went quiet without stopping: iOS ended it (memory, a crash) - say what it last reported
+            var last = s.RelayError.Length > 0 ? $" Last server link: {s.Relay} ({s.RelayError})." : s.Relay == "closed" ? " The server link was closed." : "";
+            SetState(WarnColor, "The broadcast ended by itself", $"iOS stopped the extension without a word from it (a crash, or more than its 50 MB of memory).{last} Start again; if it keeps happening, pick Saver quality below.");
         }
         else if (settings.Paired)
         {

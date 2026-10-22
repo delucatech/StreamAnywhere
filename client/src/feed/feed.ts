@@ -11,8 +11,10 @@
  *  - Swipe (touch) or drag (mouse) up/down = next/previous video. Tap/click = pause/resume.
  *    ↑/↓ (or J/K) move, Space pauses, M mutes, F fullscreen, D downloads, A toggles auto-scroll,
  *    W hides the bars.
- *  - Right-hand action column: who posted it (profile), sound, save (download), auto-scroll,
- *    playback speed (S: 0.5× to 2×, 1× on every visit), fullscreen. Bottom bar: Home, Friends, + (placeholders), Inbox (messages), Profile (sign-in:
+ *  - Right-hand action column: who posted it (profile, with a follow "+" on the avatar for a signed-in
+ *    TikTok account), the likes and comments, sound, save (download), auto-scroll (phones only: wide
+ *    screens have the switch on the Up next panel; the choice is shared by every app), playback speed
+ *    (S: 0.5× to 2×, 1× on every visit), fullscreen. Bottom bar: Home, Friends, + (placeholders), Inbox (messages), Profile (sign-in:
  *    TikTok's QR code / window; YouTube's pasted cookies / window, see platforms.ts `signIn`).
  *  - Search (top bar) and account profiles (social.ts) hand the feed a play list: search results
  *    or an account's videos then play in place of the source, with a pill to go back. The video
@@ -30,7 +32,7 @@
  * back to this app from another, the saved feed after the page was closed) is fed from disk first,
  * the rest from the network. A sweep between videos makes room (see mediaCache.ts).
  */
-import type { FeedItem, FeedSource, LoginMode, MediaFormat, SessionInputRequest, SessionStatus } from '../../../shared/types';
+import type { FeedAuthor, FeedItem, FeedSource, FollowState, LoginMode, MediaFormat, SessionInputRequest, SessionStatus } from '../../../shared/types';
 import { api, ApiError, apiUrl } from '../api';
 import { pressed } from '../busy';
 import type { MediaPrefix } from '../media/demuxer';
@@ -73,6 +75,11 @@ const el = {
   actAuthor: $<HTMLButtonElement>('actAuthor'),
   actAuthorImg: $<HTMLImageElement>('actAuthorImg'),
   actAuthorLabel: $('actAuthorLabel'),
+  actFollow: $<HTMLButtonElement>('actFollow'),
+  actLikes: $('actLikes'),
+  actLikesLabel: $('actLikesLabel'),
+  actComments: $('actComments'),
+  actCommentsLabel: $('actCommentsLabel'),
   actMute: $<HTMLButtonElement>('actMute'),
   actMuteIco: $('actMuteIco'),
   actDownload: $<HTMLButtonElement>('actDownload'),
@@ -274,10 +281,16 @@ interface Prefs {
   autoscroll: boolean;
   muted: boolean;
 }
+/** Auto-scroll is one choice for every app (switched on YouTube, it holds on TikTok too), kept apart from the per-app settings. */
+const SHARED_PREFS_KEY = 'streamanywhere.feed.shared';
 function loadPrefs(): Prefs {
   const def: Prefs = { source: 'explore', pick: 'auto', category: P.defaultCategory, autoscroll: true, muted: false };
   try {
-    return { ...def, ...(JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') as Partial<Prefs>) };
+    const own = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') as Partial<Prefs>;
+    const shared = JSON.parse(localStorage.getItem(SHARED_PREFS_KEY) || '{}') as Partial<Pick<Prefs, 'autoscroll'>>;
+    const p = { ...def, ...own };
+    if (typeof shared.autoscroll === 'boolean') p.autoscroll = shared.autoscroll;
+    return p;
   } catch {
     return def;
   }
@@ -285,6 +298,7 @@ function loadPrefs(): Prefs {
 function savePrefs(): void {
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+    localStorage.setItem(SHARED_PREFS_KEY, JSON.stringify({ autoscroll: prefs.autoscroll }));
   } catch {
     /* ignore */
   }
@@ -482,6 +496,35 @@ el.actAuthor.addEventListener('click', () => {
   const cur = activeEntry();
   if (cur?.item.author.uniqueId) void openProfile(cur.item.author.uniqueId);
 });
+// The "+" on the avatar: follow the account of the video in view; the badge goes once the account is followed.
+el.actFollow.addEventListener('click', () => {
+  const user = activeEntry()?.item.author.uniqueId;
+  if (!user) return;
+  if (state.session?.state !== 'logged_in') {
+    toast(`Sign in to ${P.name} first to follow accounts`, true, 4000);
+    void openSessionPanel();
+    return;
+  }
+  pressed(el.actFollow, async () => {
+    try {
+      const r = await api.follow({ user, follow: true });
+      rememberFollowState(user, r.followState);
+      toast(r.followState === 'none' ? `Could not follow @${user}` : r.followState === 'requested' ? `Follow request sent to @${user}` : `Following @${user}`);
+      for (const w of r.warnings) console.warn('[follow]', w);
+    } catch (e) {
+      toast(`Follow failed: ${errMsg(e)}`, true, 6000);
+    }
+    syncFollow(activeEntry());
+  });
+});
+/** What the signed-in account's follow state of each author is known to be here (follows done on this page, profiles opened). */
+const followKnown = new Map<string, FollowState>();
+function rememberFollowState(user: string, s: FollowState): void {
+  if (s === 'unknown') return;
+  followKnown.set(user.toLowerCase(), s);
+  for (const e of state.entries) if (e.item.author.uniqueId?.toLowerCase() === user.toLowerCase()) e.item.author.followState = s;
+}
+const followStateOf = (a: FeedAuthor): FollowState | undefined => (a.uniqueId ? followKnown.get(a.uniqueId.toLowerCase()) : undefined) ?? a.followState;
 // Wide screens: the rail lists every app with the one in use marked; tapping another one switches to
 // its feed, tapping the one in use goes back to the first video (like Home). The section buttons act
 // through the bottom bar's handlers (the bottom bar is hidden there).
@@ -511,7 +554,19 @@ el.railFriends.addEventListener('click', () => el.navFriends.click());
 el.railInbox.addEventListener('click', () => el.navInbox.click());
 el.railProfile.addEventListener('click', () => el.navProfile.click());
 el.upnextAuto.addEventListener('click', () => toggleAutoscroll());
-initSocial({ play: playList, toast, isLoggedIn: () => state.session?.state === 'logged_in', openSessionPanel, fmtCount, platform: P, onPanelsChange: syncOverlayPause });
+initSocial({
+  play: playList,
+  toast,
+  isLoggedIn: () => state.session?.state === 'logged_in',
+  openSessionPanel,
+  fmtCount,
+  platform: P,
+  onPanelsChange: syncOverlayPause,
+  onFollowState: (user, s) => {
+    rememberFollowState(user, s);
+    syncFollow(activeEntry());
+  },
+});
 el.navProfile.addEventListener('click', () => pressed(el.navProfile, () => openSessionPanel()));
 el.sessionClose.addEventListener('click', () => closeSessionPanel());
 el.sessionRefresh.addEventListener('click', () =>
@@ -944,6 +999,8 @@ function renderSession(): void {
   el.navProfileLabel.textContent = s.state === 'logged_in' ? `@${(s.username || 'me').slice(0, 12)}` : s.state === 'login_pending' ? 'Signing in…' : 'Profile';
   el.railProfileLabel.textContent = el.navProfileLabel.textContent;
   el.navProfile.classList.toggle('active', s.state === 'logged_in');
+  // the follow "+" exists for a signed-in account only
+  syncFollow(activeEntry());
 }
 const SIGNIN_KEY = P.id === 'tiktok' ? 'streamanywhere.feed.signin' : `streamanywhere.feed.${P.id}.signin`;
 /** The code step: TikTok's answer to the last code, and how long the server keeps waiting. */
@@ -1748,9 +1805,8 @@ function makeEntry(item: FeedItem): Entry {
   }
   const meta = document.createElement('div');
   meta.className = 'meta';
-  meta.textContent = [item.music ? `♫ ${item.music}` : '', item.stats.plays !== undefined ? `${fmtCount(item.stats.plays)} plays` : '', item.stats.likes !== undefined ? `${fmtCount(item.stats.likes)} likes` : '']
-    .filter(Boolean)
-    .join(' · ');
+  // likes and comments are in the action column (syncStats); the caption keeps the music and the plays
+  meta.textContent = [item.music ? `♫ ${item.music}` : '', item.stats.plays !== undefined ? `${fmtCount(item.stats.plays)} plays` : ''].filter(Boolean).join(' · ');
   info.appendChild(meta);
   root.appendChild(info);
 
@@ -2101,6 +2157,33 @@ function syncAuthor(entry: Entry): void {
   el.actAuthor.disabled = !a.uniqueId;
   el.actAuthorLabel.textContent = a.uniqueId ? `@${a.uniqueId}` : a.nickname || 'Profile';
   el.actAuthor.title = a.uniqueId ? `@${a.uniqueId}: who posted this video (P)` : 'Who posted this video (P)';
+  syncFollow(entry);
+  syncStats(entry);
+}
+
+/**
+ * The follow "+" on the avatar: shown for a signed-in account on a platform with follows (TikTok), for
+ * an author it is not known to follow. TikTok's items say (`relation`) for the signed-in feed; where
+ * nothing says, the badge shows, and a tap on an account already followed just takes it away.
+ */
+function syncFollow(entry: Entry | undefined): void {
+  const a = entry?.item.author;
+  const can = Boolean(P.social && a?.uniqueId && state.session?.state === 'logged_in');
+  const s = a ? followStateOf(a) : undefined;
+  const followed = s === 'following' || s === 'friends' || s === 'requested';
+  el.actFollow.classList.toggle('hidden', !can || followed);
+  el.actFollow.title = a?.uniqueId ? `Follow @${a.uniqueId}` : 'Follow this account';
+}
+
+/** The video's likes and comments beside it (an item without the count shows no row). */
+function syncStats(entry: Entry): void {
+  const { likes, comments } = entry.item.stats;
+  el.actLikes.classList.toggle('hidden', likes === undefined);
+  el.actLikesLabel.textContent = likes === undefined ? '' : fmtCount(likes);
+  el.actLikes.title = likes === undefined ? 'Likes' : `${likes.toLocaleString()} likes`;
+  el.actComments.classList.toggle('hidden', comments === undefined);
+  el.actCommentsLabel.textContent = comments === undefined ? '' : fmtCount(comments);
+  el.actComments.title = comments === undefined ? 'Comments' : `${comments.toLocaleString()} comments`;
 }
 
 function setActive(idx: number): void {

@@ -89,12 +89,16 @@ public sealed class MirrorStatus
     public int Height { get; set; }
     public int Rotation { get; set; }
     public string Relay { get; set; } = "off"; // off | connecting | open | idle | closed
+    /// <summary>Why the server link is not open (empty while it is, or has never failed)</summary>
+    public string RelayError { get; set; } = "";
     public int Watchers { get; set; }
     public int LocalClients { get; set; }
     public List<string> LocalAddresses { get; set; } = new();
 
     public bool Fresh => (DateTime.UtcNow - UpdatedAt).TotalSeconds < 5;
     public bool Live => State == "live" && Fresh;
+    /// <summary>Written in the last minutes: what it says is about this outing, not an old one</summary>
+    public bool Recent => (DateTime.UtcNow - UpdatedAt).TotalMinutes < 10;
 
     static string? FilePath
     {
@@ -125,6 +129,7 @@ public sealed class MirrorStatus
                 w.WriteNumber("height", Height);
                 w.WriteNumber("rotation", Rotation);
                 w.WriteString("relay", Relay);
+                w.WriteString("relayError", RelayError);
                 w.WriteNumber("watchers", Watchers);
                 w.WriteNumber("localClients", LocalClients);
                 w.WriteStartArray("localAddresses");
@@ -162,6 +167,7 @@ public sealed class MirrorStatus
                 Height = r.GetProperty("height").GetInt32(),
                 Rotation = r.GetProperty("rotation").GetInt32(),
                 Relay = r.GetProperty("relay").GetString() ?? "off",
+                RelayError = r.TryGetProperty("relayError", out var re) ? re.GetString() ?? "" : "",
                 Watchers = r.GetProperty("watchers").GetInt32(),
                 LocalClients = r.GetProperty("localClients").GetInt32(),
             };

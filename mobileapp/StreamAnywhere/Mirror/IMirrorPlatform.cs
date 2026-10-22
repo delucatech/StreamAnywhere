@@ -11,13 +11,15 @@ public sealed record MirrorSettingsView(string ServerUrl, string DeviceName, str
 }
 
 /// <summary>Fresh = written in the last seconds (the extension is running); Live = fresh and mirroring.</summary>
-public sealed record MirrorStatusView(string State, string Message, int Kbps, int Width, int Height, int Rotation, string Relay, int Watchers, int LocalClients, bool Fresh, bool Live);
+public sealed record MirrorStatusView(string State, string Message, int Kbps, int Width, int Height, int Rotation, string Relay, string RelayError, int Watchers, int LocalClients, bool Fresh, bool Live, bool Recent);
 
 public interface IMirrorPlatform
 {
     bool Supported { get; }
     /// <summary>The bundle id of the broadcast extension (the start button is pointed at it)</summary>
     string ExtensionBundleId { get; }
+    /// <summary>iOS is recording or broadcasting the screen right now (whatever is receiving it)</summary>
+    bool ScreenCaptured { get; }
     MirrorSettingsView Load();
     void Save(MirrorSettingsView s);
     /// <summary>Opens the camera on a QR scanner; the text of the first code seen, or null when the user cancelled.</summary>
@@ -43,6 +45,7 @@ public sealed class MirrorPlatformStub : IMirrorPlatform
     MirrorSettingsView settings = new("https://teslavplayer.duckdns.org", "Phone", "", false, "Balanced", 30, true, false, true);
     public bool Supported => false;
     public string ExtensionBundleId => "";
+    public bool ScreenCaptured => false;
     public MirrorSettingsView Load() => settings;
     public void Save(MirrorSettingsView s) => settings = s;
     public Task<string?> ScanPairingCodeAsync() => Task.FromResult<string?>(null);

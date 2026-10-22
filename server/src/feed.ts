@@ -18,7 +18,7 @@
  * Both produce FeedItem[] through itemToFeedItem(), which mirrors the resolver's format list so the
  * feed UI and the lab player share the direct-vs-proxy logic.
  */
-import type { CodecFamily, FeedItem, MediaFormat } from '../../shared/types';
+import type { CodecFamily, FeedItem, FollowState, MediaFormat } from '../../shared/types';
 import { jarHeader, newJar, openUpstream, readBody, type CookieJar } from './http';
 import { defaultExpiry, registerMedia } from './mediaStore';
 import { tiktokAllowlist } from './tiktok';
@@ -84,6 +84,22 @@ export function isTikTokAd(item: any): boolean {
   return item.isAd === true || item.isSponsored === true || (item.adInfo && typeof item.adInfo === 'object' && Object.keys(item.adInfo).length > 0);
 }
 
+/** TikTok's `relation` of an author / user to the signed-in account (0 none, 1 following, 2 friends, 4 requested). */
+export function relationToState(rel: unknown): FollowState {
+  switch (Number(rel)) {
+    case 0:
+      return 'none';
+    case 1:
+      return 'following';
+    case 2:
+      return 'friends';
+    case 4:
+      return 'requested';
+    default:
+      return 'unknown';
+  }
+}
+
 export function itemToFeedItem(item: any, upstream?: UpstreamSession, opts: { allowUnplayable?: boolean } = {}): FeedItem | undefined {
   const video = item?.video;
   if (!item?.id || !video) return undefined;
@@ -142,7 +158,7 @@ export function itemToFeedItem(item: any, upstream?: UpstreamSession, opts: { al
   return {
     id: String(item.id),
     canonicalUrl: `https://www.tiktok.com/@${uniqueId || '_'}/video/${item.id}`,
-    author: { id: author.id, uniqueId, nickname: author.nickname, avatar: author.avatarThumb || author.avatarMedium },
+    author: { id: author.id, uniqueId, nickname: author.nickname, avatar: author.avatarThumb || author.avatarMedium, followState: author.relation !== undefined ? relationToState(author.relation) : undefined },
     desc: typeof item.desc === 'string' ? item.desc : undefined,
     createTime: num(item.createTime),
     duration: num(video.duration),

@@ -154,6 +154,8 @@ export interface FeedAuthor {
   uniqueId?: string;
   nickname?: string;
   avatar?: string;
+  /** Whether the signed-in account follows this one, when the source says (TikTok items carry `relation`) */
+  followState?: FollowState;
 }
 
 export interface FeedStats {

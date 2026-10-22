@@ -10,6 +10,10 @@ public sealed class MirrorPlatform : IMirrorPlatform
 {
     public bool Supported => true;
     public string ExtensionBundleId => MirrorSettings.BroadcastExtensionBundleId;
+    // deprecated on iOS 17 for UITraitCollection.SceneCaptureState, which needs a window; this still answers
+#pragma warning disable CA1422
+    public bool ScreenCaptured => UIKit.UIScreen.MainScreen.Captured;
+#pragma warning restore CA1422
     public int LocalPagePort => MirrorProtocol.LocalPagePort;
 
     static MirrorSettingsView View(MirrorSettings s) => new(s.ServerUrl, s.DeviceName, s.Room, s.SignedIn, s.Quality.ToString(), s.Fps, s.Audio, s.Microphone, s.UseServer);
@@ -97,7 +101,7 @@ public sealed class MirrorPlatform : IMirrorPlatform
     public MirrorStatusView? Status()
     {
         var st = MirrorStatus.Read();
-        return st == null ? null : new MirrorStatusView(st.State, st.Message, st.Kbps, st.Width, st.Height, st.Rotation, st.Relay, st.Watchers, st.LocalClients, st.Fresh, st.Live);
+        return st == null ? null : new MirrorStatusView(st.State, st.Message, st.Kbps, st.Width, st.Height, st.Rotation, st.Relay, st.RelayError, st.Watchers, st.LocalClients, st.Fresh, st.Live, st.Recent);
     }
 
     public IReadOnlyList<string> LocalAddresses() => Mirror.LocalAddresses.IPv4();

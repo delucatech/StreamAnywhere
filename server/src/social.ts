@@ -28,7 +28,7 @@
  */
 import type { Page } from 'puppeteer-core';
 import type { ChatMessage, Conversation, ConversationResponse, FeedItem, FollowResponse, FollowState, InboxResponse, ProfileResponse, SearchResponse, SendMessageResponse, UserSummary } from '../../shared/types';
-import { itemToFeedItem } from './feed';
+import { itemToFeedItem, relationToState } from './feed';
 import { isLoggedIn, pageCookieHeader, resetWorkPage, withWorkPage } from './session';
 import { ytdlpInfo } from './ytdlp';
 
@@ -75,21 +75,6 @@ function installCapture(page: Page): void {
       })
       .catch(() => undefined);
   });
-}
-
-function relationToState(rel: unknown): FollowState {
-  switch (Number(rel)) {
-    case 0:
-      return 'none';
-    case 1:
-      return 'following';
-    case 2:
-      return 'friends';
-    case 4:
-      return 'requested';
-    default:
-      return 'unknown';
-  }
 }
 
 function userFromDetail(json: any): UserSummary | undefined {

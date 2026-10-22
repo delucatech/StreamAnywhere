@@ -39,6 +39,10 @@ public sealed class RelayClient
     /// <summary>A control message (the "t" and the whole element)</summary>
     public Action<string, System.Text.Json.JsonElement>? OnControl;
     public Action? OnNeedKey;
+    /// <summary>Why the last connection attempt failed (shown on the phone: a 401 is "paired with another server", a 404 "no such room")</summary>
+    public Action<string>? OnError;
+    /// <summary>The last failure, kept for the status file</summary>
+    public string LastError { get; private set; } = "";
 
     const int HighWater = 2 * 1024 * 1024;
     const int LowWater = 256 * 1024;
@@ -70,10 +74,10 @@ public sealed class RelayClient
         {
             await socket.ConnectAsync(url, c.Token);
         }
-        catch (Exception)
+        catch (Exception e)
         {
             socket.Dispose();
-            Dropped();
+            Dropped(Describe(e));
             return;
         }
         queue.Post(() =>
@@ -83,6 +87,7 @@ public sealed class RelayClient
             reconnectDelayMs = 1000;
             PendingBytes = 0;
             skipping = false;
+            LastError = "";
             State = LinkState.Open;
         });
         // drain the outbox from the channel's queue: the frames went in on the broadcaster's queue
@@ -107,6 +112,7 @@ public sealed class RelayClient
             }
         });
         var buf = new byte[64 * 1024];
+        string? why = null;
         try
         {
             while (socket.State == WebSocketState.Open)
@@ -119,7 +125,12 @@ public sealed class RelayClient
                     if (r.MessageType == WebSocketMessageType.Close) break;
                     ms.Write(buf, 0, r.Count);
                 } while (!r.EndOfMessage);
-                if (r.MessageType == WebSocketMessageType.Close) break;
+                if (r.MessageType == WebSocketMessageType.Close)
+                {
+                    // the server closed us on purpose (4000 = another sender took the room over)
+                    why = socket.CloseStatusDescription is { Length: > 0 } d ? $"the server closed the link: {d}" : null;
+                    break;
+                }
                 if (r.MessageType == WebSocketMessageType.Text)
                 {
                     var text = Encoding.UTF8.GetString(ms.ToArray());
@@ -128,22 +139,45 @@ public sealed class RelayClient
                 }
             }
         }
-        catch
+        catch (Exception e)
         {
-            /* dropped */
+            if (!closed) why = Describe(e);
         }
         c.Cancel();
         await Task.WhenAny(writer, Task.Delay(500));
         socket.Dispose();
-        Dropped();
+        Dropped(why);
     }
 
-    void Dropped()
+    /// <summary>A failed connection in the words the phone shows: the HTTP answer when the server refused the upgrade.</summary>
+    static string Describe(Exception e)
+    {
+        var m = e is WebSocketException && e.InnerException != null ? e.InnerException.Message : e.Message;
+        var status = System.Text.RegularExpressions.Regex.Match(m, @"status code '?(\d{3})");
+        if (status.Success)
+        {
+            return status.Groups[1].Value switch
+            {
+                "401" => "the server does not accept this phone's sign-in (401): pair with the Tesla again",
+                "404" => "the server has no such room (404): pair with the Tesla again",
+                "503" => "the server is full (503)",
+                var s => $"the server answered {s}",
+            };
+        }
+        return m.Length > 140 ? m[..140] : m;
+    }
+
+    void Dropped(string? why)
     {
         queue.Post(() =>
         {
             ws = null;
             cts = null;
+            if (why != null)
+            {
+                LastError = why;
+                OnError?.Invoke(why);
+            }
             State = LinkState.Closed;
             // frames queued for a dead socket are forgotten
             while (outbox.Reader.TryRead(out _)) { }

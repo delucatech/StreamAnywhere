@@ -407,6 +407,14 @@
   height: 52px;
   background: rgba(255, 255, 255, 0.08);
 }
+.wide .act-follow {
+  top: 46px;
+  filter: none;
+}
+/* the Up next panel's switch is the auto-scroll control here; the column's button would say the same twice */
+.wide #actAuto {
+  display: none;
+}
 /* a switched-on action (Auto, a speed other than 1×) keeps the accent here too: this rule comes after
    the one above, which used to win over feed.css's .act.on */
 .wide .act.on .ico,

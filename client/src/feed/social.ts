@@ -28,6 +28,8 @@ export interface SocialHost {
   onPanelsChange(open: boolean): void;
   /** Which platform the panels search and browse (follow / messages exist on TikTok only) */
   platform: PlatformDef;
+  /** The signed-in account's follow state of an account became known (a profile opened, a follow pressed) */
+  onFollowState?(user: string, state: FollowState): void;
 }
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
@@ -541,6 +543,7 @@ async function loadProfile(more: boolean): Promise<void> {
     profile.offset = r.offset + r.items.length;
     profile.hasMore = r.hasMore;
     renderProfileHead();
+    if (r.user.followState && r.user.followState !== 'unknown') host.onFollowState?.(r.user.uniqueId, r.user.followState);
     const base = profile.items.length;
     const fresh = r.items.filter((it) => !profile.items.some((x) => x.id === it.id));
     profile.items.push(...fresh);
@@ -580,6 +583,7 @@ el.profileFollow.addEventListener('click', () => {
         const r = await api.follow({ user: u.uniqueId, follow: !followed });
         u.followState = r.followState;
         renderProfileHead();
+        host.onFollowState?.(u.uniqueId, r.followState);
         host.toast(r.followState === 'none' ? `Unfollowed @${u.uniqueId}` : `${followLabel(r.followState)} @${u.uniqueId}`);
         for (const w of r.warnings) console.warn('[follow]', w);
       } catch (e) {

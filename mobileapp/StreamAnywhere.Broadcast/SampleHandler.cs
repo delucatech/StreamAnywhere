@@ -19,13 +19,24 @@ public class SampleHandler : RPBroadcastSampleHandler
 
     public override void BroadcastStarted(NSDictionary<NSString, NSObject>? setupInfo)
     {
-        microphone = MirrorSettings.Load().Microphone;
-        broadcaster.OnFatal = message =>
+        // Anything that goes wrong here must reach the app's screen (the extension has no UI of its own):
+        // the status file says what happened, and iOS gets the message with the failed broadcast.
+        try
         {
-            var error = new NSError(new NSString("com.delucatech.streamanywhere"), 1, new NSDictionary(NSError.LocalizedDescriptionKey, new NSString(message)));
+            microphone = MirrorSettings.Load().Microphone;
+            broadcaster.OnFatal = message =>
+            {
+                var error = new NSError(new NSString("com.delucatech.streamanywhere"), 1, new NSDictionary(NSError.LocalizedDescriptionKey, new NSString(message)));
+                FinishBroadcast(error);
+            };
+            broadcaster.Start();
+        }
+        catch (Exception e)
+        {
+            new MirrorStatus { State = "error", Message = "The broadcast could not start: " + e.Message }.Write();
+            var error = new NSError(new NSString("com.delucatech.streamanywhere"), 2, new NSDictionary(NSError.LocalizedDescriptionKey, new NSString(e.Message)));
             FinishBroadcast(error);
-        };
-        broadcaster.Start();
+        }
     }
 
     public override void BroadcastPaused() => paused = true;

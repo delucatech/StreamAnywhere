@@ -1124,6 +1124,53 @@ button {
 .act .ico.avatar img:not([src]) {
   display: none;
 }
+/* the follow "+" sits on the avatar's lower edge (the @name moves down to make room for it) */
+.act-author {
+  position: relative;
+  display: grid;
+  justify-items: center;
+}
+.act-author .act small {
+  margin-top: 8px;
+}
+.act-follow {
+  position: absolute;
+  left: 50%;
+  top: 40px;
+  transform: translateX(-50%);
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font: 700 19px/22px system-ui, sans-serif;
+  cursor: pointer;
+  z-index: 1;
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.9));
+}
+.act-follow:hover {
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.9)) brightness(1.15);
+}
+.act-follow.busy {
+  opacity: 0.6;
+  cursor: default;
+}
+.act-follow.hidden {
+  display: none;
+}
+/* the counts: nothing to press */
+.act.stat {
+  cursor: default;
+}
+.act.stat .ico svg {
+  width: 26px;
+  height: 26px;
+}
+.act.stat.hidden {
+  display: none;
+}
 
 /* ---------- panels: search, profile, inbox ---------- */
 .panel {

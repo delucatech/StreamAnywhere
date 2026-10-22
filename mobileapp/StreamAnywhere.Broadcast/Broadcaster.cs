@@ -73,36 +73,55 @@ public sealed class Broadcaster
             }
         }
 
-        var l = new LocalServer(queue) { Name = settings.DeviceName };
-        l.OnNeedKey = () => forceKey = true;
-        l.OnClientJoined = () =>
-        {
-            if (configData != null) local?.Broadcast(configData);
-            forceKey = true;
-        };
-        l.OnClientsChanged = n => status.LocalClients = n;
-        l.OnLog = Log;
-        l.Start();
-        local = l;
-
+        // The server link first: it is the way the Tesla usually watches, and nothing the hotspot server
+        // does (or fails to do) may keep it from connecting.
         if (settings.UseServer && settings.Server is { } server)
         {
+            if (settings.Cookie.Length == 0) status.RelayError = "not signed in to the server: pair with the Tesla first";
             var r = new RelayClient(server, settings.Room, settings.DeviceName, settings.Cookie, queue);
             r.OnState = st =>
             {
                 status.Relay = st == RelayClient.LinkState.Open && !relayDemand ? "idle" : st.ToString().ToLowerInvariant();
                 if (st == RelayClient.LinkState.Open)
                 {
+                    status.RelayError = "";
                     if (configData != null) r.SendConfig(configData);
                     forceKey = true;
                 }
+                status.Write();
             };
             r.OnNeedKey = () => forceKey = true;
             r.OnControl = HandleRelayControl;
+            r.OnError = why =>
+            {
+                status.RelayError = why;
+                Console.WriteLine("[Mirror] relay: " + why);
+                status.Write();
+            };
             r.Connect();
             relay = r;
         }
         else status.Relay = "off";
+
+        // the hotspot page and its WebSocket; a port in use or a refused listener is a note, not the end
+        try
+        {
+            var l = new LocalServer(queue) { Name = settings.DeviceName };
+            l.OnNeedKey = () => forceKey = true;
+            l.OnClientJoined = () =>
+            {
+                if (configData != null) local?.Broadcast(configData);
+                forceKey = true;
+            };
+            l.OnClientsChanged = n => status.LocalClients = n;
+            l.OnLog = Log;
+            l.Start();
+            local = l;
+        }
+        catch (Exception e)
+        {
+            Log("hotspot server: " + e.Message);
+        }
 
         statusTimer = new Timer(_ => queue.Post(TickStatus), null, 1000, 1000);
         if (aac != null) silenceTimer = new Timer(_ => queue.Post(TickSilence), null, 50, 50);
@@ -110,10 +129,20 @@ public sealed class Broadcaster
         status.Write();
     }
 
+    /// <summary>The broadcast cannot go on: the status says why (the app shows it), then iOS is told.</summary>
+    void Fatal(string message)
+    {
+        status.State = "error";
+        status.Message = message;
+        status.Write();
+        OnFatal?.Invoke(message);
+    }
+
     public void Stop()
     {
         queue.Run(() =>
         {
+            if (stopped) return;
             stopped = true;
             statusTimer?.Dispose();
             silenceTimer?.Dispose();
@@ -123,8 +152,12 @@ public sealed class Broadcaster
             encoder = null;
             aac?.Dispose();
             aac = null;
-            status.State = "stopped";
-            status.Message = "";
+            // an error stays on the status for the app to show; a plain stop clears the notes
+            if (status.State != "error")
+            {
+                status.State = "stopped";
+                status.Message = "";
+            }
             status.Write();
         });
         queue.Stop();
@@ -246,7 +279,7 @@ public sealed class Broadcaster
             }
             catch (Exception ex)
             {
-                OnFatal?.Invoke("The video encoder could not be started: " + ex.Message);
+                Fatal("The video encoder could not be started: " + ex.Message);
                 return;
             }
             forceKey = true;
