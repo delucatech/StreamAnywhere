@@ -29,6 +29,12 @@
 		     MonoTouchDebugConfiguration.txt) - a wait that can look exactly like an extension that never
 		     starts - and costs memory the 50 MB limit does not allow. Console output is enough here. -->
 		<MtouchDebug>false</MtouchDebug>
+		<!-- The classic static registrar. The SDK's default on a device is the managed static registrar,
+		     whose ObjC stubs call managed code through function pointers looked up at run time; in this
+		     extension that lookup came back null and iOS's very first call, -[SampleHandler init], jumped
+		     to address 0 (EXC_BAD_ACCESS, CODESIGNING "Invalid Page", 2 s after launch, with or without a
+		     debugger: crash logs of 2026-10-22). The static registrar binds each method at build time. -->
+		<Registrar>static</Registrar>
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 		<!-- Restore runs this project on its own, with no RuntimeIdentifier, and must cover every RID the app can
 		     ask for: Visual Studio builds the app with RuntimeIdentifier=iossimulator-arm64 or ios-arm64 as a

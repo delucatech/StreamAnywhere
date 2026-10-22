@@ -89,10 +89,29 @@ public partial class MirrorPage : ContentPage
             : settings.SignedIn ? $"Signed in to {settings.ServerHost}; no room from the car yet."
             : "Not paired: scan the code on the Tesla, or sign in below.";
         RoomLabel.Text = RoomCode.IsValid(settings.Room) ? $"Code  {settings.Room}" : "No code yet";
-        var addresses = platform.LocalAddresses();
-        LocalCard.IsVisible = addresses.Count > 0 && platform.Supported;
-        LocalLabel.Text = addresses.Count == 0 ? "" : "Open " + string.Join(" or ", addresses.Select(a => $"http://{a}:{platform.LocalPagePort}/")) + " in the car's browser: no internet needed, the picture never leaves the hotspot.";
+        _ = ShowLocalAddressesAsync();
         loading = false;
+    }
+
+    /// <summary>
+    /// The phone's addresses, off the UI thread: listing the interfaces throws inside .NET on this iOS
+    /// (caught in LocalAddresses.IPv4), and a debugger that stops on the throw during the page's
+    /// construction kept the app past the launch watchdog (killed twice on 2026-10-22).
+    /// </summary>
+    async Task ShowLocalAddressesAsync()
+    {
+        if (!platform.Supported) return;
+        IReadOnlyList<string> addresses;
+        try
+        {
+            addresses = await Task.Run(() => platform.LocalAddresses());
+        }
+        catch
+        {
+            return;
+        }
+        LocalCard.IsVisible = addresses.Count > 0;
+        LocalLabel.Text = addresses.Count == 0 ? "" : "Open " + string.Join(" or ", addresses.Select(a => $"http://{a}:{platform.LocalPagePort}/")) + " in the car's browser: no internet needed, the picture never leaves the hotspot.";
     }
 
     static void Segment(Button b, bool on)
