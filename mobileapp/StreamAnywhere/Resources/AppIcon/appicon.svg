@@ -1,4 +1,14 @@
-<?xml version="1.0" encoding="UTF-8" standalone="no"?>
-<svg width="456" height="456" viewBox="0 0 456 456" version="1.1" xmlns="http://www.w3.org/2000/svg">
-    <rect x="0" y="0" width="456" height="456" fill="#0b0d12" />
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The app icon's background: the web app's mark (client/public/icon.svg) at the MAUI icon size.
+     No rounded corners here: iOS and Android cut their own. The play mark is the foreground (appiconfg.svg). -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 456 456" width="456" height="456">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2a3d8f"/>
+      <stop offset="1" stop-color="#0b1020"/>
+    </linearGradient>
+  </defs>
+  <rect width="456" height="456" fill="url(#g)"/>
+  <circle cx="147" cy="324" r="101" fill="#fe2c55" opacity="0.55"/>
+  <circle cx="324" cy="132" r="91" fill="#25f4ee" opacity="0.35"/>
 </svg>
