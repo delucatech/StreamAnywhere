@@ -26,6 +26,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { Reservoir, expiredSoon } from '../reservoir';
 import { lastFeedDir, rememberBatch, resetLastBatches, STALE_BATCH, staleBatch } from '../lastBatch';
+import { invalidateJobs, jobsDir, resetJobs, sharedJob } from '../jobs';
 import { buildOptions, downloadSourceOf, saveName } from '../downloader';
 import { canonicalize, normalizeUrl } from '../library';
 import type { FeedItem } from '../../../shared/types';
@@ -40,6 +41,7 @@ const skipNetwork = process.env.SKIP_NETWORK === '1';
 // The last good batches of a server running on this machine must not leak into these checks
 // (their proxy links belong to that process); the tests keep their own, empty, folder.
 process.env.LAST_FEED_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'streamanywhere-last-feed-'));
+process.env.JOBS_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'streamanywhere-jobs-'));
 
 let failures = 0;
 function check(name: string, cond: boolean, detail?: unknown): void {
@@ -124,6 +126,7 @@ async function offline(): Promise<void> {
 
   console.log('\n== 4. feed reservoir (offline)');
   await reservoirChecks();
+  await jobChecks();
 
   console.log('\n== 5. YouTube (offline)');
   check('youtube urls recognised', isYouTubeUrl('https://www.youtube.com/watch?v=dQw4w9WgXcQ') && isYouTubeUrl('https://youtu.be/dQw4w9WgXcQ') && isYouTubeUrl('https://m.youtube.com/shorts/4wVIjM5Jczs') && !isYouTubeUrl('https://www.tiktok.com/@x/video/1'));
@@ -393,6 +396,59 @@ async function downloaderChecks(): Promise<void> {
   check('a youtube channel link is not a video', /not a YouTube video/.test(notVideo), notVideo);
 }
 
+async function jobChecks(): Promise<void> {
+  console.log('\n== 2c. Shared jobs (work that outlives its request; kept answers)');
+  resetJobs();
+  let runs = 0;
+  let release: (() => void) | undefined;
+  const slowWork = () =>
+    new Promise<{ items: FeedItem[]; n: number }>((res) => {
+      runs++;
+      release = () => res({ items: [fakeItem('j' + runs)], n: runs });
+    });
+  const opts = { freshMs: 50, keepMs: 10_000, persist: true, revive: (v: { items: FeedItem[]; n: number }, age: number) => ({ ...v, age }) };
+  const first = sharedJob('test|job', slowWork, opts);
+  const second = sharedJob('test|job', slowWork, opts); // the same request again, while the first runs (a retry after a dropped connection)
+  await new Promise((r) => setTimeout(r, 10));
+  check('an identical request joins the running job instead of starting another', runs === 1, { runs });
+  release!();
+  const [a, b] = await Promise.all([first, second]);
+  check('both requests get the same answer', a.n === 1 && b.n === 1, { a: a.n, b: b.n });
+  const kept = await sharedJob('test|job', slowWork, opts);
+  check('a fresh kept answer is served without running the job', kept.n === 1 && runs === 1, { runs });
+  await new Promise((r) => setTimeout(r, 70));
+  const stale = await sharedJob('test|job', slowWork, opts);
+  check('an older kept answer is served at once, with its age', stale.n === 1 && (stale as { age?: number }).age! >= 50, { age: (stale as { age?: number }).age });
+  await new Promise((r) => setTimeout(r, 20));
+  check('…and the job runs again in the background', runs === 2, { runs });
+  release!();
+  await new Promise((r) => setTimeout(r, 20));
+  const refreshed = await sharedJob('test|job', slowWork, opts);
+  check('the next request gets the refreshed answer', refreshed.n === 2, { n: refreshed.n });
+  await new Promise((r) => setTimeout(r, 120)); // the file write
+  const files = fs.readdirSync(jobsDir());
+  check('a persisted answer is on disk', files.some((f) => f.startsWith('test_job-')), { files });
+  resetJobs();
+  const fromDisk = await sharedJob('test|job', slowWork, { ...opts, freshMs: 60_000 });
+  check('after a restart the kept answer is read back from disk', fromDisk.n === 2 && runs === 2, { n: fromDisk.n, runs });
+  invalidateJobs('test|');
+  check('invalidate forgets it in memory and on disk', !fs.readdirSync(jobsDir()).some((f) => f.startsWith('test_job-')));
+  const after = sharedJob('test|job', slowWork, opts);
+  await new Promise((r) => setTimeout(r, 10));
+  check('…so the next request runs the job', runs === 3, { runs });
+  release!();
+  await after;
+  let failing = 0;
+  const failWork = () => {
+    failing++;
+    return Promise.reject(new Error('no'));
+  };
+  const err = await sharedJob('test|fail', failWork, opts).then(() => '', (e) => (e as Error).message);
+  const err2 = await sharedJob('test|fail', failWork, opts).then(() => '', (e) => (e as Error).message);
+  check('a failure is not kept: the next request runs the job again', err === 'no' && err2 === 'no' && failing === 2, { failing });
+  resetJobs();
+}
+
 async function reservoirChecks(): Promise<void> {
   let now = 1_000_000;
   const clock = () => now;
@@ -487,6 +543,13 @@ async function reservoirChecks(): Promise<void> {
     const readyBefore = slow.ready;
     const cheap = slow.takeCheap(3);
     check('a prefetch takes from the stock without starting anything', !!cheap && cheap.items.length === 3 && cheap.fromStock && slow.ready === readyBefore - 3, { got: cheap?.items.length, readyBefore, ready: slow.ready });
+    // An answer that never reached the viewer: its videos go back to the front of the stock.
+    slow.putBack(cheap!.items);
+    const backAgain = slow.takeCheap(3);
+    check('videos of an undelivered answer are back at the front of the stock', slow.ready === readyBefore - 3 && !!backAgain && backAgain.items.map((i) => i.id).join() === cheap!.items.map((i) => i.id).join(), { ready: slow.ready, ids: backAgain?.items.map((i) => i.id) });
+    slow.putBack(backAgain!.items);
+    slow.putBack(backAgain!.items);
+    check('putting the same videos back twice does not double them', slow.ready === readyBefore, { ready: slow.ready, readyBefore });
     // The home screen: a known feed with a low stock is topped up in the background; a full one is left alone.
     while (slow.ready > 0) await slow.take(10);
     const callsBeforeWarm = calls;

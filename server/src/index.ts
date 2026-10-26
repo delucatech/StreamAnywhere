@@ -18,9 +18,10 @@ import { logStream, recentLog } from './logbuf';
 import { defaultExpiry, mediaCount, registerMedia } from './mediaStore';
 import { hostAllowed } from './ssrf';
 import { EXPLORE_DEFAULT_CATEGORY, FeedError, fetchExploreFeed, normalizeExploreOptions, type ExploreResult } from './feed';
-import { cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouCheap, forYouStock, forYouWarm, logout, rememberLog, workState, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
+import { cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouCheap, forYouPutBack, forYouStock, forYouWarm, logout, rememberLog, workState, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
 import { Reservoir, type ReservoirStats } from './reservoir';
-import { slimItems } from './lastBatch';
+import { reviveItems, slimItems } from './lastBatch';
+import { invalidateJobs, jobStats, sharedJob } from './jobs';
 import { getProgress } from './progress';
 import { conversation, fetchProfile, followUser, inbox, inboxDebug, searchTikTok, sendMessage, SocialError } from './social';
 import { channelVideos, exploreYouTube, isYouTubeUrl, recommendedYouTube, resolveYouTube, searchYouTube, youTubeCategory, YouTubeError } from './youtube';
@@ -263,6 +264,7 @@ export async function buildServer() {
   // Public-deployment protection: per-IP limits on the endpoints that cause upstream traffic.
   await app.register(rateLimit, { global: false, timeWindow: '1 minute', max: config.rateLimit.mediaPerMinute });
   const resolveLimit = { config: { rateLimit: { max: config.rateLimit.resolvePerMinute, timeWindow: '1 minute' } } };
+  const jobsLog = (m: string) => app.log.info({ what: 'jobs' }, m);
 
   // Site password: everything below (pages, API, media) needs the login cookie.
   registerAuth(app);
@@ -369,31 +371,42 @@ export async function buildServer() {
       return resp;
     }
 
-    const attempts: ResolveResponse['attempts'] = [];
+    // One job per video (jobs.ts): the request sent again after a dropped connection joins the
+    // running one or gets the kept answer; a resolve is kept for 5 min, then redone on demand.
     const order: ('native' | 'ytdlp')[] = config.resolver === 'native' ? ['native'] : config.resolver === 'ytdlp' ? ['ytdlp'] : ['native', 'ytdlp'];
-    let lastError: Error | undefined;
-    for (const strategy of order) {
-      const ta = Date.now();
-      try {
-        const result = strategy === 'native' ? await resolveTikTokNative(url, { probeOrigin: origin, probe: body.probe !== false, log }) : await resolveWithYtDlp(url);
-        attempts.push({ resolver: strategy, ok: true, elapsedMs: Date.now() - ta });
-        result.attempts = attempts;
-        result.elapsedMs = Date.now() - t0;
-        req.log.info(
-          { resolver: strategy, id: result.id, formats: result.formats.map((f) => ({ id: f.id, codec: f.codec, direct: f.directKind || 'none', probe: f.serverProbe?.status })) },
-          'tiktok resolved',
-        );
-        return result;
-      } catch (e) {
-        const err = e as Error;
-        lastError = err;
-        attempts.push({ resolver: strategy, ok: false, error: err.message, elapsedMs: Date.now() - ta });
-        req.log.warn({ resolver: strategy, err: err.message }, 'resolver attempt failed');
-        // Do not fall through to yt-dlp for definitive answers (private/not found)
-        if (err instanceof TikTokError && /^tiktok_status_|unsupported_photo|not_tiktok|bad_path/.test(err.code)) break;
+    const work = async (): Promise<ResolveResponse> => {
+      const attempts: ResolveResponse['attempts'] = [];
+      let lastError: Error | undefined;
+      for (const strategy of order) {
+        const ta = Date.now();
+        try {
+          const result = strategy === 'native' ? await resolveTikTokNative(url, { probeOrigin: origin, probe: body.probe !== false, log }) : await resolveWithYtDlp(url);
+          attempts.push({ resolver: strategy, ok: true, elapsedMs: Date.now() - ta });
+          result.attempts = attempts;
+          result.elapsedMs = Date.now() - t0;
+          req.log.info(
+            { resolver: strategy, id: result.id, formats: result.formats.map((f) => ({ id: f.id, codec: f.codec, direct: f.directKind || 'none', probe: f.serverProbe?.status })) },
+            'tiktok resolved',
+          );
+          return result;
+        } catch (e) {
+          const err = e as Error;
+          lastError = err;
+          attempts.push({ resolver: strategy, ok: false, error: err.message, elapsedMs: Date.now() - ta });
+          req.log.warn({ resolver: strategy, err: err.message }, 'resolver attempt failed');
+          // Do not fall through to yt-dlp for definitive answers (private/not found)
+          if (err instanceof TikTokError && /^tiktok_status_|unsupported_photo|not_tiktok|bad_path/.test(err.code)) break;
+        }
       }
+      throw Object.assign(new Error(lastError?.message || 'resolution failed'), { attempts });
+    };
+    try {
+      const result = await sharedJob<ResolveResponse>(`resolve|tiktok|${url}|${body.probe !== false ? 'probe' : 'noprobe'}`, work, { freshMs: 5 * 60_000, keepMs: 30 * 60_000, log: jobsLog });
+      return { ...result, elapsedMs: Date.now() - t0 };
+    } catch (e) {
+      const err = e as Error & { attempts?: ResolveResponse['attempts'] };
+      return reply.code(502).send({ error: err.message, attempts: err.attempts || [], elapsedMs: Date.now() - t0 });
     }
-    return reply.code(502).send({ error: lastError?.message || 'resolution failed', attempts, elapsedMs: Date.now() - t0 });
   });
 
   app.post<{ Body: ProbeRequest }>('/api/probe', resolveLimit, async (req, reply) => {
@@ -442,13 +455,27 @@ export async function buildServer() {
     const t0 = Date.now();
     const log = (msg: string) => app.log.info({ platform, source }, msg);
     const warn = (err: string, msg: string) => app.log.warn({ platform, source, err }, msg);
-    const served = (r: { items: FeedItem[]; warnings: string[]; stale?: boolean; fromStock?: boolean; ready?: number } | undefined, what: string): FeedResponse => {
+    /**
+     * The answer may never reach the viewer (the car's link dropped while the fill ran): the videos
+     * it carried are not lost – `back` puts them at the front of the stock, so the request the
+     * viewer sends when the link is back gets them at once.
+     */
+    const undelivered = (items: FeedItem[], what: string, back: (items: FeedItem[]) => void): void => {
+      const raw = reply.raw;
+      raw.once('close', () => {
+        if (raw.writableFinished) return;
+        log(`${what}: the answer was not delivered (connection closed); ${items.length} videos back in stock`);
+        back(items);
+      });
+    };
+    const served = (r: { items: FeedItem[]; warnings: string[]; stale?: boolean; fromStock?: boolean; ready?: number } | undefined, what: string, back?: (items: FeedItem[]) => void): FeedResponse => {
       if (!r) {
         log(`${what}: nothing handed out (${warm ? 'warm-up' : 'nothing ready for a prefetch'})`);
         return { source, items: [], hasMore: true, warnings: [], elapsedMs: Date.now() - t0 };
       }
       const resp: FeedResponse = { source, items: slimItems(r.items), hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
       log(`${what}: ${r.items.length} served ${r.stale ? 'from the last good batch' : r.fromStock ? 'from stock' : 'after a fill'}${prefetch ? ' (prefetch)' : ''}, ${r.ready ?? 0} ready, ${resp.elapsedMs} ms`);
+      if (back && r.items.length && !r.stale) undelivered(r.items, what, back);
       return resp;
     };
     /**
@@ -480,7 +507,7 @@ export async function buildServer() {
         }
         await ensureInstagramSession();
         if (!instagramSignedIn()) throw new FeedError('Instagram needs a sign-in: open Profile and sign in with the cookies of a signed-in browser.', 'instagram_not_signed_in', 401);
-        return served(await reservoir.take(count, quick), what);
+        return served(await reservoir.take(count, quick), what, (items) => reservoir.putBack(items));
       }
       if (platform === 'facebook') {
         if (source === 'foryou') {
@@ -493,12 +520,12 @@ export async function buildServer() {
           }
           await ensureFacebookSession();
           if (!facebookSignedIn()) throw new FeedError('Not signed in to Facebook: sign in from Profile to see your For You feed.', 'facebook_not_signed_in', 401);
-          return served(await reservoir.take(count, quick), 'facebook foryou');
+          return served(await reservoir.take(count, quick), 'facebook foryou', (items) => reservoir.putBack(items));
         }
         const cat = facebookCategory(b.category);
         const reservoir = facebookReservoir(cat.id, log);
         if (warm || prefetch) return homeScreen(reservoir, `facebook explore ${cat.label}`)!;
-        return served(await reservoir.take(count, quick), `facebook explore ${cat.label}`);
+        return served(await reservoir.take(count, quick), `facebook explore ${cat.label}`, (items) => reservoir.putBack(items));
       }
       if (platform === 'youtube') {
         if (source === 'foryou') {
@@ -508,12 +535,12 @@ export async function buildServer() {
           }
           const reservoir = youtubeForYouReservoir(log);
           if (warm || prefetch) return homeScreen(reservoir, 'youtube foryou')!;
-          return served(await reservoir.take(count, quick), 'youtube foryou');
+          return served(await reservoir.take(count, quick), 'youtube foryou', (items) => reservoir.putBack(items));
         }
         const cat = youTubeCategory(b.category);
         const reservoir = youtubeReservoir(cat.id, log);
         if (warm || prefetch) return homeScreen(reservoir, `youtube explore ${cat.tag}`)!;
-        return served(await reservoir.take(count, quick), `youtube explore ${cat.tag}`);
+        return served(await reservoir.take(count, quick), `youtube explore ${cat.tag}`, (items) => reservoir.putBack(items));
       }
       if (source === 'explore') {
         const category = b.category !== undefined && Number.isInteger(Number(b.category)) ? Number(b.category) : undefined;
@@ -521,7 +548,7 @@ export async function buildServer() {
         const reservoir = exploreReservoir(norm.category, log, warn);
         if (warm || prefetch) return homeScreen(reservoir, `explore ${norm.category}`)!;
         // Served from the stock (filled in the background); only an empty stock waits for TikTok.
-        return served(await reservoir.take(norm.count, quick), `explore ${norm.category}`);
+        return served(await reservoir.take(norm.count, quick), `explore ${norm.category}`, (items) => reservoir.putBack(items));
       }
       if (warm || prefetch) {
         const r = prefetch ? forYouCheap(count) : undefined;
@@ -530,6 +557,7 @@ export async function buildServer() {
       }
       const r = await fetchForYou(count, log, quick);
       const resp: FeedResponse = { source, items: slimItems(r.items), hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
+      if (r.items.length && !r.stale) undelivered(r.items, 'foryou', forYouPutBack);
       return resp;
     } catch (e) {
       const err = e as Error;
@@ -558,22 +586,22 @@ export async function buildServer() {
     if (!/^[\w.\-]{1,64}$/.test(u)) throw new SocialError('That is not a TikTok handle', 400);
     return u;
   };
-  // Search answers and account pages are kept for a few minutes, for every device: they come from a
-  // headless browser on a small machine, and a repeat (the same phrase on the car and the phone,
-  // the next page of the same account) need not run it again. A follow drops the account's entry.
-  const SOCIAL_CACHE_MS = 10 * 60 * 1000;
-  const socialCache = new Map<string, { at: number; value: unknown }>();
-  const cachedSocial = async <T>(key: string, work: () => Promise<T>): Promise<T> => {
-    const hit = socialCache.get(key);
-    if (hit && Date.now() - hit.at < SOCIAL_CACHE_MS) return hit.value as T;
-    const value = await work();
-    socialCache.set(key, { at: Date.now(), value });
-    if (socialCache.size > 300) {
-      const oldest = [...socialCache.entries()].sort((a, b) => a[1].at - b[1].at).slice(0, 100);
-      for (const [k] of oldest) socialCache.delete(k);
-    }
-    return value;
-  };
+  // Search answers and account pages are kept for every device (jobs.ts): a repeat (the same
+  // phrase on the car and the phone, the next page of the same account, the request sent again after
+  // the car's link dropped) is answered at once – from the running job, or from the kept answer.
+  // After SOCIAL_FRESH_MS the kept answer still goes out at once, with `cachedAgeSec`, and the job
+  // runs again in the background; the client asks again a little later for the fresh one. Kept on
+  // disk for a day (expired play URLs are stripped on the way out). A follow drops the account's entry.
+  const SOCIAL_FRESH_MS = 10 * 60 * 1000;
+  const SOCIAL_KEEP_MS = 24 * 60 * 60 * 1000;
+  const cachedSocial = <T extends { items: FeedItem[]; cachedAgeSec?: number }>(key: string, work: () => Promise<T>): Promise<T> =>
+    sharedJob<T>(key, work, {
+      freshMs: SOCIAL_FRESH_MS,
+      keepMs: SOCIAL_KEEP_MS,
+      persist: true,
+      log: jobsLog,
+      revive: (v, age) => ({ ...v, items: reviveItems(v.items, Date.now()), ...(age >= SOCIAL_FRESH_MS ? { cachedAgeSec: Math.round(age / 1000) } : {}) }),
+    });
   app.post<{ Body: SearchRequest }>('/api/search', resolveLimit, async (req, reply) => {
     const t0 = Date.now();
     try {
@@ -630,7 +658,7 @@ export async function buildServer() {
     const t0 = Date.now();
     try {
       const user = handle(req.body?.user);
-      for (const k of socialCache.keys()) if (k.startsWith(`profile|tiktok|${user.toLowerCase()}|`)) socialCache.delete(k);
+      invalidateJobs(`profile|tiktok|${user.toLowerCase()}|`);
       return await followUser(user, req.body?.follow !== false, socialLog('follow'));
     } catch (e) {
       return socialFail(reply, e, t0);
@@ -872,7 +900,7 @@ export async function buildServer() {
     return reply.code(200).headers({ 'content-type': f.mime, 'cache-control': 'public, max-age=31536000, immutable' }).send(fs.createReadStream(f.path));
   });
 
-  app.get('/api/stats', async () => ({ downloads: downloaderStats(), library: libraryStats(), mediaRecords: mediaCount(), exploreStock: exploreStock(), youtubeStock: youtubeStock(), youtubeForYouStock: youtubeForYou?.stats, instagramStock: instagramStock(), instagramForYouStock: instagramForYou?.stats, instagram: instagramStats(), facebookStock: facebookStock(), facebookForYouStock: facebookForYou?.stats, facebook: facebookStats(), forYouStock: forYouStock(), mirror: mirrorStats(), workPage: workState(), uptimeSec: Math.round(process.uptime()) }));
+  app.get('/api/stats', async () => ({ downloads: downloaderStats(), library: libraryStats(), mediaRecords: mediaCount(), exploreStock: exploreStock(), youtubeStock: youtubeStock(), youtubeForYouStock: youtubeForYou?.stats, instagramStock: instagramStock(), instagramForYouStock: instagramForYou?.stats, instagram: instagramStats(), facebookStock: facebookStock(), facebookForYouStock: facebookForYou?.stats, facebook: facebookStats(), forYouStock: forYouStock(), mirror: mirrorStats(), jobs: jobStats(), workPage: workState(), uptimeSec: Math.round(process.uptime()) }));
 
   if (config.serveClient) {
     const dist = findUp(path.join('client', 'dist')) || findUp(path.join('client', 'dist'), process.cwd()) || path.resolve('client', 'dist');

@@ -313,6 +313,31 @@ An expired video is therefore never put on screen (2026-10-26: expired Instagram
 broken images, and each expired item cost a resolve that waited 100 s behind the fill on a starved
 VM). A cover that still fails to load is removed by the player (no broken-image icon).
 
+### A request outlives its connection (`server/src/jobs.ts`)
+
+The car's link drops often (tunnels, parking garages). Nothing the server was asked for is
+cancelled when the request that asked goes away, and every answer is kept for the request that
+comes next:
+
+- **Feeds**: a fill runs in the reservoir, not in the request; its videos land in the stock. An
+  answer that was already taken from the stock but never reached the car (the connection closed
+  before the reply was written) goes **back to the front of the stock**, so the retry gets exactly
+  those videos at once (`Reservoir.putBack`, TikTok For You `forYouPutBack`).
+- **Search, account pages, TikTok resolves** run as *shared jobs*: an identical request while
+  one is running **joins it** (no second browser trip); the answer is **kept** – search and account
+  pages for 24 h on disk (`~/.streamanywhere/jobs/`, so a restart keeps them), resolves 30 min in
+  memory. A kept answer younger than 10 min (resolves: 5 min) is final. An older one still goes out
+  **at once**, marked `cachedAgeSec`, and the job **runs again in the background** (one at a time,
+  2 s apart); the client asks again 20 s later (up to 3 times) and the fresh answer takes over the
+  list, newer videos first. Expired play URLs and covers are stripped from a kept answer on the way
+  out (the video's page gives fresh ones when it is played). Failures are never kept.
+- **The car** retries a search or account page that failed for lack of a connection (not one the
+  platform refused) four times, 3 → 12 s apart, while the panel is open and the query unchanged;
+  the feed already retried. Its own search memory still shows the last results of a phrase
+  instantly while the server is asked.
+
+`/api/stats` → `jobs`: hits, stale answers served, joined requests, runs, background refreshes.
+
 ## Launcher and platforms
 
 **`/`** (`home.html`) is an iPad-style home screen: one icon per platform (TikTok, YouTube, Instagram, Facebook) plus the

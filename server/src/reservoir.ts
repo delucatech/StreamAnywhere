@@ -217,6 +217,19 @@ export class Reservoir {
     return true;
   }
 
+  /**
+   * Items handed out by a take whose answer never reached the viewer (the connection closed before
+   * the reply was written): back at the front of the stock, so the next request gets them at once.
+   */
+  putBack(items: FeedItem[]): void {
+    const now = this.opt.now();
+    const back = items.filter((it) => !expiredSoon(it, now) && !this.stock.some((s) => s.id === it.id));
+    if (!back.length) return;
+    this.stock.unshift(...back);
+    this.opt.log?.(`${this.name}: ${back.length} videos back in stock (their answer was not delivered)`);
+    this.persist();
+  }
+
   /** Forgets the stock (the source changed its mind, e.g. a sign-out). Keeps the recent-id window. */
   clear(): void {
     this.stock = [];

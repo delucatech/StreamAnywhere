@@ -124,6 +124,14 @@ function usableFormat(f: MediaFormat, now: number): MediaFormat | undefined {
   return f.directUrl || f.proxyUrl ? f : undefined;
 }
 
+/**
+ * Kept search results / account pages as they can go out now: expired play URLs and covers
+ * stripped (the item stays – the client gets fresh URLs from the video's page when it comes up).
+ */
+export function reviveItems<T extends FeedItem>(items: T[], now: number): T[] {
+  return items.map((it) => withFreshCover({ ...it, formats: it.formats.map((f) => usableFormat(f, now)).filter((f): f is MediaFormat => Boolean(f)) }, now));
+}
+
 /** Whether this feed has been served before (its last good batch is on disk): a feed somebody uses. */
 export function hasBatch(key: string): boolean {
   return load(key) !== undefined;

@@ -273,6 +273,8 @@ export interface SearchResponse {
   offset: number;
   warnings: string[];
   elapsedMs: number;
+  /** Set when this is an earlier answer (this many seconds old) and the server is fetching a fresh one: ask again in a little while */
+  cachedAgeSec?: number;
 }
 
 export interface ProfileRequest {
@@ -291,6 +293,8 @@ export interface ProfileResponse {
   hasMore: boolean;
   warnings: string[];
   elapsedMs: number;
+  /** As on SearchResponse: an earlier answer, a fresh one is being fetched */
+  cachedAgeSec?: number;
 }
 
 export interface FollowRequest {

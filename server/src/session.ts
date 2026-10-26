@@ -2093,6 +2093,12 @@ export function forYouCheap(count: number): ForYouResult | undefined {
   return stale?.length ? { items: stale, warnings: [], stale: true } : undefined;
 }
 
+/** For You items whose answer never reached the viewer (connection closed first): back at the front of the pending list. */
+export function forYouPutBack(items: FeedItem[]): void {
+  const back = items.filter((it) => !s.pending.some((p) => p.id === it.id));
+  if (back.length) s.pending.unshift(...back);
+}
+
 /**
  * Returns up to `count` not-yet-delivered items from the signed-in For You feed. The background
  * pump keeps the page loading; this waits (at most ~12 s) only when the stock is empty.

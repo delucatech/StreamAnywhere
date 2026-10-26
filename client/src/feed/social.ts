@@ -11,7 +11,7 @@
  * of the recent ones. A phrase searched again shows its earlier results at once and the fresh
  * search runs behind them (a status at the end of the list says so); fresh results then take over.
  */
-import type { ChatMessage, Conversation, FeedItem, FollowState, UserSummary } from '../../../shared/types';
+import type { ChatMessage, Conversation, FeedItem, FollowState, SearchResponse, UserSummary } from '../../../shared/types';
 import { api, ApiError } from '../api';
 import { pressed } from '../busy';
 import type { PlatformDef } from '../platforms';
@@ -394,11 +394,73 @@ export function reopenPlayList(list: PlayList): void {
   else show(el.search); // no focus: that would raise the keyboard on a phone
 }
 
+/**
+ * A request that never reached the server or got no answer (the car's link dropped), as opposed to
+ * the platform refusing: the server goes on with the job and keeps its answer, so asking again a
+ * little later gets it.
+ */
+const connectionLost = (e: unknown): boolean => !(e instanceof ApiError) || e.status === 504;
+const RETRY_MAX = 4;
+const retryDelay = (n: number): number => Math.min(12_000, 3000 * 2 ** (n - 1));
+/** The server answered with an earlier result and is fetching a fresh one: ask again after this long */
+const REASK_MS = 20_000;
+const REASK_MAX = 3;
+let searchRetries = 0;
+let searchRetryTimer = 0;
+let searchReaskTimer = 0;
+const searchOpen = (): boolean => !el.search.classList.contains('hidden');
+
+/** Fresh results take over, in their order; earlier ones the search no longer returns stay at the end. */
+function takeOverSearch(q: string, r: SearchResponse, more: boolean): void {
+  search.offset = r.offset;
+  search.hasMore = r.hasMore;
+  if (!more && search.fromCache) {
+    const earlier = search.items.filter((x) => !r.items.some((it) => it.id === x.id));
+    search.items = [...r.items, ...earlier];
+    search.users = r.users;
+    search.fromCache = false;
+  } else {
+    if (!more) search.users = r.users;
+    search.items.push(...r.items.filter((it) => !search.items.some((x) => x.id === it.id)));
+  }
+  renderResults(q);
+  rememberSearch(q, search.items, search.users, search.offset, search.hasMore);
+  const n = search.items.length;
+  const age = r.cachedAgeSec !== undefined ? ` · the server's answer from ${Math.max(1, Math.round(r.cachedAgeSec / 60))} min ago; fresh results are on their way` : '';
+  status(el.searchStatus, n || search.users.length ? `${countText(n, more ? 0 : search.users.length)} for “${q}”${age}` : `Nothing found for “${q}”${age}`);
+  for (const w of r.warnings) console.warn('[search]', w);
+}
+
+/** The server served an earlier answer and is searching again behind it: the same request a little later brings the fresh one. */
+async function reaskSearch(q: string, attempt: number): Promise<void> {
+  if (search.q !== q || search.busy || !searchOpen()) return;
+  search.busy = true;
+  fresh('Fresh results are on their way…');
+  try {
+    const r = await api.search({ platform: host.platform.id, q, offset: 0 });
+    if (search.q !== q) return;
+    if (r.cachedAgeSec !== undefined) {
+      if (attempt < REASK_MAX) searchReaskTimer = window.setTimeout(() => void reaskSearch(q, attempt + 1), REASK_MS);
+      return;
+    }
+    search.fromCache = true; // the fresh answer takes over, what it no longer lists stays at the end
+    takeOverSearch(q, r, false);
+  } catch (e) {
+    console.warn('[search] the fresh answer did not come:', errMsg(e));
+  } finally {
+    search.busy = false;
+    fresh('');
+  }
+}
+
 async function runSearch(q: string, more: boolean): Promise<void> {
   if (search.busy) return;
   search.busy = true;
   hideHistory();
+  clearTimeout(searchRetryTimer);
+  clearTimeout(searchReaskTimer);
   if (!more) {
+    searchRetries = 0;
     search.q = q;
     search.items = [];
     search.users = [];
@@ -434,26 +496,20 @@ async function runSearch(q: string, more: boolean): Promise<void> {
   try {
     const r = await api.search({ platform: host.platform.id, q, offset: more ? search.offset : 0 });
     if (search.q !== q) return;
-    search.offset = r.offset;
-    search.hasMore = r.hasMore;
-    if (!more && search.fromCache) {
-      // Fresh results take over, in their order; earlier ones the search no longer returns stay at the end.
-      const earlier = search.items.filter((x) => !r.items.some((it) => it.id === x.id));
-      search.items = [...r.items, ...earlier];
-      search.users = r.users;
-      search.fromCache = false;
-    } else {
-      if (!more) search.users = r.users;
-      search.items.push(...r.items.filter((it) => !search.items.some((x) => x.id === it.id)));
-    }
-    renderResults(q);
-    rememberSearch(q, search.items, search.users, search.offset, search.hasMore);
-    const n = search.items.length;
-    status(el.searchStatus, n || search.users.length ? `${countText(n, more ? 0 : search.users.length)} for “${q}”` : `Nothing found for “${q}”`);
-    for (const w of r.warnings) console.warn('[search]', w);
+    searchRetries = 0;
+    takeOverSearch(q, r, more);
+    if (r.cachedAgeSec !== undefined && !more) searchReaskTimer = window.setTimeout(() => void reaskSearch(q, 1), REASK_MS);
   } catch (e) {
     for (const sk of el.searchVideos.querySelectorAll('.skeleton')) sk.remove();
-    if (search.fromCache && !more) status(el.searchStatus, `Showing the earlier results for “${q}” – the fresh search failed: ${errMsg(e)}`, true);
+    if (connectionLost(e) && searchRetries < RETRY_MAX) {
+      // The server keeps searching and keeps the answer: the same request again brings it.
+      searchRetries++;
+      const delay = retryDelay(searchRetries);
+      status(el.searchStatus, `Connection problem (${errMsg(e)}) – the server goes on searching; asking again in ${Math.round(delay / 1000)} s…`, true);
+      searchRetryTimer = window.setTimeout(() => {
+        if (search.q === q && searchOpen()) void runSearch(q, more);
+      }, delay);
+    } else if (search.fromCache && !more) status(el.searchStatus, `Showing the earlier results for “${q}” – the fresh search failed: ${errMsg(e)}`, true);
     else status(el.searchStatus, `Search failed: ${errMsg(e)}`, true);
   } finally {
     search.busy = false;
@@ -531,14 +587,54 @@ export async function openProfile(user: string): Promise<void> {
   await loadProfile(false);
 }
 
+let profileRetries = 0;
+let profileRetryTimer = 0;
+let profileReaskTimer = 0;
+const profileOpen = (): boolean => !el.profile.classList.contains('hidden');
+
+/** The server served the account's earlier page and is loading it again: the fresh page's new videos go to the top. */
+async function reaskProfile(user: string, attempt: number): Promise<void> {
+  if (profile.user !== user || profile.busy || !profileOpen()) return;
+  profile.busy = true;
+  try {
+    const r = await api.profile({ platform: host.platform.id, user, offset: 0, count: 24 });
+    if (profile.user !== user) return;
+    if (r.cachedAgeSec !== undefined) {
+      if (attempt < REASK_MAX) profileReaskTimer = window.setTimeout(() => void reaskProfile(user, attempt + 1), REASK_MS);
+      return;
+    }
+    profile.info = r.user;
+    renderProfileHead();
+    const fresh = r.items.filter((it) => !profile.items.some((x) => x.id === it.id));
+    if (!fresh.length) return;
+    profile.items.unshift(...fresh);
+    const tiles = fresh.map((it, i) =>
+      videoTile(it, () => {
+        closeAllPanels();
+        host.play({ kind: 'profile', user, items: profile.items.slice(), offset: profile.offset, hasMore: profile.hasMore }, i);
+      }),
+    );
+    el.profileVideos.prepend(...tiles);
+  } catch (e) {
+    console.warn('[profile] the fresh page did not come:', errMsg(e));
+  } finally {
+    profile.busy = false;
+  }
+}
+
 async function loadProfile(more: boolean): Promise<void> {
   if (profile.busy) return;
   profile.busy = true;
+  clearTimeout(profileRetryTimer);
+  clearTimeout(profileReaskTimer);
+  if (!more) profileRetries = 0;
   const user = profile.user;
   status(el.profileStatus, more ? 'Loading more videos…' : `Loading @${user}… (the server opens the account page)`);
   try {
     const r = await api.profile({ platform: host.platform.id, user, offset: more ? profile.offset : 0, count: 24 });
     if (profile.user !== user) return;
+    profileRetries = 0;
+    if (r.cachedAgeSec !== undefined && !more) profileReaskTimer = window.setTimeout(() => void reaskProfile(user, 1), REASK_MS);
     profile.info = r.user;
     profile.offset = r.offset + r.items.length;
     profile.hasMore = r.hasMore;
@@ -559,7 +655,14 @@ async function loadProfile(more: boolean): Promise<void> {
     status(el.profileStatus, profile.items.length ? '' : r.warnings[0] || 'No videos to show');
     for (const w of r.warnings) console.warn('[profile]', w);
   } catch (e) {
-    status(el.profileStatus, `Could not load @${user}: ${errMsg(e)}`, true);
+    if (connectionLost(e) && profileRetries < RETRY_MAX) {
+      profileRetries++;
+      const delay = retryDelay(profileRetries);
+      status(el.profileStatus, `Connection problem (${errMsg(e)}) – the server goes on loading @${user}; asking again in ${Math.round(delay / 1000)} s…`, true);
+      profileRetryTimer = window.setTimeout(() => {
+        if (profile.user === user && profileOpen()) void loadProfile(more);
+      }, delay);
+    } else status(el.profileStatus, `Could not load @${user}: ${errMsg(e)}`, true);
   } finally {
     profile.busy = false;
   }
