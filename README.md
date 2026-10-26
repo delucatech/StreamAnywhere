@@ -292,6 +292,27 @@ Everything after sign-in was verified signed-out (TikTok's guest feed: small bat
 then a login wall); the signed-in path uses exactly the same capture. Hosted containers (Render,
 Docker) have no Chrome: the feed page then offers Explore only and says so.
 
+### How long a video stays playable (caches and expiry)
+
+Nothing is kept past its play URL. Every item carries `formats[].expiresAt` read from the CDN URL
+(`expire=` / `x-expires=` on TikTok and YouTube, `oe=` hex seconds on Instagram and Facebook; 6 h
+`mediaTtlMs` when a URL names none) and that decides every cache:
+
+| Where | What | Lifetime |
+|---|---|---|
+| TikTok play URL | `expire=` on primary URLs, hex path segment on tiktokcdn-us | ≈ 48–60 h |
+| YouTube play URL | googlevideo `expire=` | ≈ 6 h |
+| Instagram play URL / cover | `oe=` | ≈ 1 day (covers somewhat longer) |
+| Facebook play URL / cover | `oe=` | ≈ 1 day |
+| Server stock (`~/.streamanywhere/last-feed/<feed>.stock.json`) | the reservoir's ready items, reloaded after a restart | until each item's URL expires (2 min margin); file ignored after 14 days |
+| Server last batch (`<feed>.json`, 30 items) | shown at once to a viewer with an empty screen while the fill runs | **only items whose play URLs are still valid**; a cover whose CDN URL expired is dropped; none left → the request waits for the fill |
+| Car: saved feed (`localStorage`) | the videos around the one in view, restored at boot | 7 days, but **only videos whose URLs are still valid** (unknown expiry: 2 h); none left → a fresh batch is loaded |
+| Car: media cache (IndexedDB) | downloaded bytes of recent videos | 24 h, saved feeds protected, LRU over the budget |
+
+An expired video is therefore never put on screen (2026-10-26: expired Instagram covers showed as
+broken images, and each expired item cost a resolve that waited 100 s behind the fill on a starved
+VM). A cover that still fails to load is removed by the player (no broken-image icon).
+
 ## Launcher and platforms
 
 **`/`** (`home.html`) is an iPad-style home screen: one icon per platform (TikTok, YouTube, Instagram, Facebook) plus the

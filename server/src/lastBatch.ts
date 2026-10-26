@@ -5,8 +5,10 @@
  *
  * Files: ~/.streamanywhere/last-feed/<key>.json (TIKTOK_PROFILE_DIR's parent when that is set),
  * written after a take that handed out fresh items, read once at the first need after a start.
- * Stale items keep their play URLs only while those are valid; the rest are stripped, and the
- * client gets fresh ones from the video's page (FeedResponse.stale).
+ * Only items whose play URLs are still valid go out (a cover whose CDN URL has expired is dropped
+ * too); an item with nothing playable left is skipped, and when none is left the caller waits for
+ * the fill instead – a stale video that still needs a resolve for every play costs more than it saves
+ * (2026-10-26: expired Instagram covers + a 100 s resolve per video on a starved server).
  */
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -23,7 +25,7 @@ export function lastFeedDir(): string {
 const KEEP = 30;
 /** Items handed out per stale answer: few, so the client asks again (and gets fresh ones) soon */
 export const STALE_BATCH = 6;
-/** A batch older than this is not worth showing */
+/** A batch older than this is not worth showing (play URLs expire well before: see usableFormat) */
 const MAX_AGE_MS = 14 * 24 * 3600_000;
 
 interface Stored {
@@ -72,6 +74,41 @@ export function rememberBatch(key: string, items: FeedItem[]): void {
 }
 
 /**
+ * When a CDN URL stops working, in ms since the epoch, or undefined when it carries no expiry:
+ * `oe=<hex seconds>` (Instagram, Facebook), `expire=` / `x-expires=` (TikTok, YouTube, decimal
+ * seconds) and the hex-seconds path segment of tiktokcdn-us.com media URLs.
+ */
+export function urlExpiryMs(url: string | undefined): number | undefined {
+  if (!url) return undefined;
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return undefined;
+  }
+  const oe = u.searchParams.get('oe');
+  if (oe && /^[0-9a-fA-F]{8}$/.test(oe)) return parseInt(oe, 16) * 1000;
+  const dec = u.searchParams.get('expire') || u.searchParams.get('x-expires');
+  if (dec && /^\d{9,11}$/.test(dec)) return Number(dec) * 1000;
+  const seg = u.pathname.split('/')[2];
+  if (seg && /^[0-9a-f]{8}$/.test(seg)) {
+    const t = parseInt(seg, 16);
+    if (t > 1_600_000_000 && t < 4_000_000_000) return t * 1000;
+  }
+  return undefined;
+}
+
+/** The item without a cover whose URL has expired (the client shows its placeholder instead of a broken image). */
+export function withFreshCover<T extends { cover?: string }>(it: T, now: number): T {
+  const exp = urlExpiryMs(it.cover);
+  if (exp !== undefined && exp <= now) {
+    const { cover: _c, ...rest } = it;
+    return rest as T;
+  }
+  return it;
+}
+
+/**
  * A stored format as it can be handed out now: without a play URL that has expired, and without
  * a proxy relay this process no longer knows (the relays live in memory, with the upstream cookies;
  * after a restart they are gone). Undefined when nothing playable is left – the item then goes out
@@ -102,12 +139,17 @@ export function staleBatch(key: string, count = STALE_BATCH): FeedItem[] | undef
   const from = cursor.get(key) || 0;
   if (from >= s.items.length) return undefined;
   const now = Date.now();
-  const items = s.items.slice(from, from + count).map((it) => ({
-    ...it,
-    formats: it.formats.map((f) => usableFormat(f, now)).filter((f): f is MediaFormat => Boolean(f)),
-  }));
-  cursor.set(key, from + items.length);
-  return items;
+  const items: FeedItem[] = [];
+  let at = from;
+  // Expired items (nothing playable left) are skipped, not served: the viewer would wait for a
+  // resolve of each one anyway, behind the fill that is running.
+  for (; at < s.items.length && items.length < count; at++) {
+    const it = s.items[at];
+    const formats = it.formats.map((f) => usableFormat(f, now)).filter((f): f is MediaFormat => Boolean(f));
+    if (formats.length) items.push(withFreshCover({ ...it, formats }, now));
+  }
+  cursor.set(key, at);
+  return items.length ? items : undefined;
 }
 
 // ---- the whole stock of a reservoir, so a restart begins with what was ready (not only the last batch)
@@ -119,7 +161,7 @@ const stockTimers = new Map<string, NodeJS.Timeout>();
 export function loadStock(key: string): FeedItem[] {
   try {
     const raw = JSON.parse(fs.readFileSync(stockFile(key), 'utf8')) as { savedAt: number; items: FeedItem[] };
-    if (raw && Array.isArray(raw.items) && Date.now() - raw.savedAt < MAX_AGE_MS) return raw.items;
+    if (raw && Array.isArray(raw.items) && Date.now() - raw.savedAt < MAX_AGE_MS) return raw.items.map((it) => withFreshCover(it, Date.now()));
   } catch {
     /* none yet */
   }

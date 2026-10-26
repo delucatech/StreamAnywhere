@@ -1444,12 +1444,17 @@ function loadResume(): Resume | undefined {
     const r = JSON.parse(localStorage.getItem(RESUME_KEY) || 'null') as Resume | null;
     if (!r || r.v !== 1 || !Array.isArray(r.items) || !r.items.length || Date.now() - r.savedAt > RESUME_MAX_AGE) return undefined;
     if (r.source !== 'explore' && r.source !== 'foryou') return undefined;
-    // Play URLs that have expired (or may have: no expiry known, saved long ago) are dropped; such a
-    // video gets fresh ones from its page when it comes up (ensureFormats). The others play at once.
+    // Videos whose play URLs have expired (or may have: no expiry known, saved long ago) are left
+    // out: a resolve for each of them would wait behind the server's fill. The others play at once.
     const now = Date.now();
     const old = now - r.savedAt > RESUME_KEEP_URLS;
+    const current = r.items[Math.max(0, Math.min(r.items.length - 1, Number(r.index) || 0))]?.id;
     for (const it of r.items) it.formats = it.formats.filter((f) => (f.expiresAt !== undefined ? f.expiresAt * 1000 > now + 60_000 : !old));
-    r.index = Math.max(0, Math.min(r.items.length - 1, Number(r.index) || 0));
+    const dropped = r.items.length;
+    r.items = r.items.filter((it) => it.formats.length > 0);
+    if (!r.items.length) return undefined;
+    if (dropped > r.items.length) console.info(`[feed] saved feed: ${dropped - r.items.length} video(s) with expired play URLs left out`);
+    r.index = Math.max(0, r.items.findIndex((it) => it.id === current));
     return r;
   } catch {
     return undefined;
@@ -1567,6 +1572,8 @@ function renderQueue(): void {
         thumb.loading = 'lazy';
         thumb.decoding = 'async';
         thumb.draggable = false;
+        // An expired CDN cover: the placeholder, not a broken-image icon
+        thumb.addEventListener('error', () => thumb.replaceWith(Object.assign(document.createElement('span'), { className: 'q-thumb' })), { once: true });
       }
       const text = document.createElement('span');
       text.className = 'q-text';
@@ -1766,6 +1773,7 @@ function makeEntry(item: FeedItem): Entry {
     cover.decoding = 'async';
     cover.loading = 'lazy'; // a batch of 30 covers is not downloaded at once
     cover.draggable = false;
+    cover.addEventListener('error', () => cover.remove(), { once: true }); // an expired CDN cover: no broken-image icon
     root.appendChild(cover);
   }
   const canvas = document.createElement('canvas');

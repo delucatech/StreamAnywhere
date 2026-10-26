@@ -25,7 +25,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { Reservoir, expiredSoon } from '../reservoir';
-import { lastFeedDir, resetLastBatches, STALE_BATCH } from '../lastBatch';
+import { lastFeedDir, rememberBatch, resetLastBatches, STALE_BATCH, staleBatch } from '../lastBatch';
 import { buildOptions, downloadSourceOf, saveName } from '../downloader';
 import { canonicalize, normalizeUrl } from '../library';
 import type { FeedItem } from '../../../shared/types';
@@ -443,6 +443,22 @@ async function reservoirChecks(): Promise<void> {
   r.stop();
   // The last good batch: an empty stock answers with earlier videos at once, while the fill runs.
   resetLastBatches();
+  {
+    // Expired items are skipped (not served without play URLs), an expired cover is dropped, nothing left -> no stale answer.
+    const secs = Math.floor(Date.now() / 1000);
+    const hex = (t: number) => t.toString(16).padStart(8, '0');
+    rememberBatch('test-expired', [
+      { ...fakeItem('e1', secs - 10), cover: `https://scontent.cdninstagram.com/e1.jpg?oe=${hex(secs - 100)}` },
+      { ...fakeItem('e2', secs + 3600), cover: `https://scontent.cdninstagram.com/e2.jpg?oe=${hex(secs - 100)}` },
+      { ...fakeItem('e3', secs + 3600), cover: `https://scontent.cdninstagram.com/e3.jpg?oe=${hex(secs + 86400)}` },
+      fakeItem('e4', secs - 1),
+    ]);
+    const sb = staleBatch('test-expired');
+    check('stale batch skips items whose play URLs expired', !!sb && sb.map((i) => i.id).join() === 'e2,e3', { ids: sb?.map((i) => i.id) });
+    check('stale batch drops a cover whose CDN URL expired, keeps a live one', !!sb && sb[0].cover === undefined && typeof sb[1].cover === 'string', { covers: sb?.map((i) => i.cover) });
+    check('nothing playable left in the batch -> no stale answer', staleBatch('test-expired') === undefined);
+    resetLastBatches();
+  }
   const staleFile = path.join(lastFeedDir(), 'test-stale.json');
   try {
     const slow = new Reservoir('stale-test', source, { target: 20, low: 10, batch: 10, gapMs: 0, idleMs: 60_000, now: clock, persistKey: 'test-stale' });
