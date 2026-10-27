@@ -9,6 +9,8 @@
  * WallClock: performance.now()-based fallback used when there is no (decodable) audio track.
  */
 
+import { mixToStereo, needsStereoDownmix } from './downmix';
+
 export interface PlaybackClock {
   /** Start (or re-base) the clock at the given media time, in microseconds. Resolves false if the clock could not start. */
   start(mediaUs: number): Promise<boolean>;
@@ -84,6 +86,8 @@ export class AudioSink implements PlaybackClock {
   /** Media time (us) of the earliest chunk that was actually scheduled since the last start()/reset(); -1 = none yet */
   firstScheduledUs = -1;
   lastError = '';
+  /** Channel count of the last chunk mixed down to stereo here (0 = none: Web Audio folded it, or it was stereo) */
+  downmixedFrom = 0;
 
   /**
    * @param sampleRate the track's sample rate. The context is opened at that rate so the whole
@@ -214,12 +218,17 @@ export class AudioSink implements PlaybackClock {
     try {
       const frames = data.numberOfFrames;
       const channels = data.numberOfChannels;
-      const buffer = this.ctx.createBuffer(channels, frames, data.sampleRate);
+      const planes: Float32Array<ArrayBuffer>[] = [];
       for (let ch = 0; ch < channels; ch++) {
         const plane = new Float32Array(frames);
         data.copyTo(plane, { planeIndex: ch, format: 'f32-planar' });
-        buffer.copyToChannel(plane, ch);
+        planes.push(plane);
       }
+      // 7.1 and other layouts Web Audio would cut to their first two channels (no centre = no dialogue)
+      const out = needsStereoDownmix(channels) ? mixToStereo(planes, frames) : planes;
+      if (out !== planes) this.downmixedFrom = channels;
+      const buffer = this.ctx.createBuffer(out.length, frames, data.sampleRate);
+      out.forEach((plane, ch) => buffer.copyToChannel(plane, ch));
       this.scheduleBuffer(buffer, data.timestamp);
     } catch (e) {
       this.lastError = (e as Error).message;

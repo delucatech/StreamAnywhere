@@ -54,6 +54,7 @@ client/   Vite 4 + TypeScript front end (no framework)
   src/media/demuxer.ts            streaming fetch → mp4box.js, Range-based seeking, backpressure
   src/media/codecConfig.ts        avcC/hvcC/esds → VideoDecoderConfig / AudioDecoderConfig
   src/media/audioOutput.ts        Web Audio sink that doubles as the playback clock (+ wall clock)
+  src/media/downmix.ts            7.1 / 6.1 / other layouts → stereo (Web Audio folds only 1/2/4/6 channels)
   src/renderers/webcodecsRenderer.ts   Mode B (primary): WebCodecs → Canvas
   src/renderers/videoElementRenderer.ts Mode A: hidden <video> → rVFC → Canvas
   src/renderers/embedRenderer.ts        Mode C: official TikTok player iframe
