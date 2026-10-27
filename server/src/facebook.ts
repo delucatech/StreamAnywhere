@@ -15,13 +15,15 @@
  *    about a day).
  *  - The Reels feed itself (`/reel/`, `/reels/`) and search redirect a guest to the login page: the
  *    For You tab needs the saved sign-in of facebookSession.ts (its cookies go on the same requests),
- *    and search is an @page / link box.
+ *    and search is an @page / link box. Signed in, the feed page is a shell without reels: the feed
+ *    is read with the page's own GraphQL query (see "the signed-in Reels feed" below).
  *  - A Page that does not exist still answers 200, with "This content isn't available right now";
  *    a wrong-case slug answers 302 to the canonical one.
  *
  * Whether Facebook serves these pages to a datacenter address (the GCP VM) is not known yet; a login
  * redirect for a guest request is retried with the saved cookies when there are any.
  */
+import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -29,7 +31,7 @@ import * as zlib from 'node:zlib';
 import type { FeedItem, MediaFormat, ProfileResponse, ResolveResponse, SearchResponse, UserSummary } from '../../shared/types';
 import { FACEBOOK_CATEGORIES } from '../../shared/types';
 import { config } from './config';
-import { openUpstream, readBody } from './http';
+import { openUpstream, readBody, type UpstreamResponse } from './http';
 import { parseCount, urlExpiry } from './instagram';
 import { defaultExpiry, registerMedia } from './mediaStore';
 import { clearProgress, setProgress } from './progress';
@@ -494,7 +496,7 @@ async function loadReels(url: string, what: string, opts: { signedIn?: boolean; 
   try {
     page = await fetchFacebookHtml(url, { cookie, userAgent: ua });
   } catch (e) {
-    throw new FacebookError(`${what} could not be loaded (${(e as Error).message})`, 502, 'facebook_error');
+    throw new FacebookError(`${what} could not be loaded (${errText(e)})`, 502, 'facebook_error');
   }
   // A wrong-case slug, a video id, a share link: Facebook answers 302 to the canonical page. Followed
   // a few hops; the login and checkpoint pages are answers, not hops.
@@ -816,20 +818,405 @@ export async function exploreFacebook(catId: number, want: number, log: (m: stri
   return { items, warnings };
 }
 
+// ---------------------------------------------------------------- the signed-in Reels feed (GraphQL)
+
 /**
- * The signed-in account's Reels feed: `facebook.com/reel/` loaded with the saved cookies carries the
- * feed's first reels in its JSON; every load is a fresh sample, so a fill is one load (the stock's
- * recent-id window drops repeats). Built from Facebook's page structure; not yet tried with an account.
+ * The account's own Reels feed (the For You tab). The signed-in `facebook.com/reel/` page is a 2 MB
+ * shell without a single reel in it (measured 2026-10-27 from a residential browser and from the VM
+ * alike): the page asks for its feed with the `FBUnifiedVideoContainerQuery` GraphQL query once it
+ * runs, and so does the server - the same POST to /api/graphql/ with the saved cookies, the two
+ * request tokens the shell page carries (`fb_dtsg`, `lsd`) and the query's document id. The answer
+ * comes in Relay's streamed form: one JSON document per line, the first with the first feed unit,
+ * the later ones `@stream`ed units and `@defer`red fragments (owner, caption, counts), each with the
+ * path it belongs at. Paging goes through `page_info.end_cursor`; the cursor is kept between fills,
+ * so a session walks on through the feed instead of sampling its head again and again.
  */
+const FEED_QUERY = 'FBUnifiedVideoContainerQuery';
+/** The query's persisted document id (captured 2026-10-27; Facebook rolls these over now and then). */
+const FEED_DOC_ID = process.env.FACEBOOK_FEED_DOC_ID || '29227112143560769';
+/** Relay "provider" variables the document declares; every one must be present (else `missing_required_variable_value`). */
+const FEED_FLAGS: Record<string, boolean> = {
+  FBUnifiedVideoMediaContentContainer_comet_video_document_picture_in_picture_gkrelayprovider: false,
+  FBUnifiedVideoMediaContentContainer_enable_chapters_pill_gkrelayprovider: false,
+  ShouldEnableBakedInTextUnifiedVideorelayprovider: false,
+  FBUnifiedVideoCometVideoMedia_comet_photosensitive_content_warning_gkrelayprovider: false,
+  FBUnifiedVideoMediaHeaderControls_enable_chapters_pill_gkrelayprovider: false,
+  FBUnifiedVideoMediaFooter_comet_enable_reels_ads_gkrelayprovider: true,
+  FBUnifiedVideoMediaFooter_organic_ad_cta_on_comet_gkrelayprovider: false,
+  FBUnifiedVideoMediaFooter_enable_meta_ai_pill_gkrelayprovider: true,
+  FBUnifiedVideoMediaFooter_enable_ai_embodiment_chat_pill_gkrelayprovider: false,
+  FBUnifiedVideoMediaFooter_enable_video_augment_pills_gkrelayprovider: true,
+  FBUnifiedVideoPlayerScrubber_fb_comet_vpv_heatmap_gkrelayprovider: false,
+  FBUnifiedVideoDescriptionWithEntities_comet_translations_revamp_sync_caption_with_audio_gkrelayprovider: false,
+  FBUnifiedVideoFeedbackBar_comet_reels_save_button_gkrelayprovider: false,
+  usePushPipEngagementCounts_comet_video_document_picture_in_picture_gkrelayprovider: false,
+  FBReels_enable_view_dubbed_audio_type_gkrelayprovider: true,
+  FBUnifiedVideoMenu_fb_reels_ranking_debug_tool_gkrelayprovider: false,
+  CometAudioLanguageUtils_comet_translations_revamp_preferred_languages_gkrelayprovider: false,
+};
+/** Units per query: facebook.com asks for 5 (and got 10 of 12 when asked for 12). */
+const FEED_MIN = 5;
+const FEED_MAX = 12;
+/** The shell page's tokens are reused this long (a fresh page costs a 2 MB download). */
+const TOKENS_TTL_MS = 20 * 60 * 1000;
+const FEED_LIMIT = 16 * 1024 * 1024;
+
+export interface PageTokens {
+  dtsg?: string;
+  lsd?: string;
+  userId?: string;
+  name?: string;
+}
+
+/** The two request tokens and the viewer a signed-in facebook.com page carries in its scripts. */
+export function pageTokens(html: string): PageTokens {
+  let name: string | undefined;
+  const nameM = /"NAME":"((?:[^"\\]|\\.)*)","SHORT_NAME"/.exec(html);
+  if (nameM) {
+    try {
+      name = JSON.parse(`"${nameM[1]}"`);
+    } catch {
+      /* ignore */
+    }
+  }
+  return {
+    dtsg: /\["DTSGInitialData",\[\],\{"token":"([^"]+)"/.exec(html)?.[1],
+    lsd: /\["LSD",\[\],\{"token":"([^"]+)"/.exec(html)?.[1],
+    userId: /"USER_ID":"(\d+)"/.exec(html)?.[1],
+    name,
+  };
+}
+
+/** `jazoest` = "2" followed by the sum of the fb_dtsg token's character codes (what facebook.com's scripts send). */
+export const jazoest = (dtsg: string): string => '2' + [...dtsg].reduce((a, ch) => a + ch.charCodeAt(0), 0);
+
+/** The query's variables as facebook.com's Reels tab sends them (the ads switches off, the stream off). */
+export function feedVariables(count: number, cursor: string | undefined, sessionId: string): Record<string, unknown> {
+  const vars: Record<string, unknown> = {
+    count,
+    cursor: cursor ?? null,
+    scale: 1,
+    should_include_comet_reels_seo_llm_content: false,
+    should_use_stream: false,
+    stream_initial_count: count,
+    useDefaultActor: false,
+    video_feed_context_data: {
+      arltw_feed_section_type: 'FB_SHORTS_CHAINING',
+      in_session_watched_video: null,
+      is_async_ads_enabled: false,
+      is_async_ads_headload_coupling_enabled: false,
+      player_behavior: 'UNIFIED_PLAYER_VDD',
+      real_time_ranking_context_data: { recent_vpvs_v2: [] },
+      referral_source: 'fb_shorts_tab',
+      request_type: 'NORMAL',
+      seed_video_id: null,
+      shorts_search_params: {},
+      surface_type: 'TAB',
+      tracking_code: '',
+      video_channel_entry_point: 'VIDEOS_TAB',
+      client_viewer_session_id: sessionId,
+    },
+  };
+  for (const [k, v] of Object.entries(FEED_FLAGS)) vars[`__relay_internal__pv__${k}`] = v;
+  return vars;
+}
+
+type Obj = Record<string, unknown>;
+const isObj = (v: unknown): v is Obj => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
+
+/** Relay's deferred and streamed payloads merge into the tree at their path: objects key by key, arrays index by index. */
+function mergeInto(a: unknown, b: unknown): unknown {
+  if (b === undefined || b === null) return a ?? b;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    b.forEach((x, i) => (a[i] = mergeInto(a[i], x)));
+    return a;
+  }
+  if (isObj(a) && isObj(b)) {
+    for (const k of Object.keys(b)) a[k] = mergeInto(a[k], b[k]);
+    return a;
+  }
+  return b;
+}
+
+function graft(root: Obj, path: (string | number)[], data: unknown): void {
+  let cur: Record<string | number, unknown> = root;
+  for (let i = 0; i < path.length - 1; i++) {
+    let next = cur[path[i]];
+    if (!next || typeof next !== 'object') {
+      next = typeof path[i + 1] === 'number' ? [] : {};
+      cur[path[i]] = next;
+    }
+    cur = next as Record<string | number, unknown>;
+  }
+  const last = path[path.length - 1];
+  cur[last] = mergeInto(cur[last], data);
+}
+
+export interface FeedAnswer {
+  reels: FbReel[];
+  /** Feed units in the answer (ads and other non-videos included) */
+  listed: number;
+  endCursor?: string;
+  hasNext?: boolean;
+  errors: string[];
+}
+
+/** One feed unit (an edge of `viewer.video_feed_unit_feed`) as a reel; undefined for an ad or a unit without a video. */
+export function feedReel(edge: unknown): FbReel | undefined {
+  if (!isObj(edge) || !isObj(edge.node)) return undefined;
+  const node = edge.node;
+  if (node.sponsored_data) return undefined;
+  const att = Array.isArray(node.attachments) ? node.attachments[0] : undefined;
+  const media = isObj(att) && isObj(att.media) ? att.media : undefined;
+  const id = media ? str(media.id) : undefined;
+  if (!media || !id || !ID.test(id)) return undefined;
+  const legacy = isObj(media.videoDeliveryLegacyFields) ? media.videoDeliveryLegacyFields : undefined;
+  let hd = legacy ? str(legacy.browser_native_hd_url) : undefined;
+  let sd = legacy ? str(legacy.browser_native_sd_url) : undefined;
+  const frag = isObj(media.videoDeliveryResponseFragment) ? media.videoDeliveryResponseFragment : undefined;
+  const vdr = frag && isObj(frag.videoDeliveryResponseResult) ? frag.videoDeliveryResponseResult : undefined;
+  if (vdr && Array.isArray(vdr.progressive_urls)) {
+    for (const p of vdr.progressive_urls) {
+      if (!isObj(p)) continue;
+      const url = str(p.progressive_url);
+      if (!url) continue;
+      const q = isObj(p.metadata) ? String(p.metadata.quality || '').toUpperCase() : '';
+      if (q === 'HD') hd = hd || url;
+      else if (q === 'SD' || !sd) sd = sd || url;
+    }
+  }
+  const owner = isObj(media.owner) ? media.owner : {};
+  const actor = Array.isArray(node.actors) && isObj(node.actors[0]) ? node.actors[0] : {};
+  const msg = isObj(node.message) ? node.message : undefined;
+  const fb = isObj(node.feedback) ? node.feedback : undefined;
+  const reactions = fb && isObj(fb.reaction_count) ? num(fb.reaction_count.count) : undefined;
+  const ownerId = str(owner.id) || str(actor.id);
+  const playMs = num(media.playable_duration_in_ms);
+  return {
+    id,
+    hdUrl: hd,
+    sdUrl: sd,
+    width: num(media.width) ?? num(media.original_width),
+    height: num(media.height) ?? num(media.original_height),
+    duration: num(media.length_in_second) ?? (playMs !== undefined ? playMs / 1000 : undefined),
+    cover: uri(media.preferred_thumbnail) || uri(media.thumbnailImage) || uri(media.image) || str(media.first_frame_thumbnail),
+    caption: msg ? str(msg.text) : undefined,
+    createdAt: num(node.creation_time) ?? num(media.publish_time),
+    plays: num(media.play_count) ?? parseCount(str(media.play_count_reduced)),
+    likes: reactions,
+    comments: fb ? num(fb.total_comment_count) : undefined,
+    music: str(media.track_title),
+    owner: {
+      id: ownerId,
+      name: str(owner.name) || str(actor.name),
+      slug: slugFromProfileUrl(str(owner.url) || str(actor.url), ownerId),
+      avatar: uri(owner.profile_picture) || uri(owner.displayPicture) || uri(owner.profilePicture) || uri(actor.profile_picture),
+      verified: typeof owner.is_verified === 'boolean' ? owner.is_verified : typeof actor.is_verified === 'boolean' ? actor.is_verified : undefined,
+    },
+  };
+}
+
+/**
+ * Reads a feed query answer: the lines are parsed, the deferred and streamed ones grafted onto the
+ * first at their paths, then the feed's edges are read. Errors Facebook reports (`errors[].message`,
+ * or a top-level numeric `error`) are collected, not thrown: an answer may carry both.
+ */
+export function parseFeedAnswer(text: string): FeedAnswer {
+  const errors: string[] = [];
+  let root: Obj | undefined;
+  for (const line of text.replace(/^for \(;;\);/, '').split('\n')) {
+    const s = line.trim();
+    if (!s) continue;
+    let j: unknown;
+    try {
+      j = JSON.parse(s);
+    } catch {
+      errors.push(`an unreadable line (${s.slice(0, 60)})`);
+      continue;
+    }
+    if (!isObj(j)) continue;
+    if (Array.isArray(j.errors)) for (const e of j.errors) if (isObj(e) && typeof e.message === 'string') errors.push(e.message);
+    if (typeof j.error === 'number') errors.push(`error ${j.error}${typeof j.errorDescription === 'string' ? ': ' + j.errorDescription : ''}`);
+    if (Array.isArray(j.path) && j.data !== undefined) {
+      if (root) graft(root, j.path as (string | number)[], j.data);
+    } else if (isObj(j.data) && !root) root = j.data;
+  }
+  const viewer = root && isObj(root.viewer) ? root.viewer : undefined;
+  const feed = viewer && isObj(viewer.video_feed_unit_feed) ? viewer.video_feed_unit_feed : undefined;
+  const edges = feed && Array.isArray(feed.edges) ? feed.edges : [];
+  const pi = feed && isObj(feed.page_info) ? feed.page_info : undefined;
+  const reels: FbReel[] = [];
+  const seen = new Set<string>();
+  for (const e of edges) {
+    const r = feedReel(e);
+    if (!r || seen.has(r.id)) continue;
+    seen.add(r.id);
+    reels.push(r);
+  }
+  return { reels, listed: edges.length, endCursor: pi ? str(pi.end_cursor) : undefined, hasNext: pi && typeof pi.has_next_page === 'boolean' ? pi.has_next_page : undefined, errors };
+}
+
+const errText = (e: unknown): string => (e instanceof Error && e.message) || String(e) || 'network error';
+
+/** What a signed-in request's status means when it is not an answer (checkpoint, login page, 429, 4xx). */
+function signedInRefusal(page: FetchedPage, what: string): FacebookError | undefined {
+  if (page.status >= 300 && page.status < 400) {
+    if (isCheckpointUrl(page.location)) {
+      hooks?.rejected?.();
+      return new FacebookError(`Facebook wants a verification for this account (${what} was sent to its checkpoint page): open facebook.com in your own browser, confirm it was you, then sign in here again with a fresh export.`, 403, 'facebook_checkpoint');
+    }
+    if (isLoginUrl(page.location)) {
+      hooks?.rejected?.();
+      return new FacebookError(`Facebook signed this server out (${what} was sent to the login page); sign in again from Profile.`, 401, 'facebook_not_signed_in');
+    }
+    return new FacebookError(`Facebook redirected ${what} to ${page.location || '?'}`, 502, 'facebook_redirect');
+  }
+  if (page.status === 429) {
+    markBlocked(`${what}: 429`);
+    return new FacebookError(`Facebook is limiting this server's address right now (${what} answered 429); next try in ${Math.round(blockedForSec() / 60)} min.`, 429, 'facebook_rate_limited');
+  }
+  if (page.status >= 400) return new FacebookError(`Facebook answered ${page.status} for ${what}`, page.status === 404 ? 404 : 502, page.status === 404 ? 'facebook_not_found' : 'facebook_error');
+  return undefined;
+}
+
+interface FeedTokens {
+  dtsg: string;
+  lsd: string;
+  userId: string;
+  /** The cookies the tokens were issued for (a new sign-in gets new tokens) */
+  cookie: string;
+  at: number;
+}
+let feedTokens: FeedTokens | undefined;
+let feedCursor: string | undefined;
+let feedSession = randomUUID();
+let feedCalls = 0;
+
+/** The shell page's request tokens for the saved sign-in (cached TOKENS_TTL_MS). */
+async function feedTokensFor(cookie: string, ua: string | undefined): Promise<FeedTokens> {
+  if (feedTokens && feedTokens.cookie === cookie && Date.now() - feedTokens.at < TOKENS_TTL_MS) return feedTokens;
+  const what = 'the Reels feed page';
+  const t0 = Date.now();
+  let page: FetchedPage;
+  try {
+    page = await fetchFacebookHtml(`${ORIGIN}/reel/`, { cookie, userAgent: ua });
+  } catch (e) {
+    throw new FacebookError(`${what} could not be loaded (${errText(e)})`, 502, 'facebook_error');
+  }
+  const refusal = signedInRefusal(page, what);
+  if (refusal) throw refusal;
+  const t = pageTokens(page.html);
+  note(`${what}: ${Math.round(page.html.length / 1024)} KB in ${Date.now() - t0} ms, tokens ${t.dtsg && t.lsd ? 'found' : 'missing'}${t.userId && t.userId !== '0' ? ` (signed in as ${t.name || t.userId})` : ' (no signed-in viewer)'}`);
+  if (!t.userId || t.userId === '0') {
+    hooks?.rejected?.();
+    throw new FacebookError(`Facebook showed ${what} without a signed-in viewer: the saved sign-in no longer works; sign in again from Profile.`, 401, 'facebook_not_signed_in');
+  }
+  hooks?.confirmed?.(t.name, t.userId);
+  if (!t.dtsg || !t.lsd) throw new FacebookError(`${what} carried no request tokens (Facebook changed its page); the For You feed cannot be read right now.`, 502, 'facebook_error');
+  feedTokens = { dtsg: t.dtsg, lsd: t.lsd, userId: t.userId, cookie, at: Date.now() };
+  return feedTokens;
+}
+
+/** One feed query with the saved sign-in: the next `count` units from the kept cursor. */
+async function feedQuery(count: number): Promise<FeedAnswer> {
+  const cookie = hooks?.cookieHeader();
+  if (!cookie) throw new FacebookError('Not signed in to Facebook: sign in from Profile to see your For You feed.', 401, 'facebook_not_signed_in');
+  const ua = hooks?.userAgent?.();
+  const tok = await feedTokensFor(cookie, ua);
+  const what = 'your Reels feed';
+  const cursor = feedCursor;
+  const body = new URLSearchParams({
+    av: tok.userId,
+    __user: tok.userId,
+    __a: '1',
+    __comet_req: '15',
+    fb_dtsg: tok.dtsg,
+    jazoest: jazoest(tok.dtsg),
+    lsd: tok.lsd,
+    fb_api_caller_class: 'RelayModern',
+    fb_api_req_friendly_name: FEED_QUERY,
+    server_timestamps: 'true',
+    doc_id: FEED_DOC_ID,
+    variables: JSON.stringify(feedVariables(count, cursor, feedSession)),
+  }).toString();
+  const t0 = Date.now();
+  let up: UpstreamResponse;
+  try {
+    up = await openUpstream(`${ORIGIN}/api/graphql/`, {
+      method: 'POST',
+      body,
+      headers: {
+        'user-agent': ua || config.userAgent,
+        cookie,
+        accept: '*/*',
+        'accept-language': 'en-US,en;q=0.9',
+        'accept-encoding': 'gzip',
+        'content-type': 'application/x-www-form-urlencoded',
+        origin: ORIGIN,
+        referer: `${ORIGIN}/reel/`,
+        'x-fb-friendly-name': FEED_QUERY,
+        'x-fb-lsd': tok.lsd,
+        'sec-fetch-site': 'same-origin',
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-dest': 'empty',
+      },
+      allowlist: FB_HOSTS,
+      timeoutMs: FETCH_TIMEOUT_MS,
+    });
+  } catch (e) {
+    throw new FacebookError(`${what} could not be loaded (${errText(e)})`, 502, 'facebook_error');
+  }
+  feedCalls++;
+  const location = up.res.headers.location ? new URL(up.res.headers.location, up.finalUrl).toString() : undefined;
+  const page: FetchedPage = { status: up.status, location, html: '', finalUrl: up.finalUrl };
+  if (up.status >= 300 && up.status < 400) {
+    up.res.resume();
+    feedTokens = undefined;
+    throw signedInRefusal(page, what) || new FacebookError(`Facebook redirected ${what}`, 502, 'facebook_redirect');
+  }
+  let buf: Buffer;
+  try {
+    buf = await readBody(up.res, FEED_LIMIT);
+  } catch (e) {
+    throw new FacebookError(`${what} could not be read (${errText(e)})`, 502, 'facebook_error');
+  }
+  if (/gzip/i.test(String(up.res.headers['content-encoding'] || ''))) buf = zlib.gunzipSync(buf);
+  page.html = buf.toString('utf8');
+  const refusal = signedInRefusal(page, what);
+  if (refusal) {
+    feedTokens = undefined;
+    throw refusal;
+  }
+  const ans = parseFeedAnswer(page.html);
+  note(`${what}: ${Math.round(page.html.length / 1024)} KB in ${Date.now() - t0} ms, ${ans.reels.length} reels in ${ans.listed} feed units${cursor ? ' (continued)' : ''}${ans.errors.length ? `; ${ans.errors.length} error(s): ${ans.errors[0].slice(0, 120)}` : ''}`);
+  if (!ans.listed && ans.errors.length) {
+    // Dead tokens or a dead session: the next fill reads the page again.
+    feedTokens = undefined;
+    feedCursor = undefined;
+    const all = ans.errors.join(' ');
+    if (/not logged in|login|1357001|1357004|1357005/i.test(all)) {
+      hooks?.rejected?.();
+      throw new FacebookError(`Facebook refused ${what} (${ans.errors[0].slice(0, 120)}); sign in again from Profile.`, 401, 'facebook_not_signed_in');
+    }
+    throw new FacebookError(`Facebook answered ${what} with an error (${ans.errors[0].slice(0, 160)})`, 502, 'facebook_error');
+  }
+  if (!ans.listed) feedCursor = undefined;
+  else feedCursor = ans.hasNext === false ? undefined : ans.endCursor || undefined;
+  if (feedCursor === undefined) feedSession = randomUUID();
+  blockStreak = 0;
+  return ans;
+}
+
+/** For You: the next units of the account's Reels feed (one query per fill; the reservoir drops repeats). */
 export async function forYouFacebook(want: number, log: (m: string) => void): Promise<{ items: FeedItem[]; warnings: string[] }> {
   if (!signedIn()) throw new FacebookError('Not signed in to Facebook: sign in from Profile to see your For You feed.', 401, 'facebook_not_signed_in');
-  progress('Opening your Reels feed on facebook.com…');
+  progress('Reading your Reels feed on facebook.com…');
   try {
-    const page = await loadReels(`${ORIGIN}/reel/`, 'your Reels feed', { signedIn: true });
-    const reels = page.reels.filter((r) => playable(r));
-    log(`facebook foryou: ${reels.length} playable reels in the feed page (${page.reels.length} listed)`);
+    const ans = await feedQuery(Math.min(FEED_MAX, Math.max(FEED_MIN, want)));
+    const reels = ans.reels.filter((r) => playable(r));
+    log(`facebook foryou: ${reels.length} playable reels in ${ans.listed} feed units${ans.hasNext === false ? ' (the feed ended; it starts over next time)' : ''}`);
     if (!reels.length) return { items: [], warnings: ['Facebook returned no reels this time'] };
-    return { items: reels.slice(0, Math.max(want, reels.length)).map(reelToFeedItem), warnings: [] };
+    return { items: reels.map(reelToFeedItem), warnings: ans.errors.length ? [`Facebook reported ${ans.errors.length} error(s) alongside the feed`] : [] };
   } finally {
     clearProgress('facebook');
   }
@@ -932,5 +1319,5 @@ export async function searchFacebook(q: string, offset: number, log: (m: string)
 }
 
 export function facebookStats(): Record<string, unknown> {
-  return { blockedForSec: blockedForSec(), pageLoadsLastHour: pageLoads.filter((t) => t > Date.now() - 3600_000).length, catalogPages: loadCatalog().size, reelCache: reelCache.size, refreshQueue: refreshQueue.length };
+  return { blockedForSec: blockedForSec(), pageLoadsLastHour: pageLoads.filter((t) => t > Date.now() - 3600_000).length, catalogPages: loadCatalog().size, reelCache: reelCache.size, refreshQueue: refreshQueue.length, feedCalls, feedCursor: Boolean(feedCursor), feedTokensAgeSec: feedTokens ? Math.round((Date.now() - feedTokens.at) / 1000) : undefined };
 }

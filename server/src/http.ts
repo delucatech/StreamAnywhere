@@ -22,7 +22,9 @@ function absorbSetCookie(jar: CookieJar | undefined, res: IncomingMessage): void
 }
 
 export interface RequestOptions {
-  method?: 'GET' | 'HEAD' | 'OPTIONS';
+  method?: 'GET' | 'HEAD' | 'OPTIONS' | 'POST';
+  /** The request body (POST); its Content-Type goes in `headers`. */
+  body?: string | Buffer;
   headers?: Record<string, string>;
   jar?: CookieJar;
   /** Follow up to N redirects (each hop re-validated against the allowlist). Default 0. */
@@ -56,11 +58,12 @@ export async function openUpstream(rawUrl: string, opts: RequestOptions = {}): P
       ...(opts.headers || {}),
     };
     if (opts.jar && opts.jar.cookies.size) headers.cookie = jarHeader(opts.jar);
+    if (opts.body !== undefined) headers['content-length'] = String(Buffer.byteLength(opts.body));
     const res = await new Promise<IncomingMessage>((resolve, reject) => {
       const req = https.request(url, { method: opts.method || 'GET', headers, timeout: timeoutMs }, resolve);
       req.on('timeout', () => req.destroy(new Error(`Upstream timeout after ${timeoutMs}ms`)));
       req.on('error', reject);
-      req.end();
+      req.end(opts.body);
     });
     absorbSetCookie(opts.jar, res);
     const status = res.statusCode || 0;

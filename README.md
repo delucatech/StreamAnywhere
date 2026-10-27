@@ -34,7 +34,7 @@ Windows 10 (see **Test results** for exactly what was measured):
 | **Mirror** (built 2026-10-21): an iPhone's screen (ReplayKit broadcast extension) on the Tesla's browser, three ways: the phone's own page on its hotspot, a WebRTC direct link, the server's relay; WebCodecs or MSE on the viewer; a desktop sender page too | **Working** on the PC (relay, direct link, both decoders, with the desktop sender; 26 relay checks). The phone app exists twice: **.NET MAUI** (`mobileapp/`, compiles for iOS on Windows, hotspot + relay paths) and Swift (`mirror/ios/`, adds the WebRTC direct link); neither has **run on a phone yet** (needs a Mac to deploy) – see [mobileapp/README.md](mobileapp/README.md) |
 | **Launcher** (`home.html`, the landing page): iPad-style icons that open each platform like an app | **Working** |
 | **YouTube, guest mode**: Shorts by hashtag, search, channels; picture + sound as two files played in sync | **Working** (Node server with yt-dlp) – see **YouTube** |
-| **Facebook** (built 2026-10-15): **Reels** = the latest reels of a rotation of public Pages, read from facebook.com's own pages over plain HTTPS (no browser, no yt-dlp, no sign-in); pasted reel links; **For You** = the account's Reels feed after a cookie sign-in; one progressive 720p MP4 per reel, fetched by the viewer itself (CORS `*`) | **Working** signed out (dev machine); the signed-in feed awaits a real account; untested from the VM's address – see **Facebook** |
+| **Facebook** (built 2026-10-15): **Reels** = the latest reels of a rotation of public Pages, read from facebook.com's own pages over plain HTTPS (no browser, no yt-dlp, no sign-in); pasted reel links; **For You** = the account's Reels feed after a cookie sign-in; one progressive 720p MP4 per reel, fetched by the viewer itself (CORS `*`) | **Working** on the VM: Reels (Page tabs) signed out, For You with a real account's cookies (2026-10-27: the feed read through facebook.com's own GraphQL query) – see **Facebook** |
 | **Instagram** (built 2026-10-13): **requires a sign-in** (Instagram serves nobody who is signed out): paste/upload the cookies of a signed-in browser (or a sign-in window on the server machine). **Reels** = the latest Reels of a rotation of big public accounts, **For You** = the account's Reels page, `@handle`/link/account search, profiles; one muxed MP4 per Reel | **Working mechanism, unverified signed in** (cookie parsing, rejection of bad cookies, the account rotation, embed resolving and playback are verified signed out; the signed-in feed awaits a real account) – see **Instagram** |
 
 ## Repository layout
@@ -585,13 +585,21 @@ from facebook.com's own pages over plain HTTPS (`server/src/facebook.ts`). Measu
   viewer fetches the MP4 itself; the proxy is the fallback. URLs expire (`oe=`, about a day); a reel is
   not served within 30 minutes of that and its Page is re-listed.
 - **The Reels feed needs a sign-in**: `/reel/` and `/reels/` send a guest to the login page, as does
-  search. **For You** loads `facebook.com/reel/` with the saved cookies and takes the reels embedded in
-  it (every load is a fresh sample; the stock's recent-id window drops repeats). **Search** is a Page
-  name (@page / link) that opens the Page, or a reel link that plays.
-- Not known yet: whether Facebook serves these pages to a datacenter address (the GCP VM). A guest
-  request that is sent to the login page is retried with the saved sign-in when there is one, and
-  guest Page loads pause for 10 minutes (doubling) after such a refusal. Rate limits were not
-  measured; Page loads are paced 2 s apart, 60 an hour.
+  search. Signed in, `facebook.com/reel/` is a 2 MB shell **without a single reel in it** (measured
+  2026-10-27 from a residential browser and from the VM alike): the page asks for its feed with the
+  `FBUnifiedVideoContainerQuery` GraphQL query once it runs. **For You** does the same: it loads the
+  shell once for its two request tokens (`fb_dtsg`, `lsd`; kept 20 minutes) and then POSTs the query
+  to `/api/graphql/` with the saved cookies and the query's document id (`FACEBOOK_FEED_DOC_ID`
+  overrides the captured one when Facebook rolls it over). The answer is Relay's streamed form (one
+  JSON document per line: the first unit, then streamed units and deferred fragments at their paths),
+  grafted back together and read unit by unit; ads are skipped; each unit has HD and SD progressive
+  MP4s. The feed's cursor is kept between fills, so a session walks on through the feed. **Search**
+  is a Page name (@page / link) that opens the Page, or a reel link that plays.
+- From the VM's address (datacenter), Facebook serves the Page Reels tabs to a guest (10 reels per
+  Page, 10-19 MB each) and the feed query to the signed-in account. A guest request that is sent to
+  the login page is retried with the saved sign-in when there is one, and guest Page loads pause for
+  10 minutes (doubling) after such a refusal. Rate limits were not measured; Page loads are paced 2 s
+  apart, 60 an hour.
 
 ### Facebook sign-in (For You)
 
@@ -602,8 +610,8 @@ to it) and checks them at once with the settings page, which only a signed-in ac
 sent to `login.php`, verified; a `/checkpoint/` redirect means the account must confirm itself in your
 own browser first). Every page Facebook renders names the signed-in viewer (`CurrentUserInitialData`),
 so the first signed-in page the feed reads confirms the account, and a signed-in request that lands on
-the login page triggers a re-check; a conclusive "signed out" deletes the file. The signed-in half
-could not be tried without an account; `/api/session/log?platform=facebook` shows each step.
+the login page triggers a re-check; a conclusive "signed out" deletes the file. Verified 2026-10-27
+with a real account on the VM; `/api/session/log?platform=facebook` shows each step.
 
 ## Diagnostics without a shell
 
