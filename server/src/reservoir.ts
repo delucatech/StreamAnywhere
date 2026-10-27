@@ -18,7 +18,7 @@
  * (`stale`), while the fill runs. A viewer who already has videos waits for fresh ones as before.
  */
 import type { FeedItem } from '../../shared/types';
-import { hasBatch, loadStock, rememberBatch, saveStock, staleBatch } from './lastBatch';
+import { hasBatch, loadStock, rememberBatch, saveStock, STALE_BATCH, staleBatch } from './lastBatch';
 
 export interface ReservoirFetch {
   items: FeedItem[];
@@ -55,6 +55,16 @@ export interface ReservoirOptions {
   waitMs?: number;
   /** Keep the stock and the last good batch on disk under this name, and answer an empty stock with the latter (see lastBatch.ts) */
   persistKey?: string;
+  /**
+   * Keep a feed somebody uses (its last batch is on disk) stocked while nobody is watching too: a
+   * fill when the stock is low, and another shortly before the play URLs of enough items expire to
+   * make it low – so the first request of the day is answered from the stock, not after the source.
+   * Needs `persistKey`. Idle fills are at least `keepGapMs` apart.
+   */
+  keepStocked?: boolean;
+  keepGapMs?: number;
+  /** A random delay added to a keep-fill (several feeds restored at a start do not ask at once) */
+  keepJitterMs?: number;
   log?: (msg: string) => void;
   now?: () => number;
 }
@@ -85,6 +95,7 @@ export class Reservoir {
   private lastFillAt = 0;
   private filling: Promise<void> | undefined;
   private fillTimer: NodeJS.Timeout | undefined;
+  private keepTimer: NodeJS.Timeout | undefined;
   private failures = 0;
   private backoffUntil = 0;
   private lastError: Error | undefined;
@@ -105,6 +116,9 @@ export class Reservoir {
       dryBelow: options.dryBelow ?? 5,
       dryMs: options.dryMs ?? 20_000,
       waitMs: options.waitMs ?? 25_000,
+      keepStocked: options.keepStocked ?? false,
+      keepGapMs: options.keepGapMs ?? 5 * 60 * 1000,
+      keepJitterMs: options.keepJitterMs ?? 20_000,
       now: options.now ?? Date.now,
       log: options.log,
       persistKey: options.persistKey,
@@ -115,6 +129,7 @@ export class Reservoir {
       for (const it of this.stock) this.recent.set(it.id, now);
       if (this.stock.length) this.opt.log?.(`${this.name}: ${this.stock.length} ready from the last run`);
     }
+    this.planKeep();
   }
 
   private persist(): void {
@@ -142,7 +157,7 @@ export class Reservoir {
     const fromStock = this.stock.length > 0;
     if (!fromStock) {
       if (quick) {
-        const stale = this.takeStale();
+        const stale = this.takeStale(count);
         if (stale) {
           this.warm();
           return stale;
@@ -180,18 +195,20 @@ export class Reservoir {
       }
       return { items, warnings: [], ready: this.stock.length, fromStock: true };
     }
-    return this.takeStale();
+    return this.takeStale(count);
   }
 
   /**
    * Earlier videos for a viewer with nothing on screen, when the stock is empty and this feed was
-   * served before; undefined otherwise (then take() waits for the source). Starts no fill: the
-   * caller does (warm), after whatever check must come first (a sign-in on some platforms).
+   * served before; undefined otherwise (then take() waits for the source). Up to `count` of them:
+   * enough to watch while the fill runs (the viewer's next request brings the fresh ones, which the
+   * player puts right after the video in view). Starts no fill: the caller does (warm), after
+   * whatever check must come first (a sign-in on some platforms).
    */
-  takeStale(): ReservoirTake | undefined {
+  takeStale(count = STALE_BATCH): ReservoirTake | undefined {
     this.prune();
     if (this.stock.length || !this.opt.persistKey) return undefined;
-    const stale = staleBatch(this.opt.persistKey);
+    const stale = staleBatch(this.opt.persistKey, Math.max(1, count));
     if (!stale?.length) return undefined;
     this.opt.log?.(`${this.name}: stock empty, ${stale.length} earlier videos served while it fills`);
     return { items: stale, warnings: [], ready: 0, fromStock: false, stale: true };
@@ -239,11 +256,70 @@ export class Reservoir {
   stop(): void {
     if (this.fillTimer) clearTimeout(this.fillTimer);
     this.fillTimer = undefined;
+    if (this.keepTimer) clearTimeout(this.keepTimer);
+    this.keepTimer = undefined;
     this.lastTakeAt = 0;
   }
 
   private active(): boolean {
     return this.opt.now() - this.lastTakeAt < this.opt.idleMs;
+  }
+
+  /**
+   * When the stock will have fewer than `low` fresh items left, as their play URLs expire: now when
+   * it has fewer already, undefined when enough of them carry no expiry.
+   */
+  private dryAt(): number | undefined {
+    const n = this.stock.length;
+    if (n < this.opt.low) return this.opt.now();
+    // An item lasts as long as its longest-lived format; a format without an expiry lasts for ever.
+    const ends: number[] = [];
+    for (const it of this.stock) {
+      let end = 0;
+      for (const f of it.formats) {
+        if (f.expiresAt === undefined) {
+          end = Infinity;
+          break;
+        }
+        end = Math.max(end, f.expiresAt * 1000);
+      }
+      if (Number.isFinite(end)) ends.push(end);
+    }
+    ends.sort((a, b) => a - b);
+    // Below `low` once n - low + 1 items have expired: at the expiry of the (n - low + 1)-th earliest.
+    const at = ends[n - this.opt.low];
+    return at === undefined ? undefined : at;
+  }
+
+  /**
+   * keepStocked: plans the next fill for a feed nobody is watching, so that it is ready when the
+   * next viewer comes – when the stock is low, or 4 minutes before expiries would make it low (prune
+   * drops an item 2 minutes before its URLs expire). An active feed is handled by scheduleFill.
+   */
+  private planKeep(): void {
+    if (!this.opt.keepStocked || !this.opt.persistKey) return;
+    if (this.keepTimer) clearTimeout(this.keepTimer);
+    this.keepTimer = undefined;
+    if (!hasBatch(this.opt.persistKey)) return;
+    this.prune();
+    const dry = this.dryAt();
+    if (dry === undefined) return;
+    const now = this.opt.now();
+    // Not before the feed is idle (a viewer's fills come first, each planning the next keep), nor
+    // during a back-off, nor within keepGapMs of the last fill (a refusing source is not hammered).
+    const idleIn = this.lastTakeAt ? this.lastTakeAt + this.opt.idleMs - now : 0;
+    const wait = Math.max(dry - 4 * 60 * 1000 - now, this.backoffUntil - now, this.lastFillAt + this.opt.keepGapMs - now, idleIn, 0) + Math.random() * this.opt.keepJitterMs;
+    this.keepTimer = setTimeout(() => {
+      this.keepTimer = undefined;
+      if (this.filling) return; // its end plans the next keep
+      if (this.active()) return this.planKeep();
+      this.prune();
+      if (this.stock.length >= this.opt.low && (this.dryAt() ?? Infinity) - 4 * 60 * 1000 > this.opt.now()) return this.planKeep();
+      this.opt.log?.(`${this.name}: ${this.stock.length} ready, topping up for the next viewer`);
+      void this.fill(true);
+    }, wait);
+    // never keeps the process alive on its own (tests, shutdown)
+    this.keepTimer.unref?.();
   }
 
   /** Runs one fill now (or joins the one in flight) and waits for it, bounded by waitMs. */
@@ -284,6 +360,7 @@ export class Reservoir {
       .finally(() => {
         this.filling = undefined;
         this.scheduleFill();
+        this.planKeep();
       });
     return this.filling;
   }

@@ -18,9 +18,9 @@ import { logStream, recentLog } from './logbuf';
 import { defaultExpiry, mediaCount, registerMedia } from './mediaStore';
 import { hostAllowed } from './ssrf';
 import { EXPLORE_DEFAULT_CATEGORY, FeedError, fetchExploreFeed, normalizeExploreOptions, type ExploreResult } from './feed';
-import { cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouCheap, forYouPutBack, forYouStock, forYouWarm, logout, rememberLog, workState, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
+import { cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouCheap, forYouPutBack, forYouQuick, forYouStock, forYouWarm, logout, rememberLog, workState, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
 import { Reservoir, type ReservoirStats } from './reservoir';
-import { reviveItems, slimItems } from './lastBatch';
+import { hasBatch, reviveItems, slimItems } from './lastBatch';
 import { invalidateJobs, jobStats, sharedJob } from './jobs';
 import { getProgress } from './progress';
 import { conversation, fetchProfile, followUser, inbox, inboxDebug, searchTikTok, sendMessage, SocialError } from './social';
@@ -84,7 +84,9 @@ function exploreReservoir(category: number, log: (m: string) => void, warn: (err
         }
         return fetchExploreAny(cat, n, log, warn);
       },
-      { log, persistKey: `tiktok-explore-${category}` },
+      // Kept stocked around the clock once used (one call an hour: TikTok's play URLs last about an
+      // hour), so the first open of the day is answered from the stock, not after TikTok.
+      { log, persistKey: `tiktok-explore-${category}`, keepStocked: true },
     );
     exploreReservoirs.set(category, r);
   }
@@ -500,7 +502,7 @@ export async function buildServer() {
         if (warm || prefetch) return instagramMaySignIn() ? homeScreen(reservoir, what, ensureInstagramSession)! : served(undefined, what);
         // A viewer with nothing on screen does not wait for the sign-in check (a browser start on the
         // server): earlier videos go out now, and the check plus a fill run meanwhile.
-        const quickBatch = quick && instagramMaySignIn() ? reservoir.takeStale() : undefined;
+        const quickBatch = quick && instagramMaySignIn() ? reservoir.takeStale(count) : undefined;
         if (quickBatch) {
           void ensureInstagramSession().then((ok) => ok && reservoir.warm(), () => undefined);
           return served(quickBatch, what);
@@ -513,7 +515,7 @@ export async function buildServer() {
         if (source === 'foryou') {
           const reservoir = facebookForYouReservoir(log);
           if (warm || prefetch) return facebookMaySignIn() ? homeScreen(reservoir, 'facebook foryou', ensureFacebookSession)! : served(undefined, 'facebook foryou');
-          const quickBatch = quick && facebookMaySignIn() ? reservoir.takeStale() : undefined;
+          const quickBatch = quick && facebookMaySignIn() ? reservoir.takeStale(count) : undefined;
           if (quickBatch) {
             void ensureFacebookSession().then((ok) => ok && reservoir.warm(), () => undefined);
             return served(quickBatch, 'facebook foryou');
@@ -554,6 +556,32 @@ export async function buildServer() {
         const r = prefetch ? forYouCheap(count) : undefined;
         if ((!r || r.stale) && forYouWarm(log)) log('foryou: the page goes on loading for the home screen');
         return served(r, 'foryou');
+      }
+      if (quick) {
+        // Nothing on screen and nothing captured yet: the last visit's For You videos go out at once,
+        // topped up with Explore videos from the stock (kept fresh) when few of them are left, so the
+        // viewer has a batch to watch while the browser starts and the page loads (about a minute on
+        // the small VM). The next request waits for the real For You items, which the player puts
+        // right after the video in view.
+        const q = forYouQuick(count, log);
+        if (q) {
+          const want = count - q.items.length;
+          const explore = exploreReservoir(EXPLORE_DEFAULT_CATEGORY, log, warn);
+          const filler = want > 0 ? explore.takeCheap(want) : undefined;
+          if (filler?.items.length) {
+            const ids = new Set(q.items.map((it) => it.id));
+            const extra = filler.items.filter((it) => !ids.has(it.id));
+            q.items.push(...extra);
+            log(`foryou: ${extra.length} Explore videos added while the page loads (${filler.stale ? 'earlier ones' : 'from stock'})`);
+            if (!explore.warmIfKnown()) explore.warm();
+          } else if (want > 0) explore.warm();
+          if (q.items.length) {
+            const resp: FeedResponse = { source, items: slimItems(q.items), hasMore: true, warnings: q.warnings, elapsedMs: Date.now() - t0, stale: true };
+            if (filler?.items.length) resp.note = q.items.length === filler.items.length ? `Explore videos first – your For You feed is loading` : `Recent videos and Explore first – your For You feed is loading`;
+            log(`foryou: ${q.items.length} served from the last good batch, ${resp.elapsedMs} ms`);
+            return resp;
+          }
+        }
       }
       const r = await fetchForYou(count, log, quick);
       const resp: FeedResponse = { source, items: slimItems(r.items), hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
@@ -927,6 +955,11 @@ if (require.main === module) {
       const addr = await app.listen({ port: config.port, host: config.host });
       app.log.info(`StreamAnywhere resolver/proxy listening on ${addr}`);
       warmYtDlp();
+      // The Explore categories served before: their stock comes back from disk and is kept fresh
+      // from now on (reservoir keepStocked), so the first open after a restart is answered at once.
+      for (const c of EXPLORE_CATEGORIES) {
+        if (hasBatch(`tiktok-explore-${c.id}`)) exploreReservoir(c.id, (m) => app.log.info({ platform: 'tiktok', source: 'explore' }, m), (err, msg) => app.log.warn({ platform: 'tiktok', source: 'explore', err }, msg));
+      }
       // systemd stop/restart: close the headless browsers first, otherwise the stop waits for the
       // 90 s SIGTERM timeout and Chromium gets SIGKILLed (leaving stale profile locks behind).
       for (const sig of ['SIGTERM', 'SIGINT'] as const) {

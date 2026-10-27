@@ -1518,24 +1518,48 @@ async function reload(preloaded?: FeedItem[], startIndex = 0): Promise<void> {
   await loadMore();
 }
 
-/** Appends new videos (duplicates and items without a playable URL are skipped); returns how many. */
-/** `stale`: the server's last good batch (see FeedResponse.stale): like a saved video, a failing play URL is replaced from the video's page. */
-function addItems(items: FeedItem[], stale = false): number {
+/**
+ * Adds new videos (duplicates and items without a playable URL are skipped); returns how many.
+ * `stale`: the server's last good batch (see FeedResponse.stale): like a saved video, a failing play
+ * URL is replaced from the video's page. `next`: right after the video in view instead of at the end
+ * (the fresh batch behind a stale one: see loadMore).
+ */
+function addItems(items: FeedItem[], stale = false, next = false): number {
   let added = 0;
+  // The panel the new ones go before (fixed for the whole batch, so it keeps its order)
+  const at = next && state.active >= 0 ? state.active + 1 : state.entries.length;
+  const before = state.entries[at];
   for (const item of items) {
     // An item without formats (search results) is kept: its play URLs are resolved when it comes up.
     if (state.ids.has(item.id) || (item.formats.length && !sourceCandidates(item).length)) continue;
     state.ids.add(item.id);
     const entry = makeEntry(item);
     if (stale) entry.restored = true;
-    state.entries.push(entry);
+    if (before) {
+      el.track.insertBefore(entry.root, before.root);
+      state.entries.splice(at + added, 0, entry);
+    } else state.entries.push(entry);
     added++;
   }
   if (added) {
     layout(); // the first items give the track its panel height
+    if (before) {
+      // The old neighbour moved out of reach: only the video in view and its two neighbours keep a player.
+      state.entries.forEach((e, i) => {
+        if (Math.abs(i - state.active) > 1 && e.player) releasePlayer(e);
+      });
+      warmNeighbours();
+    }
     renderQueue();
   }
   return added;
+}
+
+/** Whether every video after the one in view came from a stale answer or the saved feed (fresh ones should come before them). */
+function onlyStaleAhead(): boolean {
+  if (state.active < 0 || state.mode.kind !== 'source') return false;
+  const rest = state.entries.slice(state.active + 1);
+  return rest.length > 0 && rest.every((e) => e.restored);
 }
 
 // ---------- wide screens: the Up next queue ----------
@@ -1630,7 +1654,7 @@ function renderQueue(): void {
 }
 
 /** The next batch for the current mode: the source, or the continuation of a play list. */
-async function fetchBatch(): Promise<{ items: FeedItem[]; warnings: string[]; hasMore: boolean; stale?: boolean }> {
+async function fetchBatch(): Promise<{ items: FeedItem[]; warnings: string[]; hasMore: boolean; stale?: boolean; note?: string }> {
   const mode = state.mode;
   if (mode.kind === 'search') {
     if (!mode.hasMore) return { items: [], warnings: [], hasMore: false };
@@ -1649,7 +1673,7 @@ async function fetchBatch(): Promise<{ items: FeedItem[]; warnings: string[]; ha
   // Nothing on screen: the server may answer with earlier videos rather than make the viewer wait.
   // With videos on screen (a saved feed, an earlier batch) it must not: those are the same videos.
   const r = await api.feed({ platform: P.id, source: prefs.source, category: prefs.source === 'explore' ? prefs.category : undefined, count: BATCH, quick: state.entries.length === 0 });
-  return { items: r.items, warnings: r.warnings, hasMore: r.hasMore, stale: r.stale };
+  return { items: r.items, warnings: r.warnings, hasMore: r.hasMore, stale: r.stale, note: r.note };
 }
 
 /** The sign-in panel was opened because the For You feed reported a missing session (once per sign-out) */
@@ -1679,9 +1703,13 @@ async function loadMore(): Promise<number> {
     const r = await fetchBatch();
     if (gen !== state.generation) return 0;
     before = state.entries.length;
-    added = addItems(r.items, r.stale);
+    // Fresh videos behind stale ones (the server's earlier videos, a saved feed): right after the
+    // video in view, so the viewer sees them next instead of after every stale one.
+    const next = !r.stale && onlyStaleAhead();
+    added = addItems(r.items, r.stale, next);
     for (const w of r.warnings) console.warn('[feed]', w);
-    if (r.stale && added && !before) toast('Recent videos first – fresh ones are on their way', false, 4000);
+    if (r.stale && added && !before) toast(r.note || 'Recent videos first – fresh ones are on their way', false, 4000);
+    if (next && added) toast(`${plural(added, 'fresh video')} – up next`, false, 3000);
     if (!added) {
       state.emptyBatches++;
       if (!r.hasMore) {

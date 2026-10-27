@@ -225,6 +225,8 @@ export interface FeedResponse {
    * may have expired: the client gets new ones from the video's page when one fails.
    */
   stale?: boolean;
+  /** A line for the viewer about a stale answer: what was served instead of the feed asked for (e.g. Explore videos while For You loads) */
+  note?: string;
 }
 
 /** GET /api/feed/progress?platform=: the step a slow fill is on (no text when nothing is running). */

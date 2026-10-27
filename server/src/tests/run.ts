@@ -25,7 +25,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { Reservoir, expiredSoon } from '../reservoir';
-import { lastFeedDir, rememberBatch, resetLastBatches, STALE_BATCH, staleBatch } from '../lastBatch';
+import { lastFeedDir, rememberBatch, resetLastBatches, staleBatch } from '../lastBatch';
 import { invalidateJobs, jobsDir, resetJobs, sharedJob } from '../jobs';
 import { buildOptions, downloadSourceOf, saveName } from '../downloader';
 import { canonicalize, normalizeUrl } from '../library';
@@ -529,7 +529,7 @@ async function reservoirChecks(): Promise<void> {
     check('a viewer with videos on screen gets no stale batch (waits for the source)', (await slow.take(10).then(() => false, () => true)) && Date.now() - t0 >= 0, { calls });
     now += 5000;
     const stale = await slow.take(10, true);
-    check('empty stock answers at once with earlier videos (stale)', stale.stale === true && stale.items.length === STALE_BATCH && Date.now() - t0 < 500, { got: stale.items.length, stale: stale.stale, ms: Date.now() - t0 });
+    check('empty stock answers at once with as many earlier videos as asked (stale)', stale.stale === true && stale.items.length === 10 && Date.now() - t0 < 500, { got: stale.items.length, stale: stale.stale, ms: Date.now() - t0 });
     check('the stale items were served on an earlier take', stale.items.every((i) => servedBefore.has(i.id)), { ids: stale.items.map((i) => i.id) });
     check('a fill was started alongside the stale answer', calls === callsAtEmpty + 2, { calls, callsAtEmpty });
     await new Promise((res) => setTimeout(res, 30));
@@ -572,6 +572,43 @@ async function reservoirChecks(): Promise<void> {
     } catch {
       /* nothing written */
     }
+  }
+  // keepStocked: a feed somebody uses is topped up while nobody watches, before its play URLs run out.
+  resetLastBatches();
+  {
+    let life = 3600; // seconds the source's play URLs last
+    let keepCalls = 0;
+    const keepSource = async ({ count }: { count: number }) => {
+      keepCalls++;
+      const items: FeedItem[] = [];
+      for (let i = 0; i < count; i++) items.push(fakeItem('k' + next++, Math.floor(now / 1000) + life));
+      return { items, warnings: [] };
+    };
+    const keepOpts = { target: 20, low: 10, batch: 10, gapMs: 0, idleMs: 60_000, now: clock, persistKey: 'test-keep', keepStocked: true, keepJitterMs: 0, keepGapMs: 100 };
+    const unknown = new Reservoir('keep-unknown', keepSource, keepOpts);
+    await new Promise((res) => setTimeout(res, 40));
+    check('keep: a feed never served before is left alone', keepCalls === 0 && unknown.ready === 0, { keepCalls });
+    unknown.stop();
+    rememberBatch('test-keep', [fakeItem('k-old')]); // served once before: somebody uses it
+    const keep = new Reservoir('keep', keepSource, keepOpts);
+    await new Promise((res) => setTimeout(res, 60));
+    check('keep: a known, empty feed fills itself without a viewer', keepCalls >= 1 && keep.ready >= 10, { keepCalls, ready: keep.ready });
+    const callsAfter = keepCalls;
+    await new Promise((res) => setTimeout(res, 250));
+    check('keep: a stock good for an hour is not asked again', keepCalls === callsAfter, { keepCalls, callsAfter });
+    keep.stop();
+    life = 200; // play URLs that run out within the keep margin: refilled, at most keepGapMs apart
+    const soon = new Reservoir('keep-soon', keepSource, keepOpts);
+    await new Promise((res) => setTimeout(res, 60));
+    const c1 = keepCalls;
+    await new Promise((res) => setTimeout(res, 250));
+    check('keep: a stock whose play URLs are about to expire is refilled before they do', keepCalls >= c1 + 1 && keepCalls <= c1 + 4 && soon.ready > 0, { keepCalls, c1 });
+    soon.stop();
+    const c2 = keepCalls;
+    await new Promise((res) => setTimeout(res, 250));
+    check('keep: stop() ends the keeping', keepCalls === c2, { keepCalls, c2 });
+    await new Promise((res) => setTimeout(res, 600)); // the coalesced stock write
+    for (const f of ['test-keep.json', 'test-keep.stock.json']) fs.rmSync(path.join(lastFeedDir(), f), { force: true });
   }
   check('expiredSoon: unknown expiry is kept', !expiredSoon(fakeItem('a'), 1000));
   check('expiredSoon: far expiry is kept, near one dropped', !expiredSoon(fakeItem('a', 2000), 1000) && expiredSoon(fakeItem('a', 1), 1000));
