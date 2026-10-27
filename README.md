@@ -366,7 +366,8 @@ videos are downloaded where you want them, on the device you are using:
 Categories (create, rename, delete, assign several per video), search, a category filter and an
 "On this browser" filter organise the list. Each card says where the video stands: *Saved to library*,
 *Looking up details…*, *Downloading…* (with progress), *On this browser · 720p*, *Download failed*,
-*Unavailable at the source*.
+*Unavailable at the source*, *Downloading to the library…* / *Converting to MP4 on the server…* (with
+progress), *In the library on the server · 1.2 GB*.
 
 **Server** (`server/src/library.ts`): the library is one JSON file (`LIBRARY_DIR/library.json`,
 default `<dir of TIKTOK_PROFILE_DIR>/library`, i.e. `/var/lib/streamanywhere/library` on the VM),
@@ -379,6 +380,30 @@ the downloader's options (a server job that merges picture and sound with ffmpeg
 fetches itself, from the cookie-free CDN URL or through the proxy (`?dl=<name>` on a relay makes it
 a file download). A source that says the video is gone marks the entry *unavailable*: the link is
 not a backup of the video.
+
+**Download to library** (`server/src/libraryFiles.ts`) is the exception to "links only": the server
+fetches the video once into `LIBRARY_DIR/files/<id>.mp4` and every browser downloads its in-app copy
+from `/api/library/file/:id` (Range requests served; `?dl=<name>` makes it a file download). A plain
+file link is downloaded as it is (http or https, redirects followed, every hop checked to be a public
+address; web pages refused); a platform video goes through `entryOptions()` like a browser would (the
+recommended quality: YouTube through the downloader's server job, the others' ready MP4). The file
+is then inspected with ffmpeg (`probeMedia` / `planConversion` in `ffmpeg.ts`, parsed from `ffmpeg -i`:
+the ffmpeg-static package has no ffprobe). An MP4 whose streams the browsers decode is kept as it is;
+anything else becomes one: **MKV / WebM / AVI are remuxed** (streams copied, seconds) when they hold
+8-bit H.264 / H.265 / VP9 / AV1 and AAC, otherwise **re-encoded** (libx264 veryfast, ≤ 1920 px wide,
+AAC stereo), which is slow on the e2-micro and said so on the page. The default sound track is kept
+when there are several; subtitles and attachments are dropped. A thumbnail is grabbed from the file
+when the source gave none. Progress (`entry.file`: queued → downloading → converting → ready / error,
+percent and a line of text) reaches the pages through the usual poll; one import runs at a time, a
+server restart re-queues what was running (three attempts), `POST …/import/cancel` stops it, `POST
+…/file/delete` removes the copy (the link stays), removing the entry removes the file. Limits:
+`DOWNLOAD_MAX_BYTES` per file (2 GB), `LIBRARY_FILES_MAX_BYTES` for all of them (15 GB).
+
+**MKV in the player.** The WebCodecs pipeline reads MP4 only (mp4box.js), so an MKV saved as a plain
+link and downloaded to a browser as it is does not play there; the options list greys it (*won't play
+here*) and points to "Download to library". As a last resort the library player hands a Matroska /
+WebM blob to the hidden-`<video>` renderer, where Chromium's own demuxer may play it (H.264 + AAC
+inside); Safari cannot. The reliable path is the server's conversion.
 
 **Browser** (`client/src/library/`): `db.ts` is the IndexedDB store (library mirror, video records,
 blob parts); a video counts as present only when its record and all its parts are there with the

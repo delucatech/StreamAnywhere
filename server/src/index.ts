@@ -12,7 +12,8 @@ import { registerProxyRoutes } from './proxy';
 import { isTikTokUrl, probeUrl, resolveTikTokNative, TikTokError } from './tiktok';
 import { detectFfmpeg } from './ffmpeg';
 import { cancelJob, DOWNLOAD_SOURCES, DownloadError, downloaderStats, getJob, jobFile, jobServed, MAX_BYTES, probeDownload, setDownloaderLogger, shutdownDownloader, startDownload } from './downloader';
-import { addCategory, deleteCategory, deleteEntry, entryOptions, flushLibrary, LibraryError, libraryState, libraryStats, patchEntry, refreshEntry, renameCategory, saveLink, setLibraryLogger, thumbFile } from './library';
+import { addCategory, deleteCategory, deleteEntry, deleteFile, entryOptions, flushLibrary, LibraryError, libraryState, libraryStats, patchEntry, refreshEntry, renameCategory, saveLink, setLibraryLogger, thumbFile } from './library';
+import { cancelImport, dismissImport, fileInfo, importLink, importStats, resumeImports, startImport, sweepFiles } from './libraryFiles';
 import { daemonStatus, detectYtDlp, resolveWithYtDlp, setYtDlpLogger, shutdownYtDlp, warmYtDlp } from './ytdlp';
 import { logStream, recentLog } from './logbuf';
 import { defaultExpiry, mediaCount, registerMedia } from './mediaStore';
@@ -921,6 +922,65 @@ export async function buildServer() {
       return libraryError(reply, e);
     }
   });
+  // ---- "Download to library": the video fetched to the server once (converted to MP4 when needed), served to every browser
+  app.post<{ Body: LibrarySaveRequest }>('/api/library/import', resolveLimit, async (req, reply) => {
+    try {
+      const r = importLink(String(req.body?.url || ''), Array.isArray(req.body?.categoryIds) ? req.body!.categoryIds!.map(String) : []);
+      return { ...r, state: libraryState() };
+    } catch (e) {
+      return libraryError(reply, e);
+    }
+  });
+  app.post<{ Params: { id: string } }>('/api/library/entries/:id/import', resolveLimit, async (req, reply) => {
+    try {
+      const started = startImport(req.params.id);
+      return { started, state: libraryState() };
+    } catch (e) {
+      return libraryError(reply, e);
+    }
+  });
+  // stops a running import, or forgets a failed one
+  app.post<{ Params: { id: string } }>('/api/library/entries/:id/import/cancel', async (req, reply) => {
+    try {
+      cancelImport(req.params.id);
+      dismissImport(req.params.id);
+      return libraryState();
+    } catch (e) {
+      return libraryError(reply, e);
+    }
+  });
+  app.post<{ Params: { id: string } }>('/api/library/entries/:id/file/delete', async (req, reply) => {
+    try {
+      deleteFile(req.params.id);
+      return libraryState();
+    } catch (e) {
+      return libraryError(reply, e);
+    }
+  });
+  // The server copy: whole (the in-app download), by Range (the player), or as a file download (?dl=<name>).
+  app.get<{ Params: { id: string }; Querystring: { dl?: string } }>('/api/library/file/:id', async (req, reply) => {
+    const f = fileInfo(req.params.id);
+    if (!f) return reply.code(404).send({ error: 'There is no copy of this video on the server' });
+    const headers: Record<string, string> = { 'content-type': f.mime, 'accept-ranges': 'bytes', 'cache-control': 'private, no-store' };
+    if (req.query.dl !== undefined) {
+      const name = String(req.query.dl || f.name) || f.name;
+      const ascii = name.replace(/[^ -~]/g, '_').replace(/"/g, "'");
+      headers['content-disposition'] = `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
+    }
+    const range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range || ''));
+    if (range && (range[1] || range[2])) {
+      let start = range[1] ? Number(range[1]) : Math.max(0, f.size - Number(range[2]));
+      let end = range[1] && range[2] ? Math.min(Number(range[2]), f.size - 1) : f.size - 1;
+      if (!range[1]) start = Math.max(0, f.size - Number(range[2]));
+      if (start >= f.size || start > end) return reply.code(416).headers({ 'content-range': `bytes */${f.size}` }).send();
+      end = Math.min(end, f.size - 1);
+      return reply
+        .code(206)
+        .headers({ ...headers, 'content-range': `bytes ${start}-${end}/${f.size}`, 'content-length': String(end - start + 1) })
+        .send(fs.createReadStream(f.path, { start, end }));
+    }
+    return reply.code(200).headers({ ...headers, 'content-length': String(f.size) }).send(fs.createReadStream(f.path));
+  });
   // Thumbnails are copied once when the link is saved (the platforms' cover URLs expire); the ?v= changes with the file.
   app.get<{ Params: { id: string } }>('/api/library/thumb/:id', async (req, reply) => {
     const f = thumbFile(req.params.id);
@@ -928,7 +988,7 @@ export async function buildServer() {
     return reply.code(200).headers({ 'content-type': f.mime, 'cache-control': 'public, max-age=31536000, immutable' }).send(fs.createReadStream(f.path));
   });
 
-  app.get('/api/stats', async () => ({ downloads: downloaderStats(), library: libraryStats(), mediaRecords: mediaCount(), exploreStock: exploreStock(), youtubeStock: youtubeStock(), youtubeForYouStock: youtubeForYou?.stats, instagramStock: instagramStock(), instagramForYouStock: instagramForYou?.stats, instagram: instagramStats(), facebookStock: facebookStock(), facebookForYouStock: facebookForYou?.stats, facebook: facebookStats(), forYouStock: forYouStock(), mirror: mirrorStats(), jobs: jobStats(), workPage: workState(), uptimeSec: Math.round(process.uptime()) }));
+  app.get('/api/stats', async () => ({ downloads: downloaderStats(), library: libraryStats(), imports: importStats(), mediaRecords: mediaCount(), exploreStock: exploreStock(), youtubeStock: youtubeStock(), youtubeForYouStock: youtubeForYou?.stats, instagramStock: instagramStock(), instagramForYouStock: instagramForYou?.stats, instagram: instagramStats(), facebookStock: facebookStock(), facebookForYouStock: facebookForYou?.stats, facebook: facebookStats(), forYouStock: forYouStock(), mirror: mirrorStats(), jobs: jobStats(), workPage: workState(), uptimeSec: Math.round(process.uptime()) }));
 
   if (config.serveClient) {
     const dist = findUp(path.join('client', 'dist')) || findUp(path.join('client', 'dist'), process.cwd()) || path.resolve('client', 'dist');
@@ -953,6 +1013,9 @@ if (require.main === module) {
   buildServer()
     .then(async (app) => {
       const addr = await app.listen({ port: config.port, host: config.host });
+      // server copies: stray files of interrupted imports go; imports that were running start over
+      sweepFiles();
+      resumeImports();
       app.log.info(`StreamAnywhere resolver/proxy listening on ${addr}`);
       warmYtDlp();
       // The Explore categories served before: their stock comes back from disk and is kept fresh

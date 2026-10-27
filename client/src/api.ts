@@ -150,6 +150,12 @@ export const api = {
     return json as LibraryState;
   },
   librarySave: (url: string, categoryIds?: string[]): Promise<LibrarySaveResponse> => post('/api/library', { url, categoryIds }, 30_000),
+  /** "Download to library": the server fetches the video (converted to MP4 when needed) and keeps it for every device */
+  libraryImport: (url: string, categoryIds?: string[]): Promise<LibrarySaveResponse> => post('/api/library/import', { url, categoryIds }, 30_000),
+  libraryImportEntry: (id: string): Promise<{ started: boolean; state: LibraryState }> => post(`/api/library/entries/${id}/import`, {}, 30_000),
+  /** Stops a running import, or forgets a failed one */
+  libraryImportCancel: (id: string): Promise<LibraryState> => post(`/api/library/entries/${id}/import/cancel`, {}),
+  libraryDeleteFile: (id: string): Promise<LibraryState> => post(`/api/library/entries/${id}/file/delete`, {}),
   libraryPatch: (id: string, patch: LibraryEntryPatch): Promise<{ entry: LibraryEntry; state: LibraryState }> => post(`/api/library/entries/${id}`, patch),
   libraryDelete: (id: string): Promise<LibraryState> => post(`/api/library/entries/${id}/delete`, {}),
   libraryRefresh: (id: string): Promise<{ entry: LibraryEntry; state: LibraryState }> => post(`/api/library/entries/${id}/refresh`, {}),

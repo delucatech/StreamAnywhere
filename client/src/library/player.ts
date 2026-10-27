@@ -14,6 +14,11 @@
  * system player. So on an iPhone the button hands the current file to a plain <video> (the stored
  * Blob, from the same position) and asks for the native fullscreen; when it ends (Done) the canvas
  * player picks up at the position the user left, playing or paused as they left it.
+ *
+ * The WebCodecs pipeline reads MP4 only (mp4box.js). A file that is not one (an MKV / WebM saved
+ * from a plain link before "Download to library" converted it) is handed to the hidden-<video>
+ * renderer instead, where Chromium's own demuxer may know the container; Safari does not. The
+ * reliable way to play such a file is the server's MP4 conversion.
  */
 import { FeedPlayer, feedPlayerMode } from '../feed/player';
 
@@ -41,6 +46,18 @@ const elementFullscreenAllowed = (): boolean =>
 const nativeVideoFullscreenAllowed = (): boolean =>
   typeof (HTMLVideoElement.prototype as unknown as { webkitEnterFullscreen?: unknown }).webkitEnterFullscreen === 'function';
 type NativeVideo = HTMLVideoElement & { webkitEnterFullscreen?: () => void; webkitExitFullscreen?: () => void; webkitDisplayingFullscreen?: boolean };
+
+/** Matroska / WebM start with the EBML magic 1A 45 DF A3 (the stored MIME type is not always set). */
+async function isMatroska(blob: Blob): Promise<boolean> {
+  if (/matroska|webm/i.test(blob.type)) return true;
+  if (blob.type && blob.type !== 'application/octet-stream') return false;
+  try {
+    const head = new Uint8Array(await blob.slice(0, 4).arrayBuffer());
+    return head[0] === 0x1a && head[1] === 0x45 && head[2] === 0xdf && head[3] === 0xa3;
+  } catch {
+    return false;
+  }
+}
 
 const icon = (paths: string): string => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
 const ICON = {
@@ -255,6 +272,9 @@ export class LibraryPlayer {
       .then(async (blob) => {
         if (gen !== this.generation) return;
         this.blob = blob;
+        const matroska = await isMatroska(blob);
+        if (gen !== this.generation) return;
+        const mode = matroska ? 'video-canvas' : feedPlayerMode().mode;
         const player = new FeedPlayer(this.canvas, this.stage, {
           onFirstFrame: () => {
             if (gen !== this.generation) return;
@@ -277,7 +297,7 @@ export class LibraryPlayer {
           onError: (e) => {
             if (gen !== this.generation) return;
             this.setWaiting(false);
-            this.err.textContent = `This video could not be played (${e.message}).`;
+            this.err.textContent = matroska ? `This browser cannot play this MKV / WebM file as it is (${e.message}). Use “Download to library” on it: the server converts it to MP4, which plays everywhere.` : `This video could not be played (${e.message}).`;
             this.err.classList.remove('hidden');
           },
           onPlayingChange: (playing) => {
@@ -297,7 +317,7 @@ export class LibraryPlayer {
             if (dl.fraction >= 0) this.loaded.style.width = `${Math.round(dl.fraction * 1000) / 10}%`;
             this.time.textContent = `${fmtTime(t)} / ${fmtTime(d)}`;
           },
-        });
+        }, mode);
         player.loop = false;
         player.setMuted(this.muted);
         this.player = player;

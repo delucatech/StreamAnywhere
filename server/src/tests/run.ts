@@ -28,7 +28,8 @@ import { Reservoir, expiredSoon } from '../reservoir';
 import { lastFeedDir, rememberBatch, resetLastBatches, staleBatch } from '../lastBatch';
 import { invalidateJobs, jobsDir, resetJobs, sharedJob } from '../jobs';
 import { buildOptions, downloadSourceOf, saveName } from '../downloader';
-import { canonicalize, normalizeUrl } from '../library';
+import { canonicalize, fileExtOf, normalizeUrl } from '../library';
+import { parseFfmpegInfo, planConversion } from '../ffmpeg';
 import type { FeedItem } from '../../../shared/types';
 import type { FeedResponse } from '../../../shared/types';
 import { openUpstream } from '../http';
@@ -394,6 +395,56 @@ async function downloaderChecks(): Promise<void> {
     notVideo = (e as Error).message;
   }
   check('a youtube channel link is not a video', /not a YouTube video/.test(notVideo), notVideo);
+  const entry = (url: string, mediaType?: string) => ({ url, mediaType } as Parameters<typeof fileExtOf>[0]);
+  check('plain file container: from the content type, else the extension, else mp4', fileExtOf(entry('https://x/a.mkv')) === 'mkv' && fileExtOf(entry('https://x/clip', 'video/x-matroska')) === 'mkv' && fileExtOf(entry('https://x/a.webm?x=1')) === 'webm' && fileExtOf(entry('https://x/a.mp4')) === 'mp4' && fileExtOf(entry('https://x/stream')) === 'mp4');
+
+  console.log('\n== 2d. Download to library: what ffmpeg says about a file, and what to do with it');
+  const mkv = parseFfmpegInfo(`Input #0, matroska,webm, from 'x.mkv':
+  Metadata:
+    ENCODER         : Lavf60.3.100
+  Duration: 01:31:12.34, start: 0.000000, bitrate: 2765 kb/s
+  Stream #0:0: Video: h264 (High 10), yuv420p10le(tv, bt709, progressive), 1920x1080 [SAR 1:1 DAR 16:9], 23.98 fps, 23.98 tbr, 1k tbn (default)
+    Metadata:
+      BPS             : 2500000
+  Stream #0:1(jpn): Audio: flac, 48000 Hz, stereo, s16
+  Stream #0:2(eng): Audio: ac3, 48000 Hz, 5.1(side), fltp, 640 kb/s (default)
+  Stream #0:3(eng): Subtitle: ass (default)
+  Stream #0:4: Video: mjpeg (Baseline), yuvj420p(pc, bt470bg/unknown/unknown), 600x900 [SAR 1:1 DAR 2:3], 90k tbr, 90k tbn (attached pic)
+  Stream #0:5: Attachment: ttf
+At least one output file must be specified`);
+  check('mkv listing parsed: container, duration, streams', mkv.container === 'matroska,webm' && Math.round(mkv.durationSec || 0) === 5472 && mkv.streams.length === 6, { container: mkv.container, duration: mkv.durationSec, n: mkv.streams.length });
+  const v0 = mkv.streams[0];
+  check('video stream: codec, profile, pixel format, size, fps, default', v0.codec === 'h264' && v0.profile === 'High 10' && v0.pixFmt === 'yuv420p10le' && v0.width === 1920 && v0.height === 1080 && v0.fps === 23.98 && v0.isDefault, v0);
+  check('audio streams: codec, language, channels, default flag', mkv.streams[1].codec === 'flac' && mkv.streams[1].language === 'jpn' && mkv.streams[2].codec === 'ac3' && mkv.streams[2].channels === '5.1(side)' && mkv.streams[2].isDefault && !mkv.streams[1].isDefault, mkv.streams.slice(1, 3));
+  check('cover art is an attached pic', mkv.streams[4].attachedPic && mkv.streams[4].kind === 'video');
+  const plan = planConversion(mkv);
+  check('10-bit H.264 + AC-3: re-encode both, the default (English) track, cover art skipped', !plan.keep && !plan.videoCopy && !plan.audioCopy && plan.video.index === 0 && plan.audio?.index === 2 && plan.vcodec === 'h264' && plan.acodec === 'aac' && /10-bit/.test(plan.note) && /AC-3/.test(plan.note) && /default/.test(plan.note), plan.note);
+  const mp4 = parseFfmpegInfo(`Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'x.mp4':
+  Duration: 00:00:10.00, start: 0.000000, bitrate: 765 kb/s
+  Stream #0:0[0x1](und): Video: h264 (High) (avc1 / 0x31637661), yuv420p(progressive), 640x360 [SAR 1:1 DAR 16:9], 762 kb/s, 30 fps, 30 tbr, 15360 tbn (default)
+  Stream #0:1[0x2](eng): Audio: aac (LC) (mp4a / 0x6134706D), 48000 Hz, stereo, fltp, 128 kb/s (default)`);
+  const keep = planConversion(mp4);
+  check('an MP4 with H.264 + AAC is kept as it is', keep.keep && keep.videoCopy && keep.audioCopy && keep.note === 'kept as it was' && mp4.streams[0].profile === 'High' && mp4.streams[1].codec === 'aac', keep.note);
+  const remux = planConversion(parseFfmpegInfo(`Input #0, matroska,webm, from 'y.mkv':
+  Duration: 00:05:00.00, start: 0.000000, bitrate: 1765 kb/s
+  Stream #0:0(eng): Video: hevc (Main), yuv420p(tv, bt709), 1920x1080, 24 fps, 24 tbr, 1k tbn (default)
+  Stream #0:1(eng): Audio: aac (LC), 48000 Hz, stereo, fltp (default)
+  Stream #0:2(eng): Subtitle: subrip (default)`));
+  check('MKV with H.265 + AAC: remux only, subtitles dropped', !remux.keep && remux.videoCopy && remux.audioCopy && remux.vcodec === 'h265' && remux.note === 'remuxed from MKV', remux.note);
+  const webm = planConversion(parseFfmpegInfo(`Input #0, matroska,webm, from 'z.webm':
+  Duration: 00:01:00.00, start: 0.000000, bitrate: 900 kb/s
+  Stream #0:0(eng): Video: vp9 (Profile 0), yuv420p(tv, bt709), 1280x720, 30 fps, 30 tbr, 1k tbn (default)
+  Stream #0:1(eng): Audio: opus, 48000 Hz, stereo, fltp (default)`), 'https://x/z.webm');
+  check('WebM with VP9 + Opus: picture copied, sound to AAC', !webm.keep && webm.videoCopy && !webm.audioCopy && webm.vcodec === 'vp9' && /from WebM, sound re-encoded to AAC \(was Opus\)/.test(webm.note), webm.note);
+  let noVideo = '';
+  try {
+    planConversion(parseFfmpegInfo(`Input #0, mp3, from 'a.mp3':
+  Duration: 00:03:00.00, start: 0.000000, bitrate: 128 kb/s
+  Stream #0:0: Audio: mp3, 44100 Hz, stereo, fltp, 128 kb/s`));
+  } catch (e) {
+    noVideo = (e as Error).message;
+  }
+  check('a file without video is refused', /no video stream/.test(noVideo), noVideo);
 }
 
 async function jobChecks(): Promise<void> {

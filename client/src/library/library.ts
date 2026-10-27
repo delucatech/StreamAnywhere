@@ -38,6 +38,7 @@ const el = {
   url: $<HTMLInputElement>('url'),
   pasteBtn: $<HTMLButtonElement>('pasteBtn'),
   saveBtn: $<HTMLButtonElement>('saveBtn'),
+  importBtn: $<HTMLButtonElement>('importBtn'),
   saveHint: $('saveHint'),
   saveStatus: $('saveStatus'),
   offline: $('offline'),
@@ -124,6 +125,7 @@ function setOffline(on: boolean): void {
   offline = on;
   el.offline.classList.toggle('hidden', !on);
   el.saveBtn.disabled = on;
+  el.importBtn.disabled = on;
   el.url.disabled = on;
   if (!on) void sync(true);
 }
@@ -148,6 +150,7 @@ async function sync(force = false): Promise<void> {
       offline = false;
       el.offline.classList.add('hidden');
       el.saveBtn.disabled = false;
+      el.importBtn.disabled = false;
       el.url.disabled = false;
     }
   } catch (e) {
@@ -163,7 +166,7 @@ async function sync(force = false): Promise<void> {
 /** A quick poll while a lookup runs on the server, a slow one otherwise. */
 function schedulePoll(): void {
   window.clearTimeout(pollTimer);
-  const pending = lib.entries.some((e) => e.meta === 'pending');
+  const pending = lib.entries.some((e) => e.meta === 'pending' || importBusy(e));
   pollTimer = window.setTimeout(() => void sync(), pending ? 2500 : document.hidden ? 60_000 : 15_000);
 }
 
@@ -213,10 +216,13 @@ function visibleEntries(): LibraryEntry[] {
 }
 
 interface Status {
-  cls: 'ok' | 'busy' | 'err' | 'warn' | 'plain';
+  cls: 'ok' | 'busy' | 'err' | 'warn' | 'plain' | 'srv';
   text: string;
   percent?: number;
 }
+/** The server is fetching or converting this video ("Download to library") */
+const importBusy = (e: LibraryEntry): boolean => !!e.file && (e.file.state === 'queued' || e.file.state === 'downloading' || e.file.state === 'converting');
+
 function statusOf(e: LibraryEntry): Status {
   const t = dl.taskFor(e.id);
   if (t && dl.isRunning(t)) return { cls: 'busy', text: t.kind === 'inapp' ? (t.phase === 'server' ? 'Preparing on the server…' : 'Downloading to this browser…') : 'Saving to the device…', percent: t.percent };
@@ -224,7 +230,11 @@ function statusOf(e: LibraryEntry): Status {
   if (t && t.phase === 'ready') return { cls: 'ok', text: 'File ready to save' };
   const v = local.get(e.id);
   if (v) return { cls: 'ok', text: `On this browser · ${v.label}` };
+  const f = e.file;
+  if (f && importBusy(e)) return { cls: 'busy', text: f.state === 'queued' ? 'Waiting for the server…' : f.state === 'downloading' ? 'Downloading to the library…' : 'Converting to MP4 on the server…', percent: f.percent };
+  if (f?.state === 'error') return { cls: 'err', text: 'Could not download to the library' };
   if (e.meta === 'pending') return { cls: 'busy', text: 'Looking up details…' };
+  if (f?.state === 'ready') return { cls: 'srv', text: `In the library on the server · ${fmtBytes(f.sizeBytes || 0)}` };
   if (e.unavailable) return { cls: 'warn', text: 'Unavailable at the source' };
   return { cls: 'plain', text: 'Saved to library' };
 }
@@ -397,6 +407,41 @@ async function saveLink(raw: string): Promise<void> {
   }
 }
 
+/** "Download to library": the link is saved and the server starts fetching the video. */
+async function importLink(raw: string): Promise<void> {
+  const url = raw.trim();
+  if (!url || saving) return;
+  if (offline) return toast('You are offline: links can be saved once the connection is back', true);
+  saving = true;
+  el.saveBtn.disabled = true;
+  el.importBtn.disabled = true;
+  setSaveStatus('Saving the link and asking the server to download the video…', 'busy');
+  try {
+    const r = await api.libraryImport(url, filters.cat !== 'all' && filters.cat !== 'none' ? [filters.cat] : []);
+    lib = r.state;
+    fresh = true;
+    void db.putState(lib);
+    render();
+    if (r.duplicate && !r.importStarted) {
+      setSaveStatus(r.entry.file?.state === 'ready' ? 'This video is already in your library, with a copy on the server.' : 'This link is already in your library; the server is working on it.', 'info');
+      flashCard(r.entry.id);
+    } else {
+      setSaveStatus('', 'none');
+      el.url.value = '';
+      showAddBox(false);
+      toast(r.duplicate ? 'Already in your library; the server is downloading it now' : 'Saved. The server is downloading the video to the library…');
+      flashCard(r.entry.id);
+    }
+    schedulePoll();
+  } catch (e) {
+    setSaveStatus(errMsg(e), 'error');
+  } finally {
+    saving = false;
+    el.saveBtn.disabled = offline;
+    el.importBtn.disabled = offline;
+  }
+}
+
 function flashCard(id: string): void {
   const card = el.grid.querySelector<HTMLElement>(`.vcard[data-id="${CSS.escape(id)}"]`);
   if (!card) return;
@@ -416,6 +461,13 @@ el.addBtn.addEventListener('click', () => showAddBox(el.addBox.classList.contain
 el.form.addEventListener('submit', (e) => {
   e.preventDefault();
   void saveLink(el.url.value);
+});
+el.importBtn.addEventListener('click', () => {
+  if (!el.url.value.trim()) {
+    el.url.focus();
+    return;
+  }
+  void importLink(el.url.value);
 });
 el.pasteBtn.addEventListener('click', async () => {
   try {
@@ -525,9 +577,12 @@ function menuHtml(e: LibraryEntry): string {
     if (canSaveFiles) html += item('export-local', `Save ${esc(v.label)} copy to device`);
     if (canShareFiles && isIOS) html += item('share-local', 'Share / Save to Photos…');
   } else {
-    html += item('pick-inapp', 'Download for in-app playback', { disabled: running || !!e.unavailable || offline || !hasIndexedDb, sub: running ? 'Download in progress' : e.unavailable ? 'Unavailable at the source' : offline ? 'Offline' : undefined });
+    html += item('pick-inapp', 'Download for in-app playback', { disabled: running || !!e.unavailable || offline || !hasIndexedDb, sub: running ? 'Download in progress' : e.unavailable ? 'Unavailable at the source' : offline ? 'Offline' : e.file?.state === 'ready' ? 'From the library on the server' : undefined });
     if (canSaveFiles) html += item('pick-device', 'Save to device', { disabled: running || !!e.unavailable || offline });
   }
+  if (e.file?.state === 'ready') html += item('delete-file', 'Delete the copy on the server', { danger: true, sub: `${fmtBytes(e.file.sizeBytes || 0)} · the link stays in your library` });
+  else if (importBusy(e)) html += item('import-cancel', 'Stop the download to the library', { sub: e.file?.text });
+  else html += item('import', 'Download to library', { disabled: !!e.unavailable || offline, sub: e.file?.state === 'error' ? 'The last attempt failed · try again' : 'Fetched to the server once; every device gets it from there' });
   html += item('categories', 'Change category', { sub: cats.length ? cats.join(', ') : 'No category' });
   html += item('edit-title', 'Edit title');
   html += `<a class="menu-item" href="${esc(e.url)}" target="_blank" rel="noopener noreferrer"><span>Open on ${esc(s.name)}</span></a>`;
@@ -572,6 +627,7 @@ function infoHtml(e: LibraryEntry): string {
   else if (e.meta === 'failed' && !e.unavailable) html += `<p class="sh-note warn">The details could not be looked up (${esc(e.metaError || 'unknown error')}). The link is saved; you can edit the title and try the lookup again. <button type="button" class="link" data-act="refresh">Look up again</button></p>`;
   if (e.unavailable) html += `<p class="sh-note warn"><b>This video is no longer available at its source</b> (${esc(e.unavailable.reason)}, seen ${esc(timeAgo(e.unavailable.at))}). It cannot be downloaded again; a copy already downloaded to a browser still plays there. <button type="button" class="link" data-act="recheck">Check again</button></p>`;
   html += taskHtml(e);
+  html += serverHtml(e);
 
   html += '<section class="sh-section"><h3 class="sh-h">On this browser</h3>';
   if (v) {
@@ -603,11 +659,35 @@ function infoHtml(e: LibraryEntry): string {
   return html;
 }
 
+/** The copy on the server ("Download to library"): its state, or the way to get one. */
+function serverHtml(e: LibraryEntry): string {
+  const f = e.file;
+  const plainExt = e.source === 'other' ? (/\.(mkv|webm|avi|mov|ts|m2ts|flv|wmv|mpg|mpeg|3gp|ogv)(\?|$)/i.exec(e.url)?.[1] || (/matroska/.test(e.mediaType || '') ? 'mkv' : /webm/.test(e.mediaType || '') ? 'webm' : undefined)) : undefined;
+  let html = '<section class="sh-section"><h3 class="sh-h">On the server</h3>';
+  if (f?.state === 'ready') {
+    html += `<p class="sh-local srv">In the library on the server · MP4 · ${fmtBytes(f.sizeBytes || 0)}${f.label ? ` · ${esc(f.label)}` : ''}${f.note ? ` · ${esc(f.note)}` : ''}${f.finishedAt ? ` · ${esc(timeAgo(f.finishedAt))}` : ''}</p>
+      <p class="sh-note">Every device downloads its in-app copy from here, converted and ready to play; the source is not asked again.</p>
+      <div class="sh-actions"><button type="button" class="btn ghost danger-text" data-act="delete-file">Delete the copy on the server</button></div>`;
+  } else if (f && importBusy(e)) {
+    html += `<div class="sh-task"><div class="bar${f.percent === undefined ? ' busy' : ''}"><i style="width:${f.percent ?? 0}%"></i></div><p>${esc(f.text || (f.state === 'queued' ? 'Waiting for a turn on the server…' : f.state === 'downloading' ? 'Downloading…' : 'Converting to MP4…'))}</p>
+      <div class="sh-actions"><button type="button" class="btn small danger" data-act="import-cancel">Stop</button></div></div>
+      <p class="sh-note">The server fetches the video once${f.state === 'converting' ? ' and makes an MP4 of it' : ''}; you can close this page meanwhile. A re-encode of the picture takes a long time on this server.</p>`;
+  } else if (f?.state === 'error') {
+    html += `<div class="sh-task error"><p>Could not download to the library: ${esc(f.error || 'unknown error')}</p>
+      <div class="sh-actions"><button type="button" class="btn small" data-act="import">Try again</button><button type="button" class="btn small ghost" data-act="import-cancel">Dismiss</button></div></div>`;
+  } else {
+    html += `<p class="sh-local">No copy on the server.${plainExt && plainExt.toLowerCase() !== 'mp4' ? ` <b>This is ${/^(webm|mov|wmv|mpeg)$/i.test(plainExt) ? 'a' : /^[aefhilmnorsx]/i.test(plainExt) ? 'an' : 'a'} ${esc(plainExt.toUpperCase())} file, which the player cannot read as it is:</b> downloading it to the library converts it to MP4.` : ''}</p>
+      <div class="sh-actions"><button type="button" class="btn${plainExt && plainExt.toLowerCase() !== 'mp4' ? ' primary' : ''}" data-act="import" ${e.unavailable || offline ? 'disabled' : ''}>Download to library</button></div>
+      <p class="sh-note">The server fetches the video once (${e.source === 'other' ? 'the file as it is' : 'the best quality that plays everywhere'}) and keeps it; every device then gets its in-app copy from there, also when the source is gone. Files that are not MP4 (MKV, WebM, AVI…) or use sound the browsers cannot decode (AC-3, DTS…) are converted.</p>`;
+  }
+  return html + '</section>';
+}
+
 function removeHtml(e: LibraryEntry): string {
   const v = local.get(e.id);
   return `<section class="sh-section">
     <h3 class="sh-h">Remove “${esc(e.title)}” from the library?</h3>
-    <p class="sh-note">The link and its details disappear from the library on every device. ${v ? 'The copy downloaded to this browser is deleted as well. ' : ''}Copies downloaded to other browsers are deleted there the next time they open the library. The video itself stays at its source; you can save the link again later.</p>
+    <p class="sh-note">The link and its details disappear from the library on every device. ${v ? 'The copy downloaded to this browser is deleted as well. ' : ''}${e.file?.state === 'ready' ? 'The copy stored on the server is deleted as well. ' : ''}Copies downloaded to other browsers are deleted there the next time they open the library. The video itself stays at its source; you can save the link again later.</p>
     <div class="sh-actions"><button type="button" class="btn danger" data-act="remove-confirm">Remove</button><button type="button" class="btn ghost" data-act="back">Keep it</button></div>
   </section>`;
 }
@@ -662,6 +742,8 @@ const playableCache = new Map<string, boolean>();
 const FAMILY_CODEC: Record<string, string> = { h264: 'avc1.64001f', avc1: 'avc1.64001f', h265: 'hvc1.1.6.L120.B0', hevc: 'hvc1.1.6.L120.B0', vp9: 'vp09.00.31.08', av1: 'av01.0.08M.08' };
 async function playableHere(o: LibraryOption): Promise<boolean> {
   if (o.kind !== 'video') return false;
+  // the WebCodecs pipeline reads MP4 only; the <video> fallback may know other containers (Chromium: MKV / WebM)
+  if (o.ext && !/^(mp4|m4v|mov)$/i.test(o.ext)) return LibraryPlayer.mode().mode !== 'webcodecs';
   const raw = (o.vcodec || '').toLowerCase();
   if (!raw) return true;
   const codec = FAMILY_CODEC[raw] || o.vcodec!;
@@ -854,6 +936,38 @@ el.sheet.addEventListener('click', (ev) => {
     }
     case 'delete-local':
       return void deleteLocal(e);
+    case 'import':
+      return void api
+        .libraryImportEntry(e.id)
+        .then((r) => {
+          lib = r.state;
+          void db.putState(lib);
+          render();
+          schedulePoll();
+          toast(r.started ? 'The server is downloading the video to the library…' : 'The server already has this video');
+        })
+        .catch((err) => toast(errMsg(err), true));
+    case 'import-cancel':
+      return void api
+        .libraryImportCancel(e.id)
+        .then((state) => {
+          lib = state;
+          void db.putState(lib);
+          render();
+        })
+        .catch((err) => toast(errMsg(err), true));
+    case 'delete-file':
+      if (!confirm('Delete the copy of this video on the server? The link stays in your library; copies downloaded to browsers stay too.')) return;
+      return void api
+        .libraryDeleteFile(e.id)
+        .then((state) => {
+          lib = state;
+          void db.putState(lib);
+          optionsCache.delete(e.id);
+          render();
+          toast('The copy on the server was deleted');
+        })
+        .catch((err) => toast(errMsg(err), true));
     case 'cancel':
       return dl.cancel(e.id);
     case 'dismiss':

@@ -54,11 +54,12 @@
       <main class="card">
         <div class="addbox hidden" id="addBox">
           <form class="urlrow" id="saveForm" autocomplete="off">
-            <input id="url" class="url" type="url" inputmode="url" placeholder="Paste a YouTube, TikTok, Instagram or Facebook link" spellcheck="false" required />
+            <input id="url" class="url" type="url" inputmode="url" placeholder="Paste a YouTube, TikTok, Instagram, Facebook link or a direct video file link (MP4, MKV…)" spellcheck="false" required />
             <button type="button" id="pasteBtn" class="btn ghost" title="Paste from the clipboard">Paste</button>
             <button type="submit" id="saveBtn" class="btn primary">Save link</button>
+            <button type="button" id="importBtn" class="btn" title="The server downloads the video once and keeps it; every device gets it from there">Download to library</button>
           </form>
-          <p class="hint" id="saveHint">Saving keeps the link and its details in your library on every device. Nothing is downloaded until you choose to, on the device you want it on.</p>
+          <p class="hint" id="saveHint"><b>Save link</b> keeps the link and its details in your library on every device; nothing is downloaded until you choose to, on the device you want it on. <b>Download to library</b> also fetches the video to the server once, so every device gets it from there, and converts files the player cannot read as they are (MKV, WebM, AVI, 10-bit or AC-3 / DTS sound…) to MP4.</p>
           <p class="status hidden" id="saveStatus" role="status"></p>
         </div>
 

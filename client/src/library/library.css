@@ -577,6 +577,9 @@ input {
 .vstatus.warn {
   color: var(--warn);
 }
+.vstatus.srv {
+  color: #c9b8ff;
+}
 .vbar {
   height: 4px;
   border-radius: 2px;
@@ -855,6 +858,9 @@ body.theater-open .overlay {
   margin: 0;
   font-size: 14px;
   line-height: 1.45;
+}
+.sh-local.srv {
+  color: #c9b8ff;
 }
 .sh-local.ok {
   color: var(--accent);

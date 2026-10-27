@@ -61,21 +61,26 @@ export async function assertSafeUpstream(rawUrl: string, allowlist: string[]): P
   if (!hostAllowed(url.hostname, allowlist)) {
     throw new UpstreamRejectedError(`Upstream host "${url.hostname}" is not in the proxy allowlist`, 'host_not_allowed');
   }
-  if (net.isIP(url.hostname)) {
-    if (ipIsPrivate(url.hostname)) throw new UpstreamRejectedError('Literal IP upstreams are not allowed', 'private_ip');
-    return url;
+  await assertPublicHost(url.hostname);
+  return url;
+}
+
+/** A host the server may contact: a public address, after DNS (no loopback, LAN or cloud-metadata addresses). */
+export async function assertPublicHost(hostname: string): Promise<void> {
+  if (net.isIP(hostname)) {
+    if (ipIsPrivate(hostname)) throw new UpstreamRejectedError('Literal IP upstreams are not allowed', 'private_ip');
+    return;
   }
   let addrs: { address: string }[];
   try {
-    addrs = await dns.promises.lookup(url.hostname, { all: true });
+    addrs = await dns.promises.lookup(hostname, { all: true });
   } catch (e) {
-    throw new UpstreamRejectedError(`DNS lookup failed for ${url.hostname}: ${(e as Error).message}`, 'dns');
+    throw new UpstreamRejectedError(`DNS lookup failed for ${hostname}: ${(e as Error).message}`, 'dns');
   }
-  if (!addrs.length) throw new UpstreamRejectedError(`DNS returned no addresses for ${url.hostname}`, 'dns');
+  if (!addrs.length) throw new UpstreamRejectedError(`DNS returned no addresses for ${hostname}`, 'dns');
   for (const a of addrs) {
     if (ipIsPrivate(a.address)) {
-      throw new UpstreamRejectedError(`Upstream ${url.hostname} resolves to a private address`, 'private_ip');
+      throw new UpstreamRejectedError(`Upstream ${hostname} resolves to a private address`, 'private_ip');
     }
   }
-  return url;
 }

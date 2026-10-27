@@ -677,6 +677,42 @@ export interface LibraryEntry {
   metaError?: string;
   /** The source said the video is gone (private, removed): it cannot be downloaded again */
   unavailable?: { at: number; reason: string };
+  /** A plain file link: the Content-Type the link answered with at the lookup (video/x-matroska, video/mp4...) */
+  mediaType?: string;
+  /** The video downloaded to the library on the server ("Download to library"): every device fetches it from there */
+  file?: LibraryFile;
+}
+
+/**
+ * A copy of the video stored on the server (LIBRARY_DIR/files/<id>.mp4). The server fetches the
+ * link once (a direct file, or the best quality that plays everywhere for a platform video) and
+ * turns anything that is not an MP4 the browsers decode (MKV, WebM, 10-bit H.264, AC-3 sound...)
+ * into one with ffmpeg; browsers then download their in-app copy from /api/library/file/:id.
+ */
+export interface LibraryFile {
+  state: 'queued' | 'downloading' | 'converting' | 'ready' | 'error';
+  /** 0-100 while downloading / converting, when the total is known */
+  percent?: number;
+  /** What is happening right now, for the page ("Fetching 120 MB of 700 MB · 3.1 MB/s") */
+  text?: string;
+  error?: string;
+  /** Set once ready */
+  sizeBytes?: number;
+  ext?: string;
+  mime?: string;
+  /** Codec families as the page's playability check names them: h264 / h265 / vp9 / av1, aac */
+  vcodec?: string;
+  acodec?: string;
+  /** What the server did to the file: "kept as it was", "remuxed from MKV, sound re-encoded to AAC (was AC-3)" */
+  note?: string;
+  /** The original file's name (the link's last segment, or the server's Content-Disposition) */
+  originalName?: string;
+  /** Platform videos: the quality that was fetched ("1080p") */
+  label?: string;
+  startedAt: number;
+  finishedAt?: number;
+  /** Imports restarted after a server restart (given up after a couple) */
+  attempts: number;
 }
 
 export interface LibraryState {
@@ -695,6 +731,8 @@ export interface LibrarySaveResponse {
   entry: LibraryEntry;
   /** The link was already in the library: `entry` is the existing one */
   duplicate: boolean;
+  /** POST /api/library/import: the server started fetching the video (false = a copy is already there) */
+  importStarted?: boolean;
   state: LibraryState;
 }
 

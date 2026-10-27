@@ -11,8 +11,10 @@
  *    expire within days) and served from /api/library/thumb/:id.
  *  - options(): the qualities a browser can get right now. YouTube = the downloader's options
  *    (server job: parts merged with ffmpeg); the others = ready MP4s the browser fetches itself.
- *  - Video files are never kept here: a browser downloads a copy for itself (IndexedDB), or saves a
- *    file on its device. The library is a list of links, not a backup of the videos.
+ *  - Video files are not kept here unless asked: a browser downloads a copy for itself (IndexedDB),
+ *    or saves a file on its device. "Download to library" (libraryFiles.ts) is the exception: the
+ *    server fetches the video once into LIBRARY_DIR/files, converts it to an MP4 the browsers
+ *    decode when it is not one (MKV, WebM, AC-3 sound...), and every device gets it from there.
  */
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
@@ -52,6 +54,7 @@ function dataDir(): string {
 const DIR = dataDir();
 const FILE = path.join(DIR, 'library.json');
 const THUMBS = path.join(DIR, 'thumbs');
+const FILES = path.join(DIR, 'files');
 
 let state: LibraryState | undefined;
 let saveTimer: NodeJS.Timeout | undefined;
@@ -103,6 +106,40 @@ export function flushLibrary(): void {
 
 export const libraryState = (): LibraryState => load();
 export const libraryDir = (): string => DIR;
+export const libraryThumbsDir = (): string => THUMBS;
+export const libraryFilesDir = (): string => FILES;
+/** Something changed in the state (rev grows, the file is written soon). */
+export const markChanged = (): void => changed();
+export const libraryLog = (m: string): void => log(m);
+export const getEntry = (id: string): LibraryEntry | undefined => load().entries.find((x) => x.id === id);
+
+/** Where an entry's server copy lives (whether or not the file exists). */
+export const entryFilePath = (e: LibraryEntry): string => path.join(FILES, `${e.id}.${e.file?.ext || 'mp4'}`);
+
+/** Registered by libraryFiles.ts: an entry is leaving the library (a running import must stop). */
+let removeHook: (e: LibraryEntry) => void = () => undefined;
+export const setRemoveHook = (fn: (e: LibraryEntry) => void): void => {
+  removeHook = fn;
+};
+
+/** Deletes the server copy of a video (the entry stays, as a link). */
+export function deleteFile(id: string): LibraryEntry {
+  const e = getEntry(id);
+  if (!e) throw new LibraryError('That video is no longer in the library', 404);
+  removeHook(e);
+  try {
+    fs.unlinkSync(entryFilePath(e));
+  } catch {
+    /* not there */
+  }
+  if (e.file) {
+    e.file = undefined;
+    e.updatedAt = Date.now();
+    changed();
+    log(`server copy of ${e.id} deleted`);
+  }
+  return e;
+}
 
 const newId = (): string => crypto.randomBytes(6).toString('base64url');
 
@@ -168,7 +205,11 @@ const placeholderTitle = (url: string, source: LibrarySource, sourceId?: string)
   return sourceId ? `${names[source]} ${sourceId}` : names[source];
 };
 
-export function saveLink(rawUrl: string, categoryIds: string[] = []): { entry: LibraryEntry; duplicate: boolean } {
+/**
+ * Saves a link. `lookup: false` skips the metadata lookup (an import of a plain file finds the
+ * details in the file itself).
+ */
+export function saveLink(rawUrl: string, categoryIds: string[] = [], opts: { lookup?: boolean } = {}): { entry: LibraryEntry; duplicate: boolean } {
   const s = load();
   const url = normalizeUrl(rawUrl);
   const c = canonicalize(url);
@@ -176,6 +217,7 @@ export function saveLink(rawUrl: string, categoryIds: string[] = []): { entry: L
   if (existing) return { entry: existing, duplicate: true };
   const now = Date.now();
   const valid = new Set(s.categories.map((x) => x.id));
+  const doLookup = opts.lookup !== false;
   const entry: LibraryEntry = {
     id: newId(),
     url,
@@ -186,12 +228,12 @@ export function saveLink(rawUrl: string, categoryIds: string[] = []): { entry: L
     categoryIds: categoryIds.filter((id) => valid.has(id)),
     addedAt: now,
     updatedAt: now,
-    meta: 'pending',
+    meta: doLookup ? 'pending' : 'ok',
   };
   s.entries.unshift(entry);
   changed();
   log(`saved ${c.source} ${c.canonicalUrl}`);
-  scheduleLookup(entry.id);
+  if (doLookup) scheduleLookup(entry.id);
   return { entry, duplicate: false };
 }
 
@@ -221,8 +263,14 @@ export function deleteEntry(id: string): void {
   if (i < 0) throw new LibraryError('That video is no longer in the library', 404);
   const [e] = s.entries.splice(i, 1);
   removeThumb(e.id);
+  removeHook(e);
+  try {
+    fs.unlinkSync(entryFilePath(e));
+  } catch {
+    /* no server copy */
+  }
   changed();
-  log(`removed ${e.source} ${e.canonicalUrl}`);
+  log(`removed ${e.source} ${e.canonicalUrl}${e.file ? ' (and its server copy)' : ''}`);
 }
 
 export function refreshEntry(id: string): LibraryEntry {
@@ -301,6 +349,8 @@ interface Looked {
   cover?: string;
   canonicalUrl?: string;
   sourceId?: string;
+  /** A plain file link: the Content-Type it answered with */
+  mediaType?: string;
 }
 
 /** Is this error the source saying the video is gone (as opposed to this server failing to ask)? */
@@ -339,9 +389,9 @@ async function lookup(e: LibraryEntry): Promise<Looked> {
   const { res, status } = await openUpstream(e.url.replace(/^http:/, 'https:'), { allowlist: ['*'], maxRedirects: 5, headers: { range: 'bytes=0-0' } });
   res.destroy();
   if (status >= 400) throw new LibraryError(`The link answered HTTP ${status}`, status === 404 ? 404 : 502);
-  const type = String(res.headers['content-type'] || '');
-  if (type && !/^(video\/|application\/octet-stream|application\/mp4)/i.test(type)) throw new LibraryError(`The link is not a video file (${type.split(';')[0]})`);
-  return {};
+  const type = String(res.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+  if (type && !/^(video\/|application\/octet-stream|application\/mp4|application\/x-matroska)/i.test(type)) throw new LibraryError(`The link is not a video file (${type})`);
+  return { mediaType: type || undefined };
 }
 
 async function runLookup(id: string): Promise<void> {
@@ -359,6 +409,7 @@ async function runLookup(id: string): Promise<void> {
     if (got.height) e.height = got.height;
     if (got.sourceId) e.sourceId = got.sourceId;
     if (got.canonicalUrl) e.canonicalUrl = got.canonicalUrl;
+    if (got.mediaType) e.mediaType = got.mediaType;
     e.meta = 'ok';
     e.metaError = undefined;
     e.unavailable = undefined;
@@ -391,7 +442,7 @@ function thumbPath(id: string): string | undefined {
   }
 }
 
-function removeThumb(id: string): void {
+export function removeThumb(id: string): void {
   const p = thumbPath(id);
   if (p) {
     try {
@@ -491,10 +542,60 @@ function streamOptions(r: ResolveResponse, hostAllowlist: string[]): LibraryOpti
   return out;
 }
 
+/** The container a plain file link points at, from the Content-Type seen at the lookup or the link's extension. */
+export function fileExtOf(e: LibraryEntry): string {
+  const byType: Record<string, string> = { 'video/x-matroska': 'mkv', 'application/x-matroska': 'mkv', 'video/webm': 'webm', 'video/quicktime': 'mov', 'video/x-msvideo': 'avi', 'video/avi': 'avi', 'video/mp2t': 'ts', 'video/x-flv': 'flv', 'video/x-ms-wmv': 'wmv', 'video/mp4': 'mp4', 'video/x-m4v': 'mp4' };
+  if (e.mediaType && byType[e.mediaType]) return byType[e.mediaType];
+  try {
+    const m = /\.([a-z0-9]{2,4})$/i.exec(new URL(e.url).pathname);
+    if (m) {
+      const ext = m[1].toLowerCase();
+      if (/^(mkv|webm|mov|avi|ts|m2ts|flv|wmv|mpg|mpeg|3gp|ogv)$/.test(ext)) return ext;
+    }
+  } catch {
+    /* fine */
+  }
+  return 'mp4';
+}
+
+const FAMILY_NAME: Record<string, string> = { h264: 'H.264', h265: 'H.265', av1: 'AV1', vp9: 'VP9' };
+/** "an MKV file", "a WebM file": initialisms are spelt out, so the article follows the first letter's sound. */
+export const articleFor = (ext: string): string => (/^(webm|mov|wmv|mp4|mpeg)$/i.test(ext) ? 'a' : /^[aefhilmnorsx]/i.test(ext) ? 'an' : 'a');
+
+/** The server copy as the one quality on offer (the source is not asked). */
+function serverCopyOptions(e: LibraryEntry): LibraryOptionsResponse {
+  const f = e.file!;
+  const p = e.width && e.height ? Math.min(e.width, e.height) : undefined;
+  return {
+    entryId: e.id,
+    options: [
+      {
+        id: 'library',
+        kind: 'video',
+        label: p ? `${p}p` : 'Library copy',
+        detail: `MP4 · ${FAMILY_NAME[f.vcodec || ''] || f.vcodec || '?'}${f.acodec ? ' + AAC' : ' (no sound)'} · from the library on the server`,
+        width: e.width,
+        height: e.height,
+        vcodec: f.vcodec,
+        acodec: f.acodec,
+        ext: 'mp4',
+        sizeBytes: f.sizeBytes,
+        sizeIsEstimate: false,
+        recommended: true,
+        via: 'stream',
+        proxyUrl: `/api/library/file/${e.id}`,
+      },
+    ],
+    warnings: [],
+    elapsedMs: 0,
+  };
+}
+
 export async function entryOptions(id: string): Promise<LibraryOptionsResponse> {
   const s = load();
   const e = s.entries.find((x) => x.id === id);
   if (!e) throw new LibraryError('That video is no longer in the library', 404);
+  if (e.file?.state === 'ready') return serverCopyOptions(e);
   const t0 = Date.now();
   const l = (m: string) => log(`options ${e.id}: ${m}`);
   try {
@@ -533,6 +634,16 @@ export async function entryOptions(id: string): Promise<LibraryOptionsResponse> 
       }
       const options = streamOptions(r, config.proxyAllowedHosts);
       if (!options.length) throw new LibraryError('No downloadable video file was found for this link', 404);
+      if (e.source === 'other') {
+        // a plain file: the player reads MP4 only; anything else is offered as a file, with the way to convert it
+        const ext = fileExtOf(e);
+        for (const o of options) {
+          o.ext = ext;
+          o.vcodec = undefined;
+          o.detail = ext === 'mp4' ? 'MP4 file' : `${ext.toUpperCase()} file`;
+        }
+        if (ext !== 'mp4') r.warnings.push(`This is ${articleFor(ext)} ${ext.toUpperCase()} file, which the app's player cannot read as it is. “Download to library” fetches it to the server and converts it to MP4; every device can then play it.`);
+      }
       // sizes, a few at a time, without holding the answer up for long
       await Promise.all(options.slice(0, 6).map(async (o) => {
         // the cookie-free URL (TikTok's redirect to its CDN, the others' plain MP4s); cookie-bound ones need the proxy's record
@@ -566,4 +677,11 @@ export async function entryOptions(id: string): Promise<LibraryOptionsResponse> 
   }
 }
 
-export const libraryStats = (): { entries: number; categories: number; pendingLookups: number; dir: string } => ({ entries: load().entries.length, categories: load().categories.length, pendingLookups: lookups.size, dir: DIR });
+export const libraryStats = (): { entries: number; categories: number; pendingLookups: number; files: number; fileBytes: number; dir: string } => ({
+  entries: load().entries.length,
+  categories: load().categories.length,
+  pendingLookups: lookups.size,
+  files: load().entries.filter((e) => e.file?.state === 'ready').length,
+  fileBytes: load().entries.reduce((n, e) => n + (e.file?.state === 'ready' ? e.file.sizeBytes || 0 : 0), 0),
+  dir: DIR,
+});
