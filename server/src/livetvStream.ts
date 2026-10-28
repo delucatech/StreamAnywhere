@@ -283,6 +283,9 @@ interface RemuxSession {
   proc: ChildProcess;
   startedAt: number;
   lastHit: number;
+  /** viewer id -> last request: the player says when it leaves, so a zapped-away channel stops at once */
+  viewers: Map<string, number>;
+  leaveTimer?: NodeJS.Timeout;
   ready: Promise<void>;
   exited?: { code: number | null; signal: string | null };
   stderr: string[];
@@ -295,8 +298,28 @@ const sessions = new Map<string, RemuxSession>();
  */
 const REMUX_IDLE_MS = 3 * 60_000;
 const REMUX_READY_MS = 30_000;
+/** The last viewer left: stop after this (a reload or a quick retune hits again before then) */
+const LEAVE_GRACE_MS = 8_000;
+/**
+ * Recorders running at once (one ffmpeg, a stream's worth of download and up to a window of disk
+ * each): on the 1 GB VM, two. A third channel stops the one nobody asked for the longest.
+ */
+const MAX_RECORDERS = Math.max(1, Number(process.env.LIVETV_MAX_RECORDERS) || 2);
 const safeDirName = (key: string): string => key.replace(/[^\w.-]/g, '_').slice(0, 80);
-const remuxRoot = (): string => path.join(os.tmpdir(), 'streamanywhere-livetv');
+let root = path.join(os.tmpdir(), 'streamanywhere-livetv');
+const remuxRoot = (): string => root;
+/**
+ * Where the recordings go: a folder on disk (the data dir's `cache`), never a RAM-backed /tmp, since
+ * a window is hundreds of MB. Emptied here: whatever a crashed server left is of no use.
+ */
+export function setRemuxRoot(dir: string): void {
+  root = dir;
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch {
+    /* nothing there */
+  }
+}
 
 const segmentsIn = (playlist: string): number => (playlist.match(/#EXTINF/g) || []).length;
 
@@ -334,7 +357,7 @@ async function startRemux(key: string, src: RemuxSource, ffmpeg: string, secrets
   fs.mkdirSync(dir, { recursive: true });
   const args = remuxArgs(src, dir);
   const proc = spawn(ffmpeg, args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
-  const s: RemuxSession = { key, input: src.input, dir, proc, startedAt: Date.now(), lastHit: Date.now(), ready: Promise.resolve(), stderr: [] };
+  const s: RemuxSession = { key, input: src.input, dir, proc, startedAt: Date.now(), lastHit: Date.now(), viewers: new Map(), ready: Promise.resolve(), stderr: [] };
   proc.stderr?.on('data', (d: Buffer) => {
     for (const line of d.toString().split(/\r?\n/)) {
       if (!line.trim()) continue;
@@ -375,6 +398,7 @@ async function startRemux(key: string, src: RemuxSource, ffmpeg: string, secrets
 
 function stopRemux(s: RemuxSession, why: string): void {
   sessions.delete(s.key);
+  if (s.leaveTimer) clearTimeout(s.leaveTimer);
   if (!s.exited) {
     try {
       s.proc.kill();
@@ -386,8 +410,18 @@ function stopRemux(s: RemuxSession, why: string): void {
   log(`remux ${s.key}: stopped (${why})`);
 }
 
+/** A request from a viewer: the session stays while any viewer is around */
+function hit(s: RemuxSession, viewer: string | undefined): void {
+  s.lastHit = Date.now();
+  if (viewer) s.viewers.set(viewer, s.lastHit);
+  if (s.leaveTimer) {
+    clearTimeout(s.leaveTimer);
+    s.leaveTimer = undefined;
+  }
+}
+
 /** The remux of a channel, started if not running; resolves once two segments exist. */
-export async function ensureRemux(key: string, src: RemuxSource, secrets: string[]): Promise<{ playUrl: string }> {
+export async function ensureRemux(key: string, src: RemuxSource, secrets: string[], viewer?: string): Promise<{ playUrl: string }> {
   const ff = await detectFfmpeg();
   if (!ff.available || !ff.path) throw new Error('This channel is a raw MPEG-TS stream, which needs ffmpeg on the server to play in a browser; ffmpeg is not installed there.');
   let s = sessions.get(key);
@@ -395,15 +429,35 @@ export async function ensureRemux(key: string, src: RemuxSource, secrets: string
     stopRemux(s, s.exited ? 'restarting after an exit' : 'the source changed');
     s = undefined;
   }
-  if (!s) s = await startRemux(key, src, ff.path, secrets);
-  s.lastHit = Date.now();
+  if (!s) {
+    // room for one more: the recorder nobody asked for the longest goes
+    while (sessions.size >= MAX_RECORDERS) {
+      const oldest = [...sessions.values()].reduce((a, b) => (b.lastHit < a.lastHit ? b : a));
+      stopRemux(oldest, `making room (${MAX_RECORDERS} recorders at most)`);
+    }
+    s = await startRemux(key, src, ff.path, secrets);
+  }
+  hit(s, viewer);
   try {
     await s.ready;
   } catch (e) {
     stopRemux(s, 'failed to start');
     throw e;
   }
-  return { playUrl: `/api/livetv/remux/${encodeURIComponent(key)}/index.m3u8` };
+  return { playUrl: `/api/livetv/remux/${encodeURIComponent(key)}/index.m3u8${viewer ? `?v=${encodeURIComponent(viewer)}` : ''}` };
+}
+
+/** The player left the channel (another channel, the player closed, the page gone): stop soon unless someone else watches. */
+export function leaveRemux(key: string, viewer: string): void {
+  const s = sessions.get(key);
+  if (!s) return;
+  s.viewers.delete(viewer);
+  if (s.viewers.size || s.leaveTimer) return;
+  s.leaveTimer = setTimeout(() => {
+    s.leaveTimer = undefined;
+    if (sessions.get(key) === s && !s.viewers.size) stopRemux(s, 'the viewer left');
+  }, LEAVE_GRACE_MS);
+  s.leaveTimer.unref?.();
 }
 
 export const remuxAvailable = async (): Promise<boolean> => (await detectFfmpeg()).available;
@@ -411,7 +465,10 @@ export const remuxStats = (): { running: number; keys: string[] } => ({ running:
 
 const reaper = setInterval(() => {
   const now = Date.now();
-  for (const s of sessions.values()) if (now - s.lastHit > REMUX_IDLE_MS || (s.exited && now - s.lastHit > 5000)) stopRemux(s, s.exited ? 'ffmpeg had exited' : 'nobody watching');
+  for (const s of sessions.values()) {
+    for (const [v, at] of s.viewers) if (now - at > REMUX_IDLE_MS) s.viewers.delete(v);
+    if (now - s.lastHit > REMUX_IDLE_MS || (s.exited && now - s.lastHit > 5000)) stopRemux(s, s.exited ? 'ffmpeg had exited' : 'nobody watching');
+  }
 }, 10_000);
 reaper.unref?.();
 
@@ -544,11 +601,11 @@ export function registerLiveTvStreamRoutes(app: FastifyInstance, resolveSource: 
   app.head('/api/livetv/file/:key', file);
 
   // the remuxed playlist and its segments (files ffmpeg writes)
-  app.get<{ Params: { key: string; file: string } }>('/api/livetv/remux/:key/:file', async (req, reply) => {
+  app.get<{ Params: { key: string; file: string }; Querystring: { v?: string } }>('/api/livetv/remux/:key/:file', async (req, reply) => {
     const s = sessions.get(req.params.key);
     if (!s) return reply.code(404).send({ error: 'This channel is not being remuxed any more: tune it again' });
     if (!/^(index\.m3u8|seg\d{5,}\.ts)$/.test(req.params.file)) return reply.code(400).send({ error: 'Bad file name' });
-    s.lastHit = Date.now();
+    hit(s, typeof req.query.v === 'string' ? req.query.v.slice(0, 64) : undefined);
     const file = path.join(s.dir, req.params.file);
     if (req.params.file === 'index.m3u8') {
       let text: string;

@@ -928,6 +928,12 @@ export interface LiveTvTuneRequest {
    * pausing holds only what the provider's playlist still lists). Default true.
    */
   dvr?: boolean;
+  /** This player's id (random per page load): its recorder stops when it leaves (POST /api/livetv/leave) */
+  viewer?: string;
+}
+export interface LiveTvLeaveRequest {
+  key: string;
+  viewer: string;
 }
 
 export type LiveTvStreamKind = 'hls' | 'remux' | 'progressive';

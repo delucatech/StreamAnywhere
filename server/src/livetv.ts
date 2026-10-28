@@ -18,14 +18,14 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import type { LiveTvAccount, LiveTvChannel, LiveTvChannelGuideResponse, LiveTvChannelsResponse, LiveTvGuideNowResponse, LiveTvPrefs, LiveTvPrefsPatch, LiveTvProvider, LiveTvProviderInput, LiveTvProviderKind, LiveTvState, LiveTvTestRequest, LiveTvTestResponse, LiveTvTuneRequest, LiveTvTuneResponse } from '../../shared/types';
+import type { LiveTvAccount, LiveTvChannel, LiveTvChannelGuideResponse, LiveTvChannelsResponse, LiveTvGuideNowResponse, LiveTvLeaveRequest, LiveTvPrefs, LiveTvPrefsPatch, LiveTvProvider, LiveTvProviderInput, LiveTvProviderKind, LiveTvState, LiveTvTestRequest, LiveTvTestResponse, LiveTvTuneRequest, LiveTvTuneResponse } from '../../shared/types';
 import { detectFfmpeg } from './ffmpeg';
 import { decryptJson, encryptJson, setLiveTvCryptoLogger } from './livetvCrypto';
 import { EPG_TTL_MS, epgLoading, epgStore, forgetEpg, loadEpg, nowNext, programmesFor, setEpgDir, type EpgWanted } from './livetvEpg';
 import { checkLiveUrl, fetchLiveText, redactUrl, safeHost } from './livetvHttp';
 import { cleanChannelName, countGroups, parseM3u, splitGroups, type M3uChannel } from './livetvM3u';
 import { LIVETV_PRESETS, presetById } from './livetvPresets';
-import { classify, DVR_WINDOW_SEC, ensureRemux, pickVariant, registerLiveTvStreamRoutes, remuxAvailable, remuxStats, setLiveTvStreamLogger, shutdownLiveTvStreams, type StreamSource, type Verdict } from './livetvStream';
+import { classify, DVR_WINDOW_SEC, ensureRemux, leaveRemux, pickVariant, registerLiveTvStreamRoutes, remuxAvailable, remuxStats, setLiveTvStreamLogger, setRemuxRoot, shutdownLiveTvStreams, type StreamSource, type Verdict } from './livetvStream';
 import { normalizeXtreamServer, xtreamAccount, xtreamEpgUrl, xtreamLiveChannels, xtreamLiveUrl, xtreamSecrets, XtreamError, type XtreamCreds } from './livetvXtream';
 
 export class LiveTvError extends Error {
@@ -53,6 +53,7 @@ const PROVIDERS_FILE = path.join(DIR, 'providers.json');
 const PREFS_FILE = path.join(DIR, 'prefs.json');
 const CHANNELS_DIR = path.join(DIR, 'channels');
 setEpgDir(path.join(DIR, 'epg'));
+setRemuxRoot(path.join(DIR, 'cache'));
 
 /** What the provider must keep secret (one encrypted blob) */
 interface Secrets {
@@ -685,13 +686,16 @@ function noteTune(key: string, ok: boolean): void {
   prefsChanged();
 }
 
-export async function tune(key: string, dvr = true): Promise<LiveTvTuneResponse> {
-  const r = await tuneChannel(key, dvr);
+/** A viewer id as the page sends it (letters, digits, - and _; at most 64) */
+const cleanViewer = (v: unknown): string | undefined => (typeof v === 'string' && /^[\w-]{1,64}$/.test(v) ? v : undefined);
+
+export async function tune(key: string, dvr = true, viewer?: string): Promise<LiveTvTuneResponse> {
+  const r = await tuneChannel(key, dvr, viewer);
   noteTune(key, r.state === 'ok');
   return r;
 }
 
-async function tuneChannel(key: string, dvr: boolean): Promise<LiveTvTuneResponse> {
+async function tuneChannel(key: string, dvr: boolean, viewer: string | undefined): Promise<LiveTvTuneResponse> {
   const t0 = Date.now();
   const found = findChannel(key);
   if (!found) throw new LiveTvError('That channel is not in the list any more (the provider changed its playlist?)', 404);
@@ -729,7 +733,7 @@ async function tuneChannel(key: string, dvr: boolean): Promise<LiveTvTuneRespons
   if (v.kind === 'hls' && dvr && v.hlsInput && (await remuxAvailable())) {
     // pause and rewind: ffmpeg records the variant into a rolling window; the relay stays the fallback
     try {
-      playUrl = (await ensureRemux(key, { url: v.hlsInput.url, headers: v.headers, input: 'hls', program: v.hlsInput.program }, src.secrets || [])).playUrl;
+      playUrl = (await ensureRemux(key, { url: v.hlsInput.url, headers: v.headers, input: 'hls', program: v.hlsInput.program }, src.secrets || [], viewer)).playUrl;
       recorded = true;
       log(`tune ${p.name} / ${cleanChannelName(c.name)}: recorder on ${v.hlsInput.resolution || '?'} ${v.hlsInput.bandwidth ? Math.round(v.hlsInput.bandwidth / 1000) + ' kbps' : ''}, ${Date.now() - t0} ms`);
       return { key, state: 'ok', kind: 'remux', playUrl, detail: `hls, recorded${v.hlsInput.resolution ? ' at ' + v.hlsInput.resolution : ''}`, message, dvr: true, windowSec: DVR_WINDOW_SEC, elapsedMs: Date.now() - t0 };
@@ -739,7 +743,7 @@ async function tuneChannel(key: string, dvr: boolean): Promise<LiveTvTuneRespons
   }
   if (v.kind === 'remux') {
     try {
-      playUrl = (await ensureRemux(key, { url: v.url!, headers: v.headers, input: 'ts' }, src.secrets || [])).playUrl;
+      playUrl = (await ensureRemux(key, { url: v.url!, headers: v.headers, input: 'ts' }, src.secrets || [], viewer)).playUrl;
       recorded = true;
     } catch (e) {
       verdicts.delete(key);
@@ -865,10 +869,17 @@ export function registerLiveTv(app: FastifyInstance): void {
     try {
       const key = String(req.body?.key || '');
       if (!key) throw new LiveTvError('Which channel?');
-      return await tune(key, req.body?.dvr !== false);
+      return await tune(key, req.body?.dvr !== false, cleanViewer(req.body?.viewer));
     } catch (e) {
       return fail(reply, e);
     }
+  });
+  // the player left a channel (switched, closed, or the page went away: a beacon): its recorder stops soon
+  app.post<{ Body: LiveTvLeaveRequest }>('/api/livetv/leave', async (req) => {
+    const key = String(req.body?.key || '');
+    const viewer = cleanViewer(req.body?.viewer);
+    if (key && viewer) leaveRemux(key, viewer);
+    return { ok: true };
   });
   app.post<{ Body: LiveTvPrefsPatch }>('/api/livetv/prefs', async (req, reply) => {
     try {

@@ -121,6 +121,10 @@ export class LiveTvPlayer {
   dvr = true;
   /** How far back the current stream reaches (the server's answer), 0 when unknown */
   private windowSec = 0;
+  /** This player, to the server: the recorder of a channel it leaves stops at once */
+  private readonly viewer = Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
+  /** The channel whose recorder runs for this player (told when leaving it) */
+  private recordedKey?: string;
   private timelineTimer = 0;
   private scrubbing = false;
   state: PlayerState = 'idle';
@@ -250,6 +254,21 @@ export class LiveTvPlayer {
     }, { passive: true });
     document.addEventListener('keydown', (e) => this.onKey(e));
     document.addEventListener('fullscreenchange', () => this.wake());
+    // the page goes away (closed, navigated, the car's browser killed): a beacon frees the recorder
+    window.addEventListener('pagehide', () => {
+      if (!this.recordedKey) return;
+      const body = new Blob([JSON.stringify({ key: this.recordedKey, viewer: this.viewer })], { type: 'application/json' });
+      navigator.sendBeacon?.(apiUrl('/api/livetv/leave'), body);
+      this.recordedKey = undefined;
+    });
+  }
+
+  /** Tells the server this player left the recorded channel (nothing to say when none is recorded). */
+  private leaveRecorded(): void {
+    const key = this.recordedKey;
+    if (!key) return;
+    this.recordedKey = undefined;
+    void api.liveTvLeave(key, this.viewer).catch(() => undefined);
   }
 
   get isOpen(): boolean {
@@ -283,6 +302,7 @@ export class LiveTvPlayer {
     this.generation++;
     window.clearInterval(this.timelineTimer);
     this.timelineTimer = 0;
+    this.leaveRecorded();
     this.stopMedia();
     this.root.classList.add('hidden', 'idle');
     this.root.classList.remove('guide-open');
@@ -311,6 +331,7 @@ export class LiveTvPlayer {
     this.index = index;
     this.recovered = false;
     this.unfreezes = 0;
+    if (this.recordedKey !== ch.key) this.leaveRecorded();
     this.stopMedia();
     this.logoEl.innerHTML = ch.logo ? `<img src="${esc(ch.logo)}" alt="" draggable="false" />` : '';
     this.nameEl.textContent = (ch.number ? `${ch.number} · ` : '') + ch.name;
@@ -329,7 +350,7 @@ export class LiveTvPlayer {
     if (ch.drm) return this.showMessage('unsupported', 'This channel is DRM-protected (the playlist names license keys); it cannot play here.', 'DRM');
     let t: LiveTvTuneResponse;
     try {
-      t = await api.liveTvTune(ch.key, this.dvr);
+      t = await api.liveTvTune(ch.key, this.dvr, this.viewer);
     } catch (e) {
       if (gen !== this.generation) return;
       const m = e instanceof ApiError ? e.message : (e as Error).message;
@@ -339,6 +360,7 @@ export class LiveTvPlayer {
     this.hooks.onTuned(ch, t.state === 'ok' && !!t.playUrl);
     if (t.state !== 'ok' || !t.playUrl) return this.showMessage(t.state === 'unsupported' ? 'unsupported' : 'unavailable', t.message || 'This channel is not available right now.', t.detail);
     this.windowSec = t.dvr ? t.windowSec || 0 : 0;
+    this.recordedKey = t.kind === 'remux' ? ch.key : undefined;
     this.setState('loading');
     this.showWait('Loading…');
     this.startMedia(apiUrl(t.playUrl), t.kind === 'progressive', gen);
@@ -598,6 +620,7 @@ export class LiveTvPlayer {
   }
 
   private showMessage(kind: 'unavailable' | 'unsupported', text: string, detail?: string): void {
+    this.leaveRecorded();
     this.stopMedia();
     this.wait.classList.add('hidden');
     this.setState(kind);

@@ -530,7 +530,12 @@ first bytes:
   bitrate adaptation; the recorder failing to start falls back to the direct relay. With the setting
   off, HLS plays straight from the relay and pausing holds only what the provider's playlist still
   lists. hls.js is configured without `liveMaxLatencyDurationCount`, so it never drags a paused or
-  rewound player back to live;
+  rewound player back to live. Recordings live in `LIVETV_DIR/cache` (disk, emptied at start),
+  never in a RAM-backed /tmp. The player sends a viewer id with the tune and `POST /api/livetv/leave`
+  when it switches channel, closes, or the page goes away (a beacon), so a left channel's
+  recorder stops 8 s later and its files go with it; at most `LIVETV_MAX_RECORDERS` (2) run at
+  once – a third channel stops the one nobody asked for the longest – and 3 min without any
+  request stops one anyway;
 - a **media file** (MP4 / WebM) is relayed as it is (`/api/livetv/file/:key`, Range forwarded);
 - **MPEG-DASH**, a **web page** (a YouTube / Twitch link in a playlist), **DRM** and unknown formats are
   *unsupported* with the reason; an HTTP error, nothing, or a timeout is *unavailable* with the
