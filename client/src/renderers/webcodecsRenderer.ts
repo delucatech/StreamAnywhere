@@ -72,6 +72,8 @@ export class WebCodecsRenderer implements Renderer {
   private firstFrameSent = false;
   private rotation = 0;
   private generation = 0;
+  /** An endless stream (LoadSource.live): see frameStep for what differs */
+  private live = false;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -121,6 +123,13 @@ export class WebCodecsRenderer implements Renderer {
     if (!support.ok) {
       this.fail(new Error(support.reason!));
       return;
+    }
+    this.live = !!src.live;
+    if (src.startAt && src.startAt > 0) {
+      // present from here: what the decoders produce before it (the fragment's lead-in) is dropped
+      const startUs = Math.round(src.startAt * 1e6);
+      this.pendingSeekUs = startUs;
+      this.lastRenderedUs = startUs;
     }
     // Two files: configure once both have parsed their moov (or the sound file has failed).
     const split = Boolean(src.audioUrl);
@@ -585,6 +594,7 @@ export class WebCodecsRenderer implements Renderer {
     this.lastReleasedSample = 0;
     this.durationUs = 0;
     this.firstFrameSent = false;
+    this.live = false;
     this.fps.reset();
     this.videoTrack = undefined;
     this.audioTrack = undefined;
@@ -681,7 +691,16 @@ export class WebCodecsRenderer implements Renderer {
       }
       return;
     }
-    const now = this.clock.currentMediaUs();
+    let now = this.clock.currentMediaUs();
+    if (this.live && this.frames.length && this.frames[0].timestamp > now + 3_000_000) {
+      // the timestamps jumped (a segment dropped out of the server's window while paused, or the
+      // upstream restarted): a finite file would wait here for the clock; a live stream moves on
+      const jumpTo = this.frames[0].timestamp;
+      this.events.onLog('info', `live stream jumped from ${(now / 1e6).toFixed(1)}s to ${(jumpTo / 1e6).toFixed(1)}s; following it`);
+      this.audio?.reset();
+      void this.clock.start(jumpTo);
+      now = jumpTo;
+    }
     let chosen: VideoFrame | undefined;
     while (this.frames.length && this.frames[0].timestamp <= now + 2000) {
       if (chosen) {

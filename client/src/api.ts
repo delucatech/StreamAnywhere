@@ -1,4 +1,4 @@
-import type { LiveTvChannelGuideResponse, LiveTvChannelsResponse, LiveTvGuideNowResponse, LiveTvPrefs, LiveTvPrefsPatch, LiveTvPreset, LiveTvProvider, LiveTvProviderInput, LiveTvState, LiveTvTestRequest, LiveTvTestResponse, LiveTvTuneResponse, ConversationResponse, DownloadJob, DownloadProbeResponse, DownloadSource, FeedProgress, LibraryCategory, LibraryEntry, LibraryEntryPatch, LibraryOptionsResponse, LibrarySaveHint, LibrarySaveResponse, LibraryState, FeedRequest, FeedResponse, FollowRequest, FollowResponse, HealthResponse, InboxResponse, LoginMode, Platform, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SendMessageResponse, ServerProbe, SessionInputRequest, SessionStatus } from '../../shared/types';
+import type { LiveTvChannelGuideResponse, LiveTvChannelsResponse, LiveTvGuideNowResponse, LiveTvPrefs, LiveTvPrefsPatch, LiveTvPreset, LiveTvWindow, LiveTvProvider, LiveTvProviderInput, LiveTvState, LiveTvTestRequest, LiveTvTestResponse, LiveTvTuneResponse, ConversationResponse, DownloadJob, DownloadProbeResponse, DownloadSource, FeedProgress, LibraryCategory, LibraryEntry, LibraryEntryPatch, LibraryOptionsResponse, LibrarySaveHint, LibrarySaveResponse, LibraryState, FeedRequest, FeedResponse, FollowRequest, FollowResponse, HealthResponse, InboxResponse, LoginMode, Platform, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SendMessageResponse, ServerProbe, SessionInputRequest, SessionStatus } from '../../shared/types';
 
 /**
  * API base URL. Empty = same origin (dev server proxy or SERVE_CLIENT deployments). When the
@@ -200,7 +200,8 @@ export const api = {
   liveTvRefreshProvider: (id: string): Promise<LiveTvState> => post(`/api/livetv/providers/${id}/refresh`, {}),
   /** A connection test of a form being filled in, or of a saved provider (its id): up to a minute for a big playlist */
   liveTvTest: (req: LiveTvTestRequest): Promise<LiveTvTestResponse> => post('/api/livetv/providers/test', req, 90_000),
-  liveTvTune: (key: string, dvr = true, viewer?: string): Promise<LiveTvTuneResponse> => post('/api/livetv/tune', { key, dvr, viewer }, 60_000),
+  liveTvTune: (key: string, viewer?: string): Promise<LiveTvTuneResponse> => post('/api/livetv/tune', { key, viewer }, 60_000),
+  liveTvWindow: (key: string, viewer: string): Promise<LiveTvWindow> => getJson(`/api/livetv/live/${encodeURIComponent(key)}/window?v=${encodeURIComponent(viewer)}`),
   liveTvLeave: (key: string, viewer: string): Promise<{ ok: boolean }> => post('/api/livetv/leave', { key, viewer }, 10_000),
   liveTvPrefs: (patch: LiveTvPrefsPatch): Promise<LiveTvPrefs> => post('/api/livetv/prefs', patch),
   liveTvGuideNow: (keys: string[]): Promise<LiveTvGuideNowResponse> => getJson(`/api/livetv/guide?keys=${encodeURIComponent(keys.join(','))}`),

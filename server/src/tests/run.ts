@@ -39,7 +39,7 @@ import { parseAttrs, parseM3u, cleanChannelName, countGroups, splitGroups } from
 import { XmltvScanner, nowNext, parseXmltvTime, resolveGuideId } from '../livetvEpg';
 import { decryptJson, decryptText, encryptJson, encryptText, useEphemeralLiveTvKey } from '../livetvCrypto';
 import { redactUrl } from '../livetvHttp';
-import { mintToken, pickVariant, readToken, remuxArgs, rewritePlaylist } from '../livetvStream';
+import { initTimescales, mintToken, pickVariant, playlistSegments, readToken, remuxArgs, rewritePlaylist, segmentStartSec } from '../livetvStream';
 import { normalizeXtreamServer, xtreamLiveUrl } from '../livetvXtream';
 import { LIVETV_PRESETS } from '../livetvPresets';
 
@@ -144,7 +144,28 @@ audio-only/index.m3u8
   check('variant pick: all too big -> the lightest; a media playlist -> none', pickVariant('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=20000000,RESOLUTION=3840x2160\na.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=15000000,RESOLUTION=3840x2160\nb.m3u8\n', 'http://h.example/x.m3u8')?.url === 'http://h.example/b.m3u8' && pickVariant(media, 'http://h.example/m.m3u8') === undefined);
   const ra = remuxArgs({ url: 'http://h.example/live/main.m3u8', input: 'hls', program: 1, headers: { referer: 'http://r.example/' } }, '/tmp/x').join(' ');
   const rb = remuxArgs({ url: 'http://h.example/live/1.ts', input: 'ts' }, '/tmp/x').join(' ');
-  check('recorder args: HLS copies both streams by program with a 30 min window; TS re-encodes the sound', / -map p:1 -sn -dn /.test(ra) && / -c:a copy /.test(ra) && / -hls_list_size 600 /.test(ra) && / -allowed_extensions ALL /.test(ra) && /-headers referer: http:\/\/r.example\//.test(ra) && / -map 0:v:0\? -map 0:a:0\? /.test(rb) && / -c:a aac /.test(rb) && !/allowed_extensions/.test(rb), { ra, rb });
+  check('recorder args: HLS copies both streams by program with a 30 min window; the sound re-encoded to AAC on both; fragmented MP4 out', / -map p:1 -sn -dn /.test(ra) && / -c:a aac -ac 2 -b:a 128k /.test(ra) && / -hls_list_size 600 /.test(ra) && / -allowed_extensions ALL /.test(ra) && /-headers referer: http:\/\/r.example\//.test(ra) && / -map 0:v:0\? -map 0:a:0\? /.test(rb) && / -c:a aac /.test(rb) && !/allowed_extensions/.test(rb) && / -hls_segment_type fmp4 -hls_fmp4_init_filename S*init.mp4 /.test(rb) && /seg%05d\.m4s/.test(rb), { ra, rb });
+  // the recording's boxes: init (moov/trak/tkhd+mdhd) and a segment (moof/traf/tfhd+tfdt)
+  const box = (type: string, ...parts: Buffer[]): Buffer => {
+    const body = Buffer.concat(parts);
+    const hdr = Buffer.alloc(8);
+    hdr.writeUInt32BE(body.length + 8, 0);
+    hdr.write(type, 4, 'latin1');
+    return Buffer.concat([hdr, body]);
+  };
+  const u32 = (...v: number[]): Buffer => {
+    const b = Buffer.alloc(v.length * 4);
+    v.forEach((x, i) => b.writeUInt32BE(x, i * 4));
+    return b;
+  };
+  const trak = (id: number, timescale: number): Buffer => box('trak', box('tkhd', u32(0, 0, 0, id, 0, 0)), box('mdia', box('mdhd', u32(0, 0, 0, timescale, 0))));
+  const init = Buffer.concat([box('ftyp', Buffer.from('iso5')), box('moov', box('mvhd', u32(0)), trak(1, 90000), trak(2, 48000))]);
+  const ts = initTimescales(init);
+  check('init segment: track timescales', ts.get(1) === 90000 && ts.get(2) === 48000, [...ts]);
+  const seg = Buffer.concat([box('styp', Buffer.from('msdh')), box('moof', box('mfhd', u32(0, 7)), box('traf', box('tfhd', u32(0x20000, 1)), box('tfdt', u32(0, 90000 * 12)), box('trun', u32(0)))), box('mdat', Buffer.alloc(10))]);
+  check('segment: start from the first fragment tfdt', segmentStartSec(seg, ts) === 12 && segmentStartSec(seg.subarray(0, 40), ts) === undefined);
+  const plSegs = playlistSegments('#EXTM3U\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:3.000,\nseg00007.m4s\n#EXTINF:2.500,\nseg00008.m4s\n');
+  check('playlist: segments and durations', plSegs.length === 2 && plSegs[1].name === 'seg00008.m4s' && plSegs[1].duration === 2.5, plSegs);
   check('redaction: xtream path, query secrets, known strings', redactUrl('http://h.example:8080/live/mario/s3cret/12.ts') === 'http://h.example:8080/live/***/***/12.ts' && redactUrl('http://h.example/get.php?username=mario&password=s3cret&type=m3u') === 'http://h.example/get.php?username=***&password=***&type=m3u' && redactUrl('error about s3cret here', ['s3cret']) === 'error about *** here');
 
   console.log('\n== 1f. Live TV: Xtream');

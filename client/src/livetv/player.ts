@@ -1,21 +1,27 @@
 /**
- * The Live TV player: a full-screen theater around a <video>. HLS plays through hls.js (Media
- * Source Extensions: Chromium, the Tesla browser, Firefox, desktop Safari) or natively where only
- * that exists (iPhone Safari); a progressive file goes straight into the <video>. Nothing is
- * decoded on a canvas here: live streams are long-running MPEG-TS / fMP4 chains, which is what
- * MSE is for, and the canvas pipeline reads whole MP4 files.
+ * The Live TV player: a full-screen theater around a <canvas>. There is no <video> element
+ * anywhere in it: the server records the channel (ffmpeg -> fragmented MP4, a rolling window) and
+ * the page plays that recording as one endless MP4 through the feed's pipeline (fetch -> mp4box
+ * demux -> VideoDecoder / AudioDecoder -> canvas 2D + Web Audio), the way TikTok videos play. A
+ * media file a playlist links to (an MP4) goes through the same pipeline as a file.
  *
- * States: tuning (the server opens the stream and says what it is) -> loading (first segments)
- * -> playing; or "unavailable" (the provider refused / nothing came) and "unsupported" (DASH, a
- * web page, DRM, a codec the browser lacks), each with the reason and what to do next.
+ * States: tuning (the server opens the stream and says what it is) -> loading (first frames)
+ * -> playing / paused; or "unavailable" (the provider refused / nothing came / the stream died)
+ * and "unsupported" (DASH, a web page, DRM, a codec this browser's decoder lacks), each with the
+ * reason and what to do next.
  *
- * Around it: previous / next channel (buttons, arrow keys, a vertical swipe), favorite, the
+ * Pause and rewind: the recording reaches back the server's window (`…/window` says how far);
+ * pausing freezes the clock (the download pauses with it, the server keeps recording); resuming
+ * continues from the pause point; a seek reloads the stream from that point (`?from=`), and
+ * LIVE reloads it from the live edge.
+ *
+ * Around it: previous / next channel (buttons, arrow keys, a vertical swipe), favorite, hide, the
  * programme guide panel (what is on now and next, the day's listing), mute, fullscreen (the
- * theater itself, or the iPhone's native video player), and the controls hiding while playing.
+ * theater itself), and the controls hiding while playing.
  */
-import Hls, { ErrorTypes, Events, type ErrorData } from 'hls.js';
-import type { LiveTvChannel, LiveTvChannelGuideResponse, LiveTvProgramme, LiveTvTuneResponse } from '../../../shared/types';
+import type { LiveTvChannel, LiveTvChannelGuideResponse, LiveTvProgramme, LiveTvTuneResponse, LiveTvWindow } from '../../../shared/types';
 import { api, ApiError, apiUrl } from '../api';
+import { FeedPlayer } from '../feed/player';
 
 export type PlayerState = 'idle' | 'tuning' | 'loading' | 'playing' | 'paused' | 'unavailable' | 'unsupported';
 
@@ -24,12 +30,8 @@ export interface PlayerHooks {
   onChannel(ch: LiveTvChannel): void;
   onFavorite(ch: LiveTvChannel, on: boolean): void;
   isFavorite(key: string): boolean;
-  /** Closed captions were turned on / off (the page keeps the setting) */
-  onCaptions(on: boolean): void;
   /** The viewer hid this channel (the hide button, the H key, or from the error message) */
   onHide(ch: LiveTvChannel): void;
-  /** Pause and rewind was turned on / off (the page keeps the setting) */
-  onDvr(on: boolean): void;
   /** The server answered a tune: did the channel open (the page ranks channels that did not) */
   onTuned(ch: LiveTvChannel, ok: boolean): void;
   guide(key: string): Promise<LiveTvChannelGuideResponse>;
@@ -39,8 +41,6 @@ export interface PlayerHooks {
 }
 
 const elementFullscreenAllowed = (): boolean => !!document.fullscreenEnabled || !!(document as unknown as { webkitFullscreenEnabled?: boolean }).webkitFullscreenEnabled;
-type NativeVideo = HTMLVideoElement & { webkitEnterFullscreen?: () => void; webkitDisplayingFullscreen?: boolean };
-const nativeVideoFullscreen = (v: HTMLVideoElement): boolean => typeof (v as NativeVideo).webkitEnterFullscreen === 'function' && !elementFullscreenAllowed();
 
 const icon = (paths: string): string => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
 const ICON = {
@@ -57,7 +57,6 @@ const ICON = {
   star: icon('<path d="M12 3.5l2.6 5.6 6.1.7-4.5 4.2 1.2 6-5.4-3-5.4 3 1.2-6L3.3 9.8l6.1-.7z"/>'),
   starOn: icon('<path d="M12 3.5l2.6 5.6 6.1.7-4.5 4.2 1.2 6-5.4-3-5.4 3 1.2-6L3.3 9.8l6.1-.7z" fill="currentColor"/>'),
   guide: icon('<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18M8 5v14"/>'),
-  cc: icon('<rect x="2.5" y="5" width="19" height="14" rx="2.5"/><path d="M10.5 10.2a2.2 2.2 0 1 0 0 3.6M17 10.2a2.2 2.2 0 1 0 0 3.6"/>'),
   hide: icon('<path d="M3 3l18 18"/><path d="M10.6 5.3A10.4 10.4 0 0 1 12 5.2c5 0 8.6 4.1 9.8 6.8-.5 1.1-1.3 2.3-2.4 3.4M6.4 6.6C4.2 8 2.9 10 2.2 12c1.2 2.7 4.8 6.8 9.8 6.8 1.7 0 3.2-.4 4.5-1.1"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/>'),
   warn: icon('<path d="M12 3 2.5 20h19z"/><path d="M12 9v5M12 17.5v.5"/>'),
   off: icon('<circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/>'),
@@ -72,14 +71,20 @@ const fmtDur = (sec: number): string => {
   const r = s % 60;
   return h ? `${h}:${String(m).padStart(2, '0')}:${String(r).padStart(2, '0')}` : `${m}:${String(r).padStart(2, '0')}`;
 };
-const SKIP_SEC = 10;
-/** Closer to the live edge than this counts as live */
-const LIVE_SLACK_SEC = 8;
 const esc = (s: string): string => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+const SKIP_SEC = 10;
+/** Within this of the live start (the server's `edge`) counts as live for the badge */
+const LIVE_SLACK_SEC = 5;
+/** A seek landing this close to the live start simply goes live */
+const LIVE_SNAP_SEC = 3;
+/** The seek bar shows once the recording reaches back this far */
+const MIN_WINDOW_SEC = 20;
+const WINDOW_POLL_MS = 2000;
 
 export class LiveTvPlayer {
   private root: HTMLElement;
-  private video: HTMLVideoElement;
+  private stage: HTMLElement;
+  private canvas: HTMLCanvasElement;
   private wait: HTMLElement;
   private waitText: HTMLElement;
   private msg: HTMLElement;
@@ -88,7 +93,6 @@ export class LiveTvPlayer {
   private nameEl: HTMLElement;
   private subEl: HTMLElement;
   private favBtn: HTMLButtonElement;
-  private ccBtn: HTMLButtonElement;
   private guideBtn: HTMLButtonElement;
   private playBtn: HTMLButtonElement;
   private muteBtn: HTMLButtonElement;
@@ -100,33 +104,28 @@ export class LiveTvPlayer {
   private nextEl: HTMLElement;
   private barEl: HTMLElement;
   private guideList: HTMLElement;
-  private hls?: Hls;
+  private readonly feed: FeedPlayer;
   private items: LiveTvChannel[] = [];
   private index = -1;
   private generation = 0;
   private muted = false;
   private hideTimer = 0;
   private guideTimer = 0;
-  private stallTimer = 0;
-  private recovered = false;
-  /** the frozen-picture watchdog (see checkFrozen) */
-  private frozenTimer = 0;
-  private lastFrames = -1;
-  private lastTime = -1;
-  private frozenSince = 0;
-  private unfreezes = 0;
-  /** Closed captions shown on the picture (a device setting the page keeps; off by default) */
-  captions = false;
-  /** Pause and rewind: the server records the channel (a device setting the page keeps; on by default) */
-  dvr = true;
-  /** How far back the current stream reaches (the server's answer), 0 when unknown */
+  private timelineTimer = 0;
+  private waitTimer = 0;
+  private windowAt = 0;
+  private scrubbing = false;
+  /** The current channel's recording stream (`?v=` included); undefined for a media file */
+  private streamUrl?: string;
+  /** What the recording reaches back to, as the server last said */
+  private win?: LiveTvWindow;
   private windowSec = 0;
+  /** The stream ended once already for this channel: the next end is reported, not retried */
+  private retried = false;
   /** This player, to the server: the recorder of a channel it leaves stops at once */
   private readonly viewer = Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
   /** The channel whose recorder runs for this player (told when leaving it) */
   private recordedKey?: string;
-  private timelineTimer = 0;
-  private scrubbing = false;
   state: PlayerState = 'idle';
 
   constructor(root: HTMLElement, private readonly hooks: PlayerHooks) {
@@ -135,7 +134,7 @@ export class LiveTvPlayer {
     root.setAttribute('role', 'dialog');
     root.setAttribute('aria-label', 'Live TV player');
     root.innerHTML = `
-      <div class="th-stage"><video playsinline autoplay preload="auto"></video>
+      <div class="th-stage"><canvas width="16" height="9"></canvas>
         <div class="th-wait hidden"><span class="spinner"></span><span class="th-wait-text">Tuning…</span></div>
         <div class="th-msg hidden"></div>
         <button type="button" class="th-big hidden" aria-label="Play">${ICON.play}</button>
@@ -145,7 +144,6 @@ export class LiveTvPlayer {
         <div class="th-titles"><div class="th-logo"></div><div style="min-width:0"><div class="th-name"></div><div class="th-sub"></div></div></div>
         <button type="button" class="th-btn th-fav" aria-label="Favorite" title="Favorite (F)">${ICON.star}</button>
         <button type="button" class="th-btn th-hide" aria-label="Hide this channel" title="Hide this channel (H)">${ICON.hide}</button>
-        <button type="button" class="th-btn th-cc" aria-label="Closed captions" aria-pressed="false" title="Closed captions (C)">${ICON.cc}</button>
         <button type="button" class="th-btn th-guidebtn" aria-label="Programme guide" title="Guide (G)">${ICON.guide}</button>
         <button type="button" class="th-btn th-full" aria-label="Fullscreen" title="Fullscreen">${ICON.full}</button>
       </div>
@@ -170,7 +168,8 @@ export class LiveTvPlayer {
         <div class="th-guide-list"></div>
       </aside>`;
     const q = <T extends HTMLElement>(sel: string): T => root.querySelector(sel) as T;
-    this.video = q<HTMLVideoElement>('video');
+    this.stage = q('.th-stage');
+    this.canvas = q<HTMLCanvasElement>('canvas');
     this.wait = q('.th-wait');
     this.waitText = q('.th-wait-text');
     this.msg = q('.th-msg');
@@ -179,7 +178,6 @@ export class LiveTvPlayer {
     this.nameEl = q('.th-name');
     this.subEl = q('.th-sub');
     this.favBtn = q<HTMLButtonElement>('.th-fav');
-    this.ccBtn = q<HTMLButtonElement>('.th-cc');
     this.guideBtn = q<HTMLButtonElement>('.th-guidebtn');
     this.playBtn = q<HTMLButtonElement>('.th-play');
     this.muteBtn = q<HTMLButtonElement>('.th-mute');
@@ -192,6 +190,31 @@ export class LiveTvPlayer {
     this.barEl = q('.th-prog .ch-bar');
     this.guideList = q('.th-guide-list');
 
+    // the feed's canvas player: WebCodecs, or (without it) a hidden video copied into the canvas
+    this.feed = new FeedPlayer(this.canvas, this.stage, {
+      onFirstFrame: () => {
+        if (this.state === 'loading') this.setState('playing');
+      },
+      onEnded: () => this.onStreamEnded(),
+      onError: (err) => this.onPlayerError(err),
+      onPlayingChange: (playing) => {
+        if (this.state === 'tuning' || this.state === 'unavailable' || this.state === 'unsupported' || this.state === 'idle') return;
+        if (playing) this.setState('playing');
+        else if (this.feed.paused) this.setState('paused');
+      },
+      onTime: () => undefined,
+      onWaiting: (waiting) => {
+        // a stall shorter than a moment (a hole in a lossy feed, a slow segment) is not worth an overlay
+        window.clearTimeout(this.waitTimer);
+        if (!waiting) {
+          if (this.state === 'playing' || this.state === 'loading') this.wait.classList.add('hidden');
+          return;
+        }
+        if (this.state === 'loading') return this.showWait('Loading…');
+        if (this.state === 'playing') this.waitTimer = window.setTimeout(() => this.state === 'playing' && this.showWait('Buffering…'), 1200);
+      },
+    });
+
     q('.th-close').addEventListener('click', () => this.close());
     q('.th-prev').addEventListener('click', () => this.step(-1));
     q('.th-next').addEventListener('click', () => this.step(1));
@@ -200,46 +223,28 @@ export class LiveTvPlayer {
     q('.th-back').addEventListener('click', () => this.seekBy(-SKIP_SEC));
     q('.th-fwd').addEventListener('click', () => this.seekBy(SKIP_SEC));
     this.liveEl.addEventListener('click', () => this.goLive());
-    // the seek bar: dragging shows where it would land; letting go seeks there
+    this.muteBtn.addEventListener('click', () => this.toggleMute());
+    this.favBtn.addEventListener('click', () => this.toggleFavorite());
+    q('.th-hide').addEventListener('click', () => this.hideCurrent());
+    this.guideBtn.addEventListener('click', () => this.toggleGuide());
+    q('.th-guideclose').addEventListener('click', () => this.toggleGuide(false));
+    q('.th-full').addEventListener('click', () => this.toggleFullscreen());
+    this.canvas.addEventListener('click', () => this.wake());
+    this.canvas.addEventListener('dblclick', () => this.toggleFullscreen());
+    // the seek bar: dragging shows where it would land; letting go reloads the stream there
     this.range.addEventListener('input', () => {
       this.scrubbing = true;
-      const w = this.window();
-      if (w) this.seekTime.textContent = this.behindLabel(w.live - (w.start + (Number(this.range.value) / 1000) * (w.live - w.start)));
+      const w = this.timeline();
+      if (w) this.seekTime.textContent = this.behindLabel(w.edge - (w.start + (Number(this.range.value) / 1000) * (w.end - w.start)));
     });
     this.range.addEventListener('change', () => {
       this.scrubbing = false;
-      const w = this.window();
-      if (w) this.seekTo(w.start + (Number(this.range.value) / 1000) * (w.live - w.start));
+      const w = this.timeline();
+      if (w) this.seekTo(w.start + (Number(this.range.value) / 1000) * (w.end - w.start));
     });
-    this.video.addEventListener('timeupdate', () => this.refreshTimeline());
-    this.video.addEventListener('pause', () => this.refreshTimeline());
-    this.muteBtn.addEventListener('click', () => this.toggleMute());
-    this.favBtn.addEventListener('click', () => this.toggleFavorite());
-    this.ccBtn.addEventListener('click', () => this.setCaptions(!this.captions));
-    q('.th-hide').addEventListener('click', () => this.hideCurrent());
-    this.guideBtn.addEventListener('click', () => this.toggleGuide());
-    // text tracks appear as the stream is parsed (hls.js adds <track>s; Safari lists the manifest's):
-    // each one gets the captions setting applied
-    this.video.textTracks.addEventListener('addtrack', () => this.applyCaptions());
-    this.video.addEventListener('loadedmetadata', () => this.applyCaptions());
-    q('.th-guideclose').addEventListener('click', () => this.toggleGuide(false));
-    q('.th-full').addEventListener('click', () => this.toggleFullscreen());
-    this.video.addEventListener('click', () => this.wake());
-    this.video.addEventListener('dblclick', () => this.toggleFullscreen());
-    this.video.addEventListener('playing', () => {
-      this.setState('playing');
-      this.watchFrozen();
-    });
-    this.video.addEventListener('pause', () => {
-      if (this.state === 'playing') this.setState('paused');
-    });
-    this.video.addEventListener('waiting', () => {
-      if (this.state === 'playing') this.showWait('Buffering…');
-    });
-    this.video.addEventListener('error', () => this.onNativeError());
-    this.video.addEventListener('stalled', () => this.armStall());
-    this.video.addEventListener('timeupdate', () => this.disarmStall());
     for (const ev of ['mousemove', 'touchstart', 'keydown']) root.addEventListener(ev, () => this.wake(), { passive: true });
+    // a touch or key: sound the autoplay policy held back may start now
+    for (const ev of ['touchstart', 'keydown', 'click']) root.addEventListener(ev, () => this.feed.userGesture(), { passive: true });
     // a vertical swipe on the picture changes channel (TV-remote style)
     let y0 = 0;
     let t0 = 0;
@@ -248,7 +253,7 @@ export class LiveTvPlayer {
       t0 = Date.now();
     }, { passive: true });
     root.addEventListener('touchend', (e) => {
-      if ((e.target as HTMLElement).closest('.th-guide, button')) return;
+      if ((e.target as HTMLElement).closest('.th-guide, button, input')) return;
       const dy = e.changedTouches[0].clientY - y0;
       if (Math.abs(dy) > 90 && Date.now() - t0 < 600) this.step(dy < 0 ? 1 : -1);
     }, { passive: true });
@@ -263,19 +268,15 @@ export class LiveTvPlayer {
     });
   }
 
-  /** Tells the server this player left the recorded channel (nothing to say when none is recorded). */
-  private leaveRecorded(): void {
-    const key = this.recordedKey;
-    if (!key) return;
-    this.recordedKey = undefined;
-    void api.liveTvLeave(key, this.viewer).catch(() => undefined);
-  }
-
   get isOpen(): boolean {
     return !this.root.classList.contains('hidden');
   }
   get current(): LiveTvChannel | undefined {
     return this.items[this.index];
+  }
+  /** How the picture is made: the renderer's name (WebCodecs + Canvas, or the hidden-video fallback) */
+  get rendererName(): string {
+    return this.feed.rendererName;
   }
 
   /** Opens the theater on `index` of `items` (the browser's current list, so prev / next follow it). */
@@ -319,6 +320,14 @@ export class LiveTvPlayer {
     this.favBtn.classList.toggle('on', on);
   }
 
+  /** Tells the server this player left the recorded channel (nothing to say when none is recorded). */
+  private leaveRecorded(): void {
+    const key = this.recordedKey;
+    if (!key) return;
+    this.recordedKey = undefined;
+    void api.liveTvLeave(key, this.viewer).catch(() => undefined);
+  }
+
   private step(d: number): void {
     if (!this.items.length) return;
     void this.play((this.index + d + this.items.length) % this.items.length);
@@ -329,8 +338,7 @@ export class LiveTvPlayer {
     if (!ch) return;
     const gen = ++this.generation;
     this.index = index;
-    this.recovered = false;
-    this.unfreezes = 0;
+    this.retried = false;
     if (this.recordedKey !== ch.key) this.leaveRecorded();
     this.stopMedia();
     this.logoEl.innerHTML = ch.logo ? `<img src="${esc(ch.logo)}" alt="" draggable="false" />` : '';
@@ -339,8 +347,6 @@ export class LiveTvPlayer {
     this.nowEl.textContent = '';
     this.nextEl.textContent = '';
     this.barEl.classList.add('hidden');
-    this.windowSec = 0;
-    this.seekRow.classList.add('hidden');
     this.refreshFavorite();
     this.hooks.onChannel(ch);
     this.setState('tuning');
@@ -350,7 +356,7 @@ export class LiveTvPlayer {
     if (ch.drm) return this.showMessage('unsupported', 'This channel is DRM-protected (the playlist names license keys); it cannot play here.', 'DRM');
     let t: LiveTvTuneResponse;
     try {
-      t = await api.liveTvTune(ch.key, this.dvr, this.viewer);
+      t = await api.liveTvTune(ch.key, this.viewer);
     } catch (e) {
       if (gen !== this.generation) return;
       const m = e instanceof ApiError ? e.message : (e as Error).message;
@@ -363,239 +369,74 @@ export class LiveTvPlayer {
     this.recordedKey = t.kind === 'remux' ? ch.key : undefined;
     this.setState('loading');
     this.showWait('Loading…');
-    this.startMedia(apiUrl(t.playUrl), t.kind === 'progressive', gen);
-  }
-
-  private startMedia(url: string, progressive: boolean, gen: number): void {
-    const v = this.video;
-    v.muted = this.muted;
-    if (!progressive && Hls.isSupported()) {
-      const hls = new Hls({
-        lowLatencyMode: false,
-        liveSyncDurationCount: 3,
-        // no liveMaxLatencyDurationCount: a paused or rewound player must not be dragged back to live
-        maxBufferLength: 30,
-        backBufferLength: 30,
-        manifestLoadingTimeOut: 20000,
-        manifestLoadingMaxRetry: 2,
-        levelLoadingTimeOut: 20000,
-        fragLoadingTimeOut: 25000,
-        fragLoadingMaxRetry: 3,
-        enableWorker: true,
-      });
-      // the manifest's subtitle tracks follow the captions setting (CEA-608 tracks: applyCaptions)
-      hls.subtitleDisplay = this.captions;
-      this.hls = hls;
-      hls.on(Events.ERROR, (_e, data) => this.onHlsError(data, gen));
-      hls.on(Events.MANIFEST_PARSED, () => {
-        if (gen !== this.generation) return;
-        void this.tryPlay();
-      });
-      hls.on(Events.FRAG_BUFFERED, () => {
-        if (gen === this.generation && (this.state === 'loading' || this.state === 'playing')) this.wait.classList.add('hidden');
-      });
-      hls.attachMedia(v);
-      hls.loadSource(url);
-      return;
+    if (t.kind === 'remux') {
+      this.streamUrl = apiUrl(t.playUrl);
+      void this.loadStream('live', gen);
+    } else {
+      // a media file: the same pipeline reads it with Range requests; the bar is its duration
+      this.streamUrl = undefined;
+      void this.loadFile(apiUrl(t.playUrl), ch.name, gen);
     }
-    // native HLS (iPhone Safari) or a progressive file
-    v.src = url;
-    void this.tryPlay();
   }
 
-  private async tryPlay(): Promise<void> {
+  /** The recording from the live edge or from a point in it (a seek), through the feed's pipeline. */
+  private async loadStream(from: 'live' | number, gen = this.generation): Promise<void> {
+    const ch = this.current;
+    if (!this.streamUrl || !ch) return;
+    const url = `${this.streamUrl}${this.streamUrl.includes('?') ? '&' : '?'}from=${from === 'live' ? 'live' : from.toFixed(3)}`;
     try {
-      await this.video.play();
-      this.big.classList.add('hidden');
-    } catch {
-      // autoplay refused (no gesture reached the video): one tap starts it
-      if (this.state === 'loading' || this.state === 'playing') {
-        this.wait.classList.add('hidden');
-        this.big.classList.remove('hidden');
-        this.setState('paused');
-      }
+      await this.feed.load(url, 'proxy', ch.name, { live: true, startAt: from === 'live' ? undefined : from });
+      if (gen !== this.generation) return;
+      await this.feed.play();
+    } catch (e) {
+      if (gen === this.generation) this.onPlayerError(e as Error);
+    }
+  }
+
+  private async loadFile(url: string, label: string, gen: number): Promise<void> {
+    try {
+      await this.feed.load(url, 'proxy', label, {});
+      if (gen !== this.generation) return;
+      await this.feed.play();
+    } catch (e) {
+      if (gen === this.generation) this.onPlayerError(e as Error);
     }
   }
 
   private stopMedia(): void {
-    this.disarmStall();
-    this.stopWatchFrozen();
-    if (this.hls) {
-      this.hls.destroy();
-      this.hls = undefined;
-    }
-    try {
-      this.video.pause();
-      this.video.removeAttribute('src');
-      this.video.load();
-    } catch {
-      /* nothing loaded */
-    }
+    this.feed.pause();
+    this.streamUrl = undefined;
+    this.win = undefined;
+    this.windowSec = 0;
+    this.seekRow.classList.add('hidden');
     this.big.classList.add('hidden');
     this.msg.classList.add('hidden');
   }
 
-  private onHlsError(data: ErrorData, gen: number): void {
-    if (gen !== this.generation) return;
-    if (!data.fatal) {
-      // a slow segment: say so, keep going
-      if (data.details === 'bufferStalledError' && this.state === 'playing') this.showWait('Buffering…');
+  /** The stream ended: a live recording never does unless the recorder stopped (a dead upstream, the idle reaper). */
+  private onStreamEnded(): void {
+    if (!this.isOpen || this.state === 'idle') return;
+    if (!this.streamUrl) {
+      // a media file reached its end
+      this.setState('paused');
+      this.big.classList.remove('hidden');
       return;
     }
-    const code = (data.response as { code?: number } | undefined)?.code;
-    const bodyMsg = (() => {
-      const d = (data.response as { data?: unknown } | undefined)?.data;
-      if (typeof d === 'string') {
-        try {
-          return (JSON.parse(d) as { error?: string }).error;
-        } catch {
-          return undefined;
-        }
-      }
-      return undefined;
-    })();
-    if (data.type === ErrorTypes.MEDIA_ERROR) {
-      if (!this.recovered && this.hls) {
-        this.recovered = true;
-        this.hls.recoverMediaError();
-        return;
-      }
-      const codec = data.details === 'manifestIncompatibleCodecsError' ? 'This stream uses a codec this browser cannot decode.' : 'The browser could not decode this stream (a codec it does not support, or a broken stream).';
-      return this.showMessage('unsupported', codec, data.details);
-    }
-    if (data.type === ErrorTypes.NETWORK_ERROR) {
-      const why = bodyMsg || (code === 404 ? 'the provider has no such stream any more' : code === 403 ? 'the provider refused the request (geo-blocked, or not allowed from the server)' : code && code >= 500 ? `the provider's server failed (${code})` : this.state === 'playing' ? 'the stream stopped' : 'nothing came from the provider');
-      return this.showMessage('unavailable', `This channel is not available right now: ${why}.`, data.details);
-    }
-    this.showMessage('unavailable', `Playback failed (${data.details}).`);
-  }
-
-  private onNativeError(): void {
-    if (this.state === 'idle' || this.state === 'tuning' || this.msg.classList.contains('hidden') === false) return;
-    const err = this.video.error;
-    const code = err?.code;
-    if (code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED) return this.showMessage('unsupported', 'This browser cannot play this stream format.', err?.message);
-    if (code === MediaError.MEDIA_ERR_DECODE) return this.showMessage('unsupported', 'The browser could not decode this stream (a codec it does not support, or a broken stream).', err?.message);
-    this.showMessage('unavailable', `This channel is not available right now: ${err?.message || 'the stream stopped'}.`);
-  }
-
-  // ---------------------------------------------------------------- closed captions
-
-  /** Turns captions on / off (the page is told, and keeps the setting). */
-  setCaptions(on: boolean): void {
-    const changed = this.captions !== on;
-    this.captions = on;
-    this.ccBtn.classList.toggle('on', on);
-    this.ccBtn.setAttribute('aria-pressed', String(on));
-    this.ccBtn.title = on ? 'Closed captions: on (C)' : 'Closed captions: off (C)';
-    this.applyCaptions();
-    if (changed) this.hooks.onCaptions(on);
-  }
-
-  /**
-   * The text tracks of the <video> follow the setting. Off: every track disabled, so nothing
-   * is drawn even when the channel carries CEA-608 captions or the browser would show a
-   * subtitle track by itself. On: hls.js shows the manifest's subtitle track when there is one;
-   * otherwise the first captions / subtitles track (CEA-608 from the video, or Safari's own list).
-   */
-  private applyCaptions(): void {
-    const on = this.captions;
-    if (this.hls) this.hls.subtitleDisplay = on;
-    const tracks = this.video.textTracks;
-    if (!tracks) return;
-    const hlsSubtitles = !!this.hls && this.hls.subtitleTracks.length > 0;
-    let shown = false;
-    for (let i = 0; i < tracks.length; i++) {
-      const t = tracks[i];
-      if (t.kind !== 'captions' && t.kind !== 'subtitles') continue;
-      if (!on) {
-        if (t.mode !== 'disabled') t.mode = 'disabled';
-        continue;
-      }
-      if (hlsSubtitles) continue; // hls.js's subtitle-track controller owns their modes
-      const mode: TextTrackMode = shown ? 'hidden' : 'showing';
-      shown = true;
-      if (t.mode !== mode) t.mode = mode;
-    }
-  }
-
-  // ---------------------------------------------------------------- the frozen-picture watchdog
-
-  /**
-   * The picture freezes while the sound goes on: Chromium stops rendering video after a hole or
-   * a broken frame in the video buffer while the audio buffer still plays (hls.js nudges across
-   * holes under a second; bigger ones, and a stuck decoder, it does not see since the clock
-   * keeps running). Every 2 s, while playing and visible: when the clock advanced but no new
-   * video frame was produced for 4 s, the pipeline is flushed: a seek to the live edge first,
-   * then hls.js's media-error recovery, then the channel is tuned again.
-   */
-  private watchFrozen(): void {
-    this.stopWatchFrozen();
-    this.lastFrames = -1;
-    this.lastTime = -1;
-    this.frozenSince = 0;
-    this.frozenTimer = window.setInterval(() => this.checkFrozen(), 2000);
-  }
-  private stopWatchFrozen(): void {
-    if (this.frozenTimer) window.clearInterval(this.frozenTimer);
-    this.frozenTimer = 0;
-    this.frozenSince = 0;
-  }
-  private checkFrozen(): void {
-    const v = this.video;
-    if (this.state !== 'playing' || v.paused || v.seeking || document.hidden || !v.videoWidth) {
-      this.frozenSince = 0;
+    if (!this.retried) {
+      // once: the server may just have restarted the recorder (the upstream hiccupped)
+      this.retried = true;
+      void this.play(this.index);
       return;
     }
-    const q = typeof v.getVideoPlaybackQuality === 'function' ? v.getVideoPlaybackQuality() : undefined;
-    const frames = q ? q.totalVideoFrames : (v as HTMLVideoElement & { webkitDecodedFrameCount?: number }).webkitDecodedFrameCount;
-    if (frames === undefined) return;
-    const time = v.currentTime;
-    const clockMoved = this.lastTime >= 0 && time > this.lastTime + 0.5;
-    const framesMoved = this.lastFrames < 0 || frames !== this.lastFrames;
-    this.lastFrames = frames;
-    this.lastTime = time;
-    if (!clockMoved || framesMoved) {
-      this.frozenSince = 0;
-      return;
-    }
-    if (!this.frozenSince) this.frozenSince = Date.now();
-    else if (Date.now() - this.frozenSince >= 4000) {
-      this.frozenSince = 0;
-      this.unfreeze();
-    }
-  }
-  private unfreeze(): void {
-    const v = this.video;
-    const attempt = ++this.unfreezes;
-    console.warn(`[livetv] picture frozen while the sound plays (attempt ${attempt})`);
-    this.showWait('Buffering…');
-    if (attempt === 1) {
-      // a seek flushes the decoder; the live edge is where a live stream belongs anyway
-      const live = this.hls?.liveSyncPosition;
-      if (typeof live === 'number' && Number.isFinite(live) && live > v.currentTime) v.currentTime = live;
-      else if (v.seekable.length) v.currentTime = Math.max(v.currentTime, v.seekable.end(v.seekable.length - 1) - 1);
-      else v.currentTime += 0.001;
-      return;
-    }
-    if (attempt === 2 && this.hls) {
-      this.hls.recoverMediaError();
-      return;
-    }
-    void this.play(this.index);
+    this.showMessage('unavailable', 'The stream stopped sending video.');
   }
 
-  /** No progress for 30 s while playing: the stream died quietly. */
-  private armStall(): void {
-    if (this.stallTimer || this.state !== 'playing') return;
-    this.stallTimer = window.setTimeout(() => {
-      this.stallTimer = 0;
-      if (this.state === 'playing' && !this.video.paused) this.showMessage('unavailable', 'The stream stopped sending video.');
-    }, 30_000);
-  }
-  private disarmStall(): void {
-    if (this.stallTimer) window.clearTimeout(this.stallTimer);
-    this.stallTimer = 0;
+  private onPlayerError(err: Error): void {
+    if (!this.isOpen || this.state === 'unavailable' || this.state === 'unsupported') return;
+    const m = err.message || 'playback failed';
+    if (/hev1|hvc1/i.test(m)) return this.showMessage('unsupported', 'This channel is H.265 (HEVC), which this browser cannot decode; most channels are H.264.', m);
+    if (/VideoDecoder|AudioDecoder|codec|No video track|WebCodecs|decode\(\)|mp4box/i.test(m)) return this.showMessage('unsupported', `This browser cannot decode this stream: ${m}`);
+    this.showMessage('unavailable', `This channel is not available right now: ${/HTTP (404|410)/.test(m) ? 'the stream is gone' : m}.`);
   }
 
   private setState(s: PlayerState): void {
@@ -611,6 +452,7 @@ export class LiveTvPlayer {
     const playing = s === 'playing' || s === 'loading';
     this.playBtn.innerHTML = playing ? ICON.pause : ICON.play;
     this.playBtn.setAttribute('aria-label', playing ? 'Pause' : 'Play');
+    this.refreshTimeline();
   }
 
   private showWait(text: string): void {
@@ -637,57 +479,63 @@ export class LiveTvPlayer {
 
   private togglePlay(): void {
     if (this.state === 'unavailable' || this.state === 'unsupported') return void this.play(this.index);
-    if (this.video.paused) {
-      // resume where it was paused; paused longer than the stream reaches back: from the oldest point kept
-      const w = this.window();
-      if (w && this.video.currentTime < w.start + 1) this.video.currentTime = w.start + 1;
-      void this.tryPlay();
+    if (this.state === 'tuning') return;
+    if (this.feed.paused) {
+      // resume where it was paused; paused longer than the recording reaches back: from the oldest point kept
+      const w = this.timeline();
+      if (this.streamUrl && w && this.feed.currentTime < w.start + 1) return this.seekTo(w.start + 1);
+      void this.feed.play();
       this.setState('loading');
+      this.showWait('Loading…');
     } else {
-      this.video.pause();
+      this.feed.pause();
       this.big.classList.remove('hidden');
+      this.setState('paused');
     }
     this.refreshTimeline();
   }
 
   // ---------------------------------------------------------------- pause and rewind
 
-  /** What can be seeked: the oldest point kept, the end of what is buffered, and the live edge. */
-  private window(): { start: number; end: number; live: number } | undefined {
-    const s = this.video.seekable;
-    if (!s.length) return undefined;
-    const start = s.start(0);
-    const end = s.end(s.length - 1);
-    const sync = this.hls?.liveSyncPosition;
-    const live = typeof sync === 'number' && Number.isFinite(sync) && sync > start ? Math.min(sync, end) : end;
-    return live > start ? { start, end, live } : undefined;
+  /** What can be seeked: the recording's window (live; `edge` = where live playback is), or the file's length. */
+  private timeline(): { start: number; end: number; edge: number; live: boolean } | undefined {
+    if (this.streamUrl) {
+      const w = this.win;
+      if (!w || w.end <= w.start) return undefined;
+      return { start: w.start, end: w.end, edge: w.edge || w.end, live: true };
+    }
+    const d = this.feed.duration;
+    return d > 0 ? { start: 0, end: d, edge: d, live: false } : undefined;
   }
 
   private seekTo(t: number): void {
-    const w = this.window();
+    const w = this.timeline();
     if (!w) return;
-    const target = Math.max(w.start + 0.5, Math.min(t, w.live));
-    if (target >= w.live - 0.5) return this.goLive();
-    this.video.currentTime = target;
-    this.showWait('Loading…');
-    if (this.video.paused) void this.tryPlay();
+    const target = Math.max(w.start + 0.5, Math.min(t, w.end));
+    if (w.live) {
+      if (target >= w.edge - LIVE_SNAP_SEC) return this.goLive();
+      this.setState('loading');
+      this.showWait('Loading…');
+      void this.loadStream(target);
+    } else {
+      this.feed.seek(target);
+      if (this.feed.paused) void this.feed.play();
+    }
     this.wake();
   }
 
   private seekBy(delta: number): void {
-    this.seekTo(this.video.currentTime + delta);
+    this.seekTo(this.feed.currentTime + delta);
   }
 
   /** Back to the live edge (and playing). */
   private goLive(): void {
-    const w = this.window();
-    if (!w) return;
-    if (this.video.currentTime < w.live - 0.5) this.video.currentTime = w.live;
-    if (this.video.paused) {
-      void this.tryPlay();
-      this.setState('loading');
-    }
-    this.refreshTimeline();
+    if (!this.streamUrl) return;
+    const w = this.timeline();
+    if (w && !this.feed.paused && w.edge - this.feed.currentTime < LIVE_SLACK_SEC) return;
+    this.setState('loading');
+    this.showWait('Loading…');
+    void this.loadStream('live');
     this.wake();
   }
 
@@ -697,39 +545,41 @@ export class LiveTvPlayer {
     return `−${fmtDur(behind)} · ${fmtClock(Date.now() - behind * 1000)}`;
   }
 
-  /** The seek bar (when the stream reaches back at least 20 s) and the LIVE / "behind" badge follow the player. */
+  /** The seek bar (once the recording reaches back MIN_WINDOW_SEC) and the LIVE / "behind" badge follow the player. */
   private refreshTimeline(): void {
     if (!this.isOpen || this.state === 'idle' || this.state === 'tuning') return;
-    const w = this.window();
+    const c = this.current;
+    if (this.streamUrl && c && Date.now() - this.windowAt > WINDOW_POLL_MS) {
+      this.windowAt = Date.now();
+      const gen = this.generation;
+      void api.liveTvWindow(c.key, this.viewer).then((w) => {
+        if (gen === this.generation) this.win = w;
+      }).catch(() => undefined);
+    }
+    const w = this.timeline();
     if (!w) {
       this.seekRow.classList.add('hidden');
       return;
     }
-    const pos = Math.min(this.video.currentTime, w.live);
-    const behind = Math.max(0, w.live - pos);
-    const span = w.live - w.start;
-    this.seekRow.classList.toggle('hidden', span < 20);
+    const pos = Math.min(Math.max(this.feed.currentTime, w.start), w.end);
+    const span = w.end - w.start;
+    const behind = w.live ? Math.max(0, w.edge - pos) : 0;
+    this.seekRow.classList.toggle('hidden', span < MIN_WINDOW_SEC);
     if (!this.scrubbing) {
       this.range.value = String(Math.round(((pos - w.start) / span) * 1000));
-      this.seekTime.textContent = behind < LIVE_SLACK_SEC ? (this.windowSec ? `Live · rewind up to ${fmtDur(Math.min(span, this.windowSec))}` : 'Live') : this.behindLabel(behind);
+      if (w.live) this.seekTime.textContent = behind < LIVE_SLACK_SEC ? `Live · rewind up to ${fmtDur(Math.min(span, this.windowSec || span))}` : this.behindLabel(behind);
+      else this.seekTime.textContent = `${fmtDur(pos)} / ${fmtDur(w.end)}`;
     }
-    const isBehind = behind >= LIVE_SLACK_SEC;
+    const isBehind = w.live && behind >= LIVE_SLACK_SEC;
     this.liveEl.textContent = isBehind ? `−${fmtDur(behind)}` : 'LIVE';
     this.liveEl.classList.toggle('behind', isBehind);
-    this.liveEl.classList.toggle('off', !isBehind && this.state !== 'playing');
-    this.liveEl.title = isBehind ? 'Jump to live (L)' : 'Live';
-  }
-
-  /** Pause and rewind on / off (the page is told, and keeps the setting); applies to the next channel. */
-  setDvr(on: boolean): void {
-    const changed = this.dvr !== on;
-    this.dvr = on;
-    if (changed) this.hooks.onDvr(on);
+    this.liveEl.classList.toggle('off', !isBehind && (this.state !== 'playing' || !w.live));
+    this.liveEl.title = isBehind ? 'Jump to live (L)' : w.live ? 'Live' : 'A media file, not a live stream';
   }
 
   private toggleMute(): void {
     this.muted = !this.muted;
-    this.video.muted = this.muted;
+    this.feed.setMuted(this.muted);
     this.muteBtn.innerHTML = this.muted ? ICON.muted : ICON.sound;
     this.muteBtn.setAttribute('aria-label', this.muted ? 'Unmute' : 'Mute');
   }
@@ -815,8 +665,7 @@ export class LiveTvPlayer {
   }
 
   private toggleFullscreen(): void {
-    const v = this.video as NativeVideo;
-    if (nativeVideoFullscreen(v)) return v.webkitEnterFullscreen!();
+    if (!elementFullscreenAllowed()) return;
     if (document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
     else void this.root.requestFullscreen?.().catch(() => undefined);
   }
@@ -863,9 +712,6 @@ export class LiveTvPlayer {
         break;
       case 'f':
         this.toggleFavorite();
-        break;
-      case 'c':
-        this.setCaptions(!this.captions);
         break;
       case 'h':
         this.hideCurrent();

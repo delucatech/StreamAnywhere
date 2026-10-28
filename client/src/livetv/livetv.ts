@@ -108,10 +108,6 @@ function busy(btn: HTMLButtonElement, work: () => Promise<unknown>, label?: stri
 // ---------------------------------------------------------------- state
 const PREFS_KEY = 'streamanywhere.livetv.prefs';
 const VIEW_KEY = 'streamanywhere.livetv.view';
-/** Closed captions on the picture: a setting of this device (the Tesla and the phone differ); off until turned on */
-const CAPTIONS_KEY = 'streamanywhere.livetv.captions';
-/** Pause and rewind (the server records the channel): a setting of this device; on until turned off */
-const DVR_KEY = 'streamanywhere.livetv.dvr';
 let state: LiveTvState = { rev: 0, channelsRev: 0, providers: [], prefs: { favorites: [], hidden: [], broken: {} }, remux: false };
 let channels: LiveTvChannel[] = [];
 let channelsRev = -1;
@@ -214,22 +210,6 @@ const player = new LiveTvPlayer(el.theater, {
       tile.title = ok ? '' : BROKEN_TITLE;
     }
   },
-  onCaptions: (on) => {
-    try {
-      localStorage.setItem(CAPTIONS_KEY, on ? '1' : '0');
-    } catch {
-      /* ignore */
-    }
-    if (!el.settingsOverlay.classList.contains('hidden')) renderSettings();
-  },
-  onDvr: (on) => {
-    try {
-      localStorage.setItem(DVR_KEY, on ? '1' : '0');
-    } catch {
-      /* ignore */
-    }
-    if (!el.settingsOverlay.classList.contains('hidden')) renderSettings();
-  },
   providerName: (ch) => (state.providers.length > 1 ? providerById(ch.providerId)?.name || '' : ''),
   guide: (key) => api.liveTvGuide(key),
   nowNext: async (key) => {
@@ -239,12 +219,6 @@ const player = new LiveTvPlayer(el.theater, {
     return nn;
   },
 });
-try {
-  player.setCaptions(localStorage.getItem(CAPTIONS_KEY) === '1');
-  player.setDvr(localStorage.getItem(DVR_KEY) !== '0');
-} catch {
-  /* the defaults */
-}
 
 const BROKEN_TITLE = 'Did not play last time';
 
@@ -718,13 +692,9 @@ function renderSettings(): void {
           .join(''),
     )
     .join('');
-  const cc = player.captions;
-  const dvr = player.dvr;
-  const dvrNote = !state.remux
-    ? 'Not available: this server has no ffmpeg, so channels play straight from the relay (pausing holds only a few seconds).'
-    : dvr
-      ? 'The server keeps the last 30 minutes of the channel you are watching: pause as long as you like, drag the bar or use ← → to go back, LIVE jumps to now. A setting of this device.'
-      : 'Channels play straight from the relay: they start a couple of seconds sooner, but pausing holds only a few seconds and there is no rewind. A setting of this device.';
+  const playbackNote = state.remux
+    ? `Channels are recorded by the server (the last 30 minutes) and drawn on a canvas by ${esc(player.rendererName)}, no video element: pause as long as you like, drag the bar or use ← → to go back, LIVE jumps to now.`
+    : 'This server has no ffmpeg, which turns live streams into what the page can decode: live channels cannot play here until it is installed.';
   const hiddenRows = [...hidden]
     .map((key) => ({ key, c: channels.find((x) => x.key === key) }))
     .filter((x): x is { key: string; c: LiveTvChannel } => !!x.c)
@@ -742,14 +712,8 @@ function renderSettings(): void {
   el.settingsBody.innerHTML = `
     <p class="sh-section">Playback</p>
     <div class="prov${state.remux ? '' : ' off'}">
-      <div class="prov-head"><span class="prov-name">Pause and rewind</span>
-        <button type="button" class="toggle small${dvr && state.remux ? ' on' : ''}" data-set="dvr" aria-pressed="${dvr && state.remux}" title="${dvr ? 'Turn pause and rewind off' : 'Turn pause and rewind on'}"${state.remux ? '' : ' disabled'}><span class="toggle-dot" aria-hidden="true"></span>${dvr && state.remux ? 'On' : 'Off'}</button></div>
-      <div class="prov-status">${dvrNote}</div>
-    </div>
-    <div class="prov">
-      <div class="prov-head"><span class="prov-name">Closed captions</span>
-        <button type="button" class="toggle small${cc ? ' on' : ''}" data-set="captions" aria-pressed="${cc}" title="${cc ? 'Turn captions off' : 'Turn captions on'}"><span class="toggle-dot" aria-hidden="true"></span>${cc ? 'On' : 'Off'}</button></div>
-      <div class="prov-status">${cc ? 'The captions or subtitles a channel carries are shown on the picture.' : 'Captions are never shown, even when a channel carries them.'} A setting of this device; the CC button in the player (or the C key) is the same switch.</div>
+      <div class="prov-head"><span class="prov-name">Pause and rewind</span><span class="kind ${state.remux ? 'm3u' : 'xtream'}">${state.remux ? 'ON' : 'NO FFMPEG'}</span></div>
+      <div class="prov-status">${playbackNote}</div>
     </div>
     ${hiddenHtml}
     <p class="sh-section">Providers</p>
@@ -765,17 +729,6 @@ el.settingsBody.addEventListener('click', async (e) => {
   const t = e.target as HTMLElement;
   const add = t.closest<HTMLElement>('[data-add]');
   if (add) return openForm(add.dataset.add as 'm3u' | 'xtream');
-  if (t.closest('[data-set="captions"]')) {
-    player.setCaptions(!player.captions);
-    renderSettings();
-    return;
-  }
-  if (t.closest('[data-set="dvr"]')) {
-    player.setDvr(!player.dvr);
-    renderSettings();
-    if (player.isOpen) toast(player.dvr ? 'Pause and rewind is on from the next channel' : 'Off from the next channel');
-    return;
-  }
   const unhide = t.closest<HTMLElement>('[data-unhide]');
   if (unhide) return void setHidden(unhide.dataset.unhide!, false);
   if (t.closest('[data-unhide-all]')) {

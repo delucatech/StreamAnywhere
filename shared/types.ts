@@ -922,18 +922,20 @@ export interface LiveTvTestResponse {
 
 export interface LiveTvTuneRequest {
   key: string;
-  /**
-   * Pause and rewind: the server records the channel (ffmpeg, a rolling window) and the browser
-   * plays that; false plays HLS channels straight from the relay (a couple of seconds sooner,
-   * pausing holds only what the provider's playlist still lists). Default true.
-   */
-  dvr?: boolean;
   /** This player's id (random per page load): its recorder stops when it leaves (POST /api/livetv/leave) */
   viewer?: string;
 }
 export interface LiveTvLeaveRequest {
   key: string;
   viewer: string;
+}
+/** What a channel's recording reaches back to (GET /api/livetv/live/:key/window): seconds of the recording */
+export interface LiveTvWindow {
+  start: number;
+  end: number;
+  /** where a fresh viewer starts (a few segments before the end): what "live" means for the badge */
+  edge: number;
+  segments: number;
 }
 
 export type LiveTvStreamKind = 'hls' | 'remux' | 'progressive';
@@ -951,7 +953,11 @@ export interface LiveTvTuneResponse {
   /** Technical detail (status, content type), for the player's message and the log */
   detail?: string;
   message?: string;
-  /** The stream is recorded on the server: pause and rewind within `windowSec` */
+  /**
+   * The stream is recorded on the server and `playUrl` is the recording as one live MP4
+   * (`?from=live` or `?from=<seconds of the recording>`; `…/window` says what it reaches back to):
+   * pause and rewind within `windowSec`
+   */
   dvr?: boolean;
   windowSec?: number;
   elapsedMs: number;

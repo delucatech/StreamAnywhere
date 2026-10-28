@@ -476,8 +476,8 @@ save keeps the saved one). The log sees providers by name and URLs redacted (`re
 `/live/<user>/<password>/` path segments, `username=`/`password=`/`token=` query values, and the
 account's strings themselves are masked). Favorites, hidden channels, which channels did not
 play last time, and the last channel watched are in `LIVETV_DIR/prefs.json` – shared by every
-device, mirrored in the browser's localStorage for an instant first paint. Closed captions on /
-off and the logos that failed to load are per device (localStorage only).
+device, mirrored in the browser's localStorage for an instant first paint. The logos that failed
+to load are per device (localStorage only).
 
 *Channel lists.* A refresh fetches the playlist (up to 64 MB; `livetvM3u.ts` reads `#EXTINF`
 attributes, `#EXTGRP`, `#EXTVLCOPT` / `#KODIPROP` / `#EXTHTTP` request headers, DRM license props
@@ -514,49 +514,58 @@ first bytes:
   (deterministic, so a playlist reloaded every few seconds keeps its URLs); the browser sees nothing
   upstream and cannot forge a relay request. `GET /api/livetv/hls/:key/index.m3u8`, `…/p/:token.m3u8`,
   `/api/livetv/seg/:key/:token`. Fastify's `maxParamLength` is raised for the tokens;
-- a **raw MPEG-TS** stream (`.ts`, the usual Xtream form) is **remuxed** by ffmpeg into a live HLS
-  playlist in a temp folder (`-c:v copy`, sound to AAC stereo, 3 s segments; ready after two
-  segments, about 9 s measured), served from `/api/livetv/remux/:key/…` while someone is watching
-  and torn down 3 min after the last request. Without ffmpeg the channel is *unsupported* with
-  that said;
-- **pause and rewind** (on by default; Settings > Playback, per device): an HLS channel goes through
-  the same ffmpeg recorder (`-c copy` of one variant – `pickVariant`: H.264 before HEVC, the best at
-  or under 1080p / 12 Mbps; with the master and `-map p:N` when the sound is a separate rendition)
-  so that the playlist the browser plays keeps the **last 30 minutes** (600 segments, deleted as
-  they age; disk, not memory: ~400 MB at 1.7 Mbps). Pausing holds the picture as long as that;
-  resuming continues from the pause point; ← → skip 10 s, the seek bar (shown once the stream
-  reaches back 20 s) drags anywhere in the window, **L** or the amber badge (*−2:35*) jumps to live.
-  The price is a slower start (about 7 s measured on CNN against 1 s for the direct relay) and no
-  bitrate adaptation; the recorder failing to start falls back to the direct relay. With the setting
-  off, HLS plays straight from the relay and pausing holds only what the provider's playlist still
-  lists. hls.js is configured without `liveMaxLatencyDurationCount`, so it never drags a paused or
-  rewound player back to live. Recordings live in `LIVETV_DIR/cache` (disk, emptied at start),
-  never in a RAM-backed /tmp. The player sends a viewer id with the tune and `POST /api/livetv/leave`
-  when it switches channel, closes, or the page goes away (a beacon), so a left channel's
-  recorder stops 8 s later and its files go with it; at most `LIVETV_MAX_RECORDERS` (2) run at
-  once – a third channel stops the one nobody asked for the longest – and 3 min without any
-  request stops one anyway;
+- every **live stream** (an HLS playlist or a raw MPEG-TS) goes through the ffmpeg **recorder**:
+  the picture copied (`-c:v copy`; for HLS one variant – `pickVariant`: H.264 before HEVC, the
+  best at or under 1080p / 12 Mbps; with the master and `-map p:N` when the sound is a separate
+  rendition; `-http_persistent 0`, since a CDN closing its keep-alive connection mid-segment
+  otherwise cost the rest of that segment), the sound re-encoded to stereo AAC-LC (ADTS AAC out
+  of MPEG-TS cannot be copied into MP4; MP2 / AC-3 the page cannot decode), written as
+  **fragmented MP4** (`init.mp4` + `segNNNNN.m4s`, 3 s target, keyframe-aligned) into a playlist
+  that keeps the **last 30 minutes** (600 segments, deleted as they age; disk, not memory: ~400 MB
+  at 1.7 Mbps; `LIVETV_DIR/cache`, emptied at start, never a RAM-backed /tmp). Ready after two
+  segments (5–12 s measured on CNN). Without ffmpeg a live channel is *unsupported* with that said;
+- the page plays the recording as **one endless MP4**: `GET /api/livetv/live/:key/stream.mp4?from=live`
+  (or `from=<seconds of the recording>`) sends the init segment, then every segment from that point
+  on, then each new one as ffmpeg finishes it (an async generator behind `Readable.from`, so a
+  paused reader stops it at its next yield; a segment the window dropped meanwhile is skipped to the
+  oldest kept). `GET …/window` says what the recording reaches back to (`start`, `end`, and `edge`,
+  where `from=live` starts: three segments before the end; each segment's start is its first
+  fragment's `tfdt`, parsed from the file's head and cached). **No `<video>` element anywhere**:
+  the theater is a `<canvas>` drawn by the feed's WebCodecs pipeline (fetch → mp4box → VideoDecoder
+  / AudioDecoder → canvas 2D + Web Audio), the way TikTok videos play, through `FeedPlayer` with
+  `LoadSource.live` (no duration, no in-file seeking, the clock follows a jump in the timestamps,
+  the stream ending means the channel stopped – one automatic re-tune, then *unavailable*) and
+  `startAt` (frames before the seek target are decoded and dropped). A media file (MP4) a playlist
+  links to goes through the same pipeline as a file;
+- **pause and rewind**: pausing freezes the renderer's clock (its download pauses with it, the
+  recorder keeps going); resuming continues from the pause point (from the oldest point kept when
+  paused longer than the window); ← → skip 10 s and the seek bar (shown once the recording reaches
+  back 20 s) reload the stream from that point; **L** or the amber badge (*−2:35*, with the clock
+  time that was) jumps to live. The player sends a viewer id with the tune and `POST /api/livetv/leave`
+  when it switches channel, closes, or the page goes away (a beacon), so a left channel's recorder
+  stops 8 s later and its files go with it; at most `LIVETV_MAX_RECORDERS` (2) run at once – a third
+  channel stops the one nobody asked for the longest – and 3 min without any request stops one
+  anyway. Lossy feeds exist: iptv-org's CNN carries 6 real seconds in every 12 s segment (a
+  timestamp hole for the rest – what froze the picture on a `<video>` while the sound went on); the
+  canvas renderer jumps across such holes, and a stall under 1.2 s shows no overlay. A channel whose
+  variant turns out to be HEVC on a browser without that decoder is *unsupported* with that said;
 - a **media file** (MP4 / WebM) is relayed as it is (`/api/livetv/file/:key`, Range forwarded);
 - **MPEG-DASH**, a **web page** (a YouTube / Twitch link in a playlist), **DRM** and unknown formats are
   *unsupported* with the reason; an HTTP error, nothing, or a timeout is *unavailable* with the
   status (403 = geo-blocked or refused from the server, 404 = gone…).
 
-The verdict is kept for 5 min per channel. The player is a `<video>` with **hls.js** (MSE: Chromium,
-the Tesla browser, Firefox, desktop Safari) or the native HLS of iPhone Safari – not the canvas
-pipeline, which reads whole MP4 files; live chains are what MSE is for. States: *Tuning…* →
-*Loading…* → playing (controls hide after 3 s; LIVE badge; now / next with progress), or
-*unavailable* / *unsupported* with the message, **Try again**, **Next channel**, **Close**; a fatal
-hls.js network error maps to *unavailable* (with the relay's error text), a media error (one recovery
-attempt first) to *unsupported*; 30 s without progress ends in *unavailable*. A picture that
-freezes while the sound goes on (Chromium stops rendering after a hole or a broken frame in the
-video buffer while audio is buffered; hls.js only nudges across holes under a second) is caught
-by a watchdog: no new video frame for 4 s while the clock runs → a seek to the live edge, then
-hls.js's media-error recovery, then a re-tune. Previous / next channel follow the browser's
-current list (buttons, ↑ ↓, a vertical swipe), **F** favorite, **H** hide the channel (also a
-button in the error message), **C** closed captions, **G** the guide panel, **M** mute, fullscreen
-(the theater, or the iPhone's native player). Closed captions are **off by default** (Settings >
-Playback, the CC button, per device): off, every text track of the video is disabled, so neither
-CEA-608 captions in the stream nor a subtitle track of the manifest is drawn.
+The verdict is kept for 5 min per channel. The player (`client/src/livetv/player.ts`) is a canvas:
+states *Tuning…* → *Loading…* → playing (controls hide after 3 s; LIVE badge; now / next with
+progress) or paused, or *unavailable* / *unsupported* with the message, **Try again**, **Next
+channel**, **Hide channel**, **Close**; a fetch / HTTP failure maps to *unavailable*, a decoder
+or codec failure to *unsupported*. Previous / next channel follow the browser's current list
+(buttons, ↑ ↓, a vertical swipe), **F** favorite, **H** hide the channel (also a button in the
+error message), **G** the guide panel, **M** mute, fullscreen (the theater). There are no closed
+captions on the canvas path (nothing draws text tracks; CEA-608 would need its own parser), and
+no `<video>` fallback is wanted: on a browser without WebCodecs the feed's hidden-video-to-canvas
+renderer (`FeedPlayer` mode `video-canvas`) is what runs, as it does for the feed. The HLS relay
+routes (`/api/livetv/hls/…`, `/api/livetv/seg/…`) stay for an HLS player that wants them; the
+page does not use them.
 
 **Browser** (`client/src/livetv/livetv.ts`): search, a provider dropdown (shown with two or more),
 an **All / Favorites** switch (the favorites count on it; the group chips follow the choice), group

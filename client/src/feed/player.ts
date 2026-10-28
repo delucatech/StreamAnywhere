@@ -125,7 +125,7 @@ export class FeedPlayer {
    * Starts fetching/decoding `url` (plus `audioUrl`, when the sound comes as a second file);
    * resolves when the renderer accepted it (frames arrive later).
    */
-  async load(url: string, connection: ConnectionKind, label: string, extra: { audioUrl?: string; durationHint?: number; blob?: Blob; prefix?: MediaPrefix; audioPrefix?: MediaPrefix } = {}): Promise<void> {
+  async load(url: string, connection: ConnectionKind, label: string, extra: { audioUrl?: string; durationHint?: number; blob?: Blob; prefix?: MediaPrefix; audioPrefix?: MediaPrefix; live?: boolean; startAt?: number } = {}): Promise<void> {
     if (this.destroyed) return;
     // play() may already have been asked for this source: the feed looks the media cache up before
     // it hands the URL over, and the tap (or the automatic start) does not wait for that
@@ -145,6 +145,8 @@ export class FeedPlayer {
       blob: extra.blob,
       prefix: extra.prefix,
       audioPrefix: extra.audioPrefix,
+      live: extra.live,
+      startAt: extra.startAt,
     };
     this.renderer.setVolume(this.muted ? 0 : 1);
     this.startTicker();

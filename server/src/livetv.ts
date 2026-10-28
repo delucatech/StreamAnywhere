@@ -25,7 +25,7 @@ import { EPG_TTL_MS, epgLoading, epgStore, forgetEpg, loadEpg, nowNext, programm
 import { checkLiveUrl, fetchLiveText, redactUrl, safeHost } from './livetvHttp';
 import { cleanChannelName, countGroups, parseM3u, splitGroups, type M3uChannel } from './livetvM3u';
 import { LIVETV_PRESETS, presetById } from './livetvPresets';
-import { classify, DVR_WINDOW_SEC, ensureRemux, leaveRemux, pickVariant, registerLiveTvStreamRoutes, remuxAvailable, remuxStats, setLiveTvStreamLogger, setRemuxRoot, shutdownLiveTvStreams, type StreamSource, type Verdict } from './livetvStream';
+import { classify, DVR_WINDOW_SEC, ensureRemux, leaveRemux, pickVariant, registerLiveTvStreamRoutes, remuxAvailable, remuxStats, setLiveTvStreamLogger, setRemuxRoot, shutdownLiveTvStreams, type RemuxSource, type StreamSource, type Verdict } from './livetvStream';
 import { normalizeXtreamServer, xtreamAccount, xtreamEpgUrl, xtreamLiveChannels, xtreamLiveUrl, xtreamSecrets, XtreamError, type XtreamCreds } from './livetvXtream';
 
 export class LiveTvError extends Error {
@@ -689,13 +689,13 @@ function noteTune(key: string, ok: boolean): void {
 /** A viewer id as the page sends it (letters, digits, - and _; at most 64) */
 const cleanViewer = (v: unknown): string | undefined => (typeof v === 'string' && /^[\w-]{1,64}$/.test(v) ? v : undefined);
 
-export async function tune(key: string, dvr = true, viewer?: string): Promise<LiveTvTuneResponse> {
-  const r = await tuneChannel(key, dvr, viewer);
+export async function tune(key: string, viewer?: string): Promise<LiveTvTuneResponse> {
+  const r = await tuneChannel(key, viewer);
   noteTune(key, r.state === 'ok');
   return r;
 }
 
-async function tuneChannel(key: string, dvr: boolean, viewer: string | undefined): Promise<LiveTvTuneResponse> {
+async function tuneChannel(key: string, viewer: string | undefined): Promise<LiveTvTuneResponse> {
   const t0 = Date.now();
   const found = findChannel(key);
   if (!found) throw new LiveTvError('That channel is not in the list any more (the provider changed its playlist?)', 404);
@@ -728,33 +728,26 @@ async function tuneChannel(key: string, dvr: boolean, viewer: string | undefined
     verdicts.set(key, v);
     detail = r.kind === 'progressive' ? r.contentType : r.kind;
   }
-  let playUrl: string;
-  let recorded = false;
-  if (v.kind === 'hls' && dvr && v.hlsInput && (await remuxAvailable())) {
-    // pause and rewind: ffmpeg records the variant into a rolling window; the relay stays the fallback
-    try {
-      playUrl = (await ensureRemux(key, { url: v.hlsInput.url, headers: v.headers, input: 'hls', program: v.hlsInput.program }, src.secrets || [], viewer)).playUrl;
-      recorded = true;
-      log(`tune ${p.name} / ${cleanChannelName(c.name)}: recorder on ${v.hlsInput.resolution || '?'} ${v.hlsInput.bandwidth ? Math.round(v.hlsInput.bandwidth / 1000) + ' kbps' : ''}, ${Date.now() - t0} ms`);
-      return { key, state: 'ok', kind: 'remux', playUrl, detail: `hls, recorded${v.hlsInput.resolution ? ' at ' + v.hlsInput.resolution : ''}`, message, dvr: true, windowSec: DVR_WINDOW_SEC, elapsedMs: Date.now() - t0 };
-    } catch (e) {
-      log(`tune ${p.name} / ${cleanChannelName(c.name)}: recorder failed (${(e as Error).message}), relaying instead`);
-    }
+  // a media file plays as it is (the page's own MP4 pipeline reads it with Range requests)
+  if (v.kind === 'progressive') {
+    log(`tune ${p.name} / ${cleanChannelName(c.name)}: file from ${safeHost(v.url || '')}, ${Date.now() - t0} ms`);
+    return { key, state: 'ok', kind: 'progressive', playUrl: `/api/livetv/file/${encodeURIComponent(key)}`, detail, message, elapsedMs: Date.now() - t0 };
   }
-  if (v.kind === 'remux') {
-    try {
-      playUrl = (await ensureRemux(key, { url: v.url!, headers: v.headers, input: 'ts' }, src.secrets || [], viewer)).playUrl;
-      recorded = true;
-    } catch (e) {
-      verdicts.delete(key);
-      const m = (e as Error).message;
-      log(`tune ${p.name} / ${cleanChannelName(c.name)}: remux failed: ${m}`);
-      return { key, state: /ffmpeg is not installed/.test(m) ? 'unsupported' : 'unavailable', detail: 'remux', message: /ffmpeg is not installed/.test(m) ? m : `The stream could not be read (${m}).`, elapsedMs: Date.now() - t0 };
-    }
-  } else if (v.kind === 'progressive') playUrl = `/api/livetv/file/${encodeURIComponent(key)}`;
-  else playUrl = `/api/livetv/hls/${encodeURIComponent(key)}/index.m3u8`;
-  log(`tune ${p.name} / ${cleanChannelName(c.name)}: ${v.kind} from ${safeHost(v.url || '')}, ${Date.now() - t0} ms`);
-  return { key, state: 'ok', kind: v.kind, playUrl, detail, message, dvr: recorded, windowSec: recorded ? DVR_WINDOW_SEC : undefined, elapsedMs: Date.now() - t0 };
+  // every live stream goes through the recorder: the page plays the recording as one MP4 on a
+  // canvas (no <video> element), and pauses / rewinds within its window
+  if (!(await remuxAvailable())) return { key, state: 'unsupported', detail: 'no ffmpeg', message: 'Live channels need ffmpeg on the server (it turns the stream into what the page can decode); ffmpeg is not installed there.', elapsedMs: Date.now() - t0 };
+  const input: RemuxSource = v.kind === 'hls' ? { url: (v.hlsInput || { url: v.url! }).url, headers: v.headers, input: 'hls', program: v.hlsInput?.program } : { url: v.url!, headers: v.headers, input: 'ts' };
+  try {
+    const playUrl = (await ensureRemux(key, input, src.secrets || [], viewer)).playUrl;
+    const what = v.kind === 'hls' ? `hls${v.hlsInput?.resolution ? ' ' + v.hlsInput.resolution : ''}${v.hlsInput?.bandwidth ? ' ' + Math.round(v.hlsInput.bandwidth / 1000) + ' kbps' : ''}` : 'mpeg-ts';
+    log(`tune ${p.name} / ${cleanChannelName(c.name)}: recording ${what} from ${redactUrl(input.url, src.secrets || [])}, ${Date.now() - t0} ms`);
+    return { key, state: 'ok', kind: 'remux', playUrl, detail: `${what}, recorded`, message, dvr: true, windowSec: DVR_WINDOW_SEC, elapsedMs: Date.now() - t0 };
+  } catch (e) {
+    verdicts.delete(key);
+    const m = (e as Error).message;
+    log(`tune ${p.name} / ${cleanChannelName(c.name)}: recorder failed: ${m}`);
+    return { key, state: 'unavailable', detail: 'recorder', message: `The stream could not be read (${m}).`, elapsedMs: Date.now() - t0 };
+  }
 }
 
 // ---------------------------------------------------------------- preferences
@@ -869,7 +862,7 @@ export function registerLiveTv(app: FastifyInstance): void {
     try {
       const key = String(req.body?.key || '');
       if (!key) throw new LiveTvError('Which channel?');
-      return await tune(key, req.body?.dvr !== false, cleanViewer(req.body?.viewer));
+      return await tune(key, cleanViewer(req.body?.viewer));
     } catch (e) {
       return fail(reply, e);
     }

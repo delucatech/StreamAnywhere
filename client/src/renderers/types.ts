@@ -37,6 +37,14 @@ export interface LoadSource {
    */
   prefix?: MediaPrefix;
   audioPrefix?: MediaPrefix;
+  /**
+   * An endless stream (Live TV: the server's recording as one fragmented MP4 that keeps growing):
+   * no duration, no seeking inside the file (the player reloads from another point instead), the
+   * clock follows a jump in the timestamps, and the stream ending means the channel stopped.
+   */
+  live?: boolean;
+  /** Start presenting at this media time (seconds): frames before it are decoded and dropped */
+  startAt?: number;
 }
 
 export type PlayerState = 'idle' | 'loading' | 'ready' | 'buffering' | 'playing' | 'paused' | 'ended' | 'error';

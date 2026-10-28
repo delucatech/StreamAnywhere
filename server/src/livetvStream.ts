@@ -25,6 +25,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { IncomingMessage } from 'node:http';
+import { Readable } from 'node:stream';
 import type { LiveTvStreamKind } from '../../shared/types';
 import { detectFfmpeg } from './ffmpeg';
 import { decryptText, encryptText } from './livetvCrypto';
@@ -286,6 +287,10 @@ interface RemuxSession {
   /** viewer id -> last request: the player says when it leaves, so a zapped-away channel stops at once */
   viewers: Map<string, number>;
   leaveTimer?: NodeJS.Timeout;
+  /** track id -> timescale of the init segment, once it exists */
+  timescales?: Map<number, number>;
+  /** segment file name -> its start (seconds of the recording), for the window and seeks */
+  segStarts: Map<string, number>;
   ready: Promise<void>;
   exited?: { code: number | null; signal: string | null };
   stderr: string[];
@@ -331,24 +336,244 @@ export function remuxArgs(src: RemuxSource, dir: string): string[] {
     .join('');
   const hls = src.input === 'hls';
   return [
-    '-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
+    '-nostdin', '-hide_banner', '-loglevel', 'warning', '-y',
     '-user_agent', src.headers?.['user-agent'] || LIVETV_USER_AGENT,
     ...(headerLines ? ['-headers', headerLines] : []),
-    // segments named .php / .html / nothing at all are common in IPTV lists
-    ...(hls ? ['-allowed_extensions', 'ALL'] : []),
+    // segments named .php / .html / nothing at all are common in IPTV lists; a connection per
+    // segment: a CDN closing its keep-alive connection mid-segment otherwise costs the rest of it
+    // (ffmpeg's TLS reader logs "End of file" and moves on, leaving a hole of several seconds)
+    ...(hls ? ['-allowed_extensions', 'ALL', '-http_persistent', '0'] : []),
     '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5',
     '-fflags', '+genpts+discardcorrupt',
     // an HLS input starts a few segments behind live: one segment is enough to see the streams
     '-analyzeduration', hls ? '2000000' : '3000000', '-probesize', hls ? '2000000' : '3000000',
     '-i', src.url,
     ...(hls && src.program !== undefined ? ['-map', `p:${src.program}`, '-sn', '-dn'] : ['-map', '0:v:0?', '-map', '0:a:0?']),
-    // HLS carries AAC already (what a browser plays); a raw TS may carry MP2 / AC-3: to AAC
-    '-c:v', 'copy', ...(hls ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-ac', '2', '-b:a', '128k']),
-    '-f', 'hls', '-hls_time', String(SEGMENT_SEC), '-hls_list_size', String(Math.ceil(DVR_WINDOW_SEC / SEGMENT_SEC)),
+    // the picture is copied; the sound is re-encoded to stereo AAC-LC whatever it was (ADTS AAC out
+    // of MPEG-TS cannot be copied into MP4 without a filter, MP2 / AC-3 cannot be decoded by the page)
+    '-c:v', 'copy', '-c:a', 'aac', '-ac', '2', '-b:a', '128k',
+    // fragmented MP4 (init.mp4 + moof/mdat segments): what the browser's own demuxer / WebCodecs
+    // pipeline reads, concatenated by the live stream route; no <video> element anywhere
+    // ffmpeg puts the init file next to the playlist only when the playlist path has a '/' in it
+    // (a Windows path of backslashes would send a relative name to the process's cwd): forward
+    // slashes on every platform, and the init name relative
+    '-f', 'hls', '-hls_segment_type', 'fmp4', '-hls_fmp4_init_filename', 'init.mp4',
+    '-hls_time', String(SEGMENT_SEC), '-hls_list_size', String(Math.ceil(DVR_WINDOW_SEC / SEGMENT_SEC)),
     '-hls_flags', 'delete_segments+omit_endlist+independent_segments+temp_file+program_date_time',
-    '-hls_segment_filename', path.join(dir, 'seg%05d.ts'),
-    path.join(dir, 'index.m3u8'),
+    '-hls_segment_filename', `${slashes(dir)}/seg%05d.m4s`,
+    `${slashes(dir)}/index.m3u8`,
   ];
+}
+const slashes = (p: string): string => p.replace(/\\/g, '/');
+
+// ---------------------------------------------------------------- the recording as one live MP4
+
+/** The boxes of an MP4 buffer between `start` and `end` (a partial last box is left out) */
+function* boxes(buf: Buffer, start = 0, end = buf.length): Generator<{ type: string; start: number; size: number; payload: number }> {
+  end = Math.min(end, buf.length);
+  let p = start;
+  while (p + 8 <= end) {
+    let size = buf.readUInt32BE(p);
+    const type = buf.toString('latin1', p + 4, p + 8);
+    let hdr = 8;
+    if (size === 1) {
+      if (p + 16 > end) break;
+      size = Number(buf.readBigUInt64BE(p + 8));
+      hdr = 16;
+    } else if (size === 0) size = end - p;
+    if (size < hdr) break;
+    yield { type, start: p, size, payload: p + hdr };
+    p += size;
+  }
+}
+
+/** track id -> timescale, from the init segment's moov (tkhd / mdhd of each trak) */
+export function initTimescales(init: Buffer): Map<number, number> {
+  const out = new Map<number, number>();
+  for (const moov of boxes(init)) {
+    if (moov.type !== 'moov') continue;
+    for (const trak of boxes(init, moov.payload, moov.start + moov.size)) {
+      if (trak.type !== 'trak') continue;
+      let id = 0;
+      let ts = 0;
+      for (const b of boxes(init, trak.payload, trak.start + trak.size)) {
+        if (b.type === 'tkhd') id = init.readUInt32BE(b.payload + (init[b.payload] === 1 ? 20 : 12));
+        else if (b.type === 'mdia') for (const m of boxes(init, b.payload, b.start + b.size)) if (m.type === 'mdhd') ts = init.readUInt32BE(m.payload + (init[m.payload] === 1 ? 20 : 12));
+      }
+      if (id && ts) out.set(id, ts);
+    }
+  }
+  return out;
+}
+
+/** Where a segment starts, in seconds of the recording: the first fragment's tfdt over its track's timescale */
+export function segmentStartSec(seg: Buffer, timescales: Map<number, number>): number | undefined {
+  for (const moof of boxes(seg)) {
+    if (moof.type !== 'moof') continue;
+    for (const traf of boxes(seg, moof.payload, moof.start + moof.size)) {
+      if (traf.type !== 'traf') continue;
+      let id = 0;
+      let t: number | undefined;
+      for (const b of boxes(seg, traf.payload, traf.start + traf.size)) {
+        if (b.type === 'tfhd') id = seg.readUInt32BE(b.payload + 4);
+        else if (b.type === 'tfdt') t = seg[b.payload] === 1 ? Number(seg.readBigUInt64BE(b.payload + 4)) : seg.readUInt32BE(b.payload + 4);
+      }
+      const ts = timescales.get(id);
+      if (t !== undefined && ts) return t / ts;
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+/** The segments a recorder's playlist lists, in order, with their durations */
+export function playlistSegments(text: string): { name: string; duration: number }[] {
+  const out: { name: string; duration: number }[] = [];
+  let dur = 0;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (line.startsWith('#EXTINF:')) dur = Number(line.slice(8).split(',')[0]) || 0;
+    else if (!line.startsWith('#')) {
+      out.push({ name: line, duration: dur });
+      dur = 0;
+    }
+  }
+  return out;
+}
+
+const segSeq = (name: string): number => Number(/(\d+)\.m4s$/.exec(name)?.[1] ?? -1);
+const segName = (seq: number): string => `seg${String(seq).padStart(5, '0')}.m4s`;
+/** How many segments behind the newest a fresh viewer starts (the live edge, with a little in hand) */
+const LIVE_EDGE_SEGMENTS = 3;
+const SEGMENT_HEAD_BYTES = 16 * 1024;
+
+interface SegInfo {
+  name: string;
+  seq: number;
+  duration: number;
+  start?: number;
+}
+
+/** The listed segments with their start times (tfdt of each, cached per session). */
+function listSegments(s: RemuxSession): SegInfo[] {
+  let text: string;
+  try {
+    text = fs.readFileSync(path.join(s.dir, 'index.m3u8'), 'utf8');
+  } catch {
+    return [];
+  }
+  if (!s.timescales) {
+    try {
+      s.timescales = initTimescales(fs.readFileSync(path.join(s.dir, 'init.mp4')));
+    } catch {
+      return [];
+    }
+  }
+  const list = playlistSegments(text).map((x): SegInfo => ({ name: x.name, seq: segSeq(x.name), duration: x.duration }));
+  const keep = new Set(list.map((x) => x.name));
+  for (const k of s.segStarts.keys()) if (!keep.has(k)) s.segStarts.delete(k);
+  for (const seg of list) {
+    let start = s.segStarts.get(seg.name);
+    if (start === undefined) {
+      try {
+        const fd = fs.openSync(path.join(s.dir, seg.name), 'r');
+        try {
+          const head = Buffer.alloc(SEGMENT_HEAD_BYTES);
+          const n = fs.readSync(fd, head, 0, head.length, 0);
+          start = segmentStartSec(head.subarray(0, n), s.timescales);
+        } finally {
+          fs.closeSync(fd);
+        }
+      } catch {
+        start = undefined;
+      }
+      if (start !== undefined) s.segStarts.set(seg.name, start);
+    }
+    seg.start = start;
+  }
+  return list;
+}
+
+export interface LiveWindow {
+  /** seconds of the recording: the oldest point kept, and the end of the newest segment */
+  start: number;
+  end: number;
+  /** where `?from=live` starts right now (a few segments before the end): "live" for the badge */
+  edge: number;
+  segments: number;
+}
+
+/** What a viewer of the channel can seek within; undefined when the channel is not recorded (any more). */
+export function liveWindow(key: string): LiveWindow | undefined {
+  const s = sessions.get(key);
+  if (!s) return undefined;
+  const list = listSegments(s).filter((x) => x.start !== undefined);
+  if (!list.length) return { start: 0, end: 0, edge: 0, segments: 0 };
+  const first = list[0];
+  const last = list[list.length - 1];
+  const edge = list[Math.max(0, list.length - LIVE_EDGE_SEGMENTS)].start!;
+  return { start: first.start!, end: last.start! + last.duration, edge, segments: list.length };
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * The recording as one endless fragmented MP4: the init segment, then every segment from the
+ * chosen point on, then each new one as ffmpeg finishes it. `from` is a time in the recording
+ * (the last segment starting at or before it) or 'live'. A reader that stops pulling (a paused
+ * player) stops this generator at its next yield, so nothing piles up; a segment the window has
+ * dropped meanwhile is skipped to the oldest one kept.
+ */
+async function* liveBytes(s: RemuxSession, from: number | 'live', viewer: string | undefined, closed: () => boolean): AsyncGenerator<Buffer> {
+  yield await fs.promises.readFile(path.join(s.dir, 'init.mp4'));
+  let list = listSegments(s);
+  while (!list.length && !closed() && !s.exited && sessions.get(s.key) === s) {
+    await sleep(300);
+    list = listSegments(s);
+  }
+  if (!list.length) return;
+  let next: number;
+  if (from === 'live') next = list[Math.max(0, list.length - LIVE_EDGE_SEGMENTS)].seq;
+  else {
+    let pick = list[0];
+    for (const seg of list) if (seg.start !== undefined && seg.start <= from) pick = seg;
+    next = pick.seq;
+  }
+  let idle = 0;
+  let misses = 0;
+  while (!closed() && !s.exited && sessions.get(s.key) === s) {
+    list = listSegments(s);
+    if (list.length) {
+      const first = list[0].seq;
+      const last = list[list.length - 1].seq;
+      if (next < first) next = first;
+      if (next <= last) {
+        let data: Buffer | undefined;
+        try {
+          data = await fs.promises.readFile(path.join(s.dir, segName(next)));
+        } catch (e) {
+          // listed but not readable (yet): ffmpeg may still be finishing it; a few tries, then on
+          if (++misses <= 10) {
+            await sleep(200);
+            continue;
+          }
+          log(`remux ${s.key}: ${segName(next)} is listed but unreadable (${(e as Error).message}); skipped`);
+        }
+        misses = 0;
+        next++;
+        idle = 0;
+        if (data) {
+          hit(s, viewer);
+          yield data;
+        }
+        continue;
+      }
+    }
+    // nothing new yet: ffmpeg finishes a segment every few seconds (a dead upstream: minutes, then the reaper)
+    idle++;
+    await sleep(300);
+  }
 }
 
 async function startRemux(key: string, src: RemuxSource, ffmpeg: string, secrets: string[]): Promise<RemuxSession> {
@@ -357,12 +582,19 @@ async function startRemux(key: string, src: RemuxSource, ffmpeg: string, secrets
   fs.mkdirSync(dir, { recursive: true });
   const args = remuxArgs(src, dir);
   const proc = spawn(ffmpeg, args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
-  const s: RemuxSession = { key, input: src.input, dir, proc, startedAt: Date.now(), lastHit: Date.now(), viewers: new Map(), ready: Promise.resolve(), stderr: [] };
+  const s: RemuxSession = { key, input: src.input, dir, proc, startedAt: Date.now(), lastHit: Date.now(), viewers: new Map(), segStarts: new Map(), ready: Promise.resolve(), stderr: [] };
+  let logged = 0;
   proc.stderr?.on('data', (d: Buffer) => {
     for (const line of d.toString().split(/\r?\n/)) {
       if (!line.trim()) continue;
-      s.stderr.push(redactUrl(line, secrets).slice(0, 300));
+      const clean = redactUrl(line, secrets).slice(0, 300);
+      s.stderr.push(clean);
       if (s.stderr.length > 20) s.stderr.shift();
+      // ffmpeg's warnings (segments expired upstream, timestamp trouble) explain gaps: the first few go to the log
+      if (logged < 12) {
+        logged++;
+        log(`remux ${key}: ffmpeg: ${clean}`);
+      }
     }
   });
   proc.on('exit', (code, signal) => {
@@ -444,7 +676,7 @@ export async function ensureRemux(key: string, src: RemuxSource, secrets: string
     stopRemux(s, 'failed to start');
     throw e;
   }
-  return { playUrl: `/api/livetv/remux/${encodeURIComponent(key)}/index.m3u8${viewer ? `?v=${encodeURIComponent(viewer)}` : ''}` };
+  return { playUrl: `/api/livetv/live/${encodeURIComponent(key)}/stream.mp4${viewer ? `?v=${encodeURIComponent(viewer)}` : ''}` };
 }
 
 /** The player left the channel (another channel, the player closed, the page gone): stop soon unless someone else watches. */
@@ -600,11 +832,33 @@ export function registerLiveTvStreamRoutes(app: FastifyInstance, resolveSource: 
   app.get('/api/livetv/file/:key', file);
   app.head('/api/livetv/file/:key', file);
 
-  // the remuxed playlist and its segments (files ffmpeg writes)
+  // the recording as one live MP4 (see liveBytes), and what it reaches back to
+  app.get<{ Params: { key: string }; Querystring: { v?: string; from?: string } }>('/api/livetv/live/:key/stream.mp4', async (req, reply) => {
+    const s = sessions.get(req.params.key);
+    if (!s) return reply.code(404).send({ error: 'This channel is not being recorded any more: tune it again' });
+    const viewer = typeof req.query.v === 'string' ? req.query.v.slice(0, 64) : undefined;
+    hit(s, viewer);
+    const from = req.query.from === undefined || req.query.from === 'live' || !Number.isFinite(Number(req.query.from)) ? 'live' : Math.max(0, Number(req.query.from));
+    let closed = false;
+    req.raw.on('close', () => {
+      closed = true;
+    });
+    const stream = Readable.from(liveBytes(s, from, viewer, () => closed));
+    return reply.headers({ 'content-type': 'video/mp4', 'cache-control': 'no-store', 'x-live-window-sec': String(DVR_WINDOW_SEC) }).send(stream);
+  });
+  app.get<{ Params: { key: string }; Querystring: { v?: string } }>('/api/livetv/live/:key/window', async (req, reply) => {
+    const s = sessions.get(req.params.key);
+    if (!s) return reply.code(404).send({ error: 'This channel is not being recorded any more: tune it again' });
+    hit(s, typeof req.query.v === 'string' ? req.query.v.slice(0, 64) : undefined);
+    reply.header('cache-control', 'no-store');
+    return liveWindow(req.params.key);
+  });
+
+  // the recorder's playlist and segments as files (an HLS player could read them; the page does not)
   app.get<{ Params: { key: string; file: string }; Querystring: { v?: string } }>('/api/livetv/remux/:key/:file', async (req, reply) => {
     const s = sessions.get(req.params.key);
     if (!s) return reply.code(404).send({ error: 'This channel is not being remuxed any more: tune it again' });
-    if (!/^(index\.m3u8|seg\d{5,}\.ts)$/.test(req.params.file)) return reply.code(400).send({ error: 'Bad file name' });
+    if (!/^(index\.m3u8|init\.mp4|seg\d{5,}\.m4s)$/.test(req.params.file)) return reply.code(400).send({ error: 'Bad file name' });
     hit(s, typeof req.query.v === 'string' ? req.query.v.slice(0, 64) : undefined);
     const file = path.join(s.dir, req.params.file);
     if (req.params.file === 'index.m3u8') {
@@ -622,6 +876,6 @@ export function registerLiveTvStreamRoutes(app: FastifyInstance, resolveSource: 
     } catch {
       return reply.code(404).send({ error: 'That segment is gone' });
     }
-    return reply.headers({ 'content-type': 'video/mp2t', 'content-length': String(size), 'cache-control': 'private, max-age=30' }).send(fs.createReadStream(file));
+    return reply.headers({ 'content-type': req.params.file === 'init.mp4' ? 'video/mp4' : 'video/iso.segment', 'content-length': String(size), 'cache-control': 'private, max-age=30' }).send(fs.createReadStream(file));
   });
 }
