@@ -257,12 +257,14 @@ Open **`/feed.html`** (from the launcher; `?platform=youtube` for YouTube). It i
 - **Auto-scroll** (checkbox / **A**): when on, a finished video advances to the next one; when off,
   videos loop.
 - **⬇ Save** (the Save action / **D**) asks where the video goes. **Save to library** adds the link
-  and its details (title, author, cover, length) to the Video Library, where the server fetches its
-  own copy as *Download to library* does (see **Video Library**); when the video comes as one file
-  (TikTok, Instagram, Facebook) the bytes this page already has (the media cache, else a fresh fetch)
-  are also written into the library's store on this device, so it plays there at once and offline.
-  YouTube's sound is a separate file: the server merges the two and the device fetches that copy
-  later. **Download to this device** fetches the cookie-free CDN URL as a blob (progress on the
+  and its details (title, author, cover, length) to the Video Library, as *Save link* does there
+  (see **Video Library**): the server keeps the link and details, never the video. The video is
+  then kept in the library's store on this device: when it comes as one file (TikTok, Instagram,
+  Facebook) the bytes this page already has (the media cache, else a fresh fetch) are written there
+  at once; YouTube's sound is a separate file, so the library's *Download for in-app playback* runs
+  instead (a server job merges picture and sound into a temporary file this device fetches). Any
+  other device sees the entry in its library and downloads its own copy from there, as with every
+  saved link. **Download to this device** fetches the cookie-free CDN URL as a blob (progress on the
   button) and saves it as `@author_<id>.mp4`; if the direct fetch fails it goes through the server
   proxy. The car's browser cannot save files, so only the library choice is shown there.
 - Sources: **Explore** (TikTok's public explore feed, with the same categories as tiktok.com/explore;

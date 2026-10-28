@@ -149,7 +149,7 @@ export const api = {
     if (!res.ok) throw new ApiError((json as { error?: string })?.error || `library ${res.status}`, res.status, json);
     return json as LibraryState;
   },
-  librarySave: (url: string, categoryIds?: string[]): Promise<LibrarySaveResponse> => post('/api/library', { url, categoryIds }, 30_000),
+  librarySave: (url: string, categoryIds?: string[], hint?: LibrarySaveHint): Promise<LibrarySaveResponse> => post('/api/library', { url, categoryIds, hint }, 30_000),
   /** "Download to library": the server fetches the video (converted to MP4 when needed) and keeps it for every device */
   libraryImport: (url: string, categoryIds?: string[], hint?: LibrarySaveHint): Promise<LibrarySaveResponse> => post('/api/library/import', { url, categoryIds, hint }, 30_000),
   libraryImportEntry: (id: string): Promise<{ started: boolean; state: LibraryState }> => post(`/api/library/entries/${id}/import`, {}, 30_000),

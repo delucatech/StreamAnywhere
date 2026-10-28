@@ -21,11 +21,14 @@
  *    pauses while any panel (search, profile, inbox, sign-in) covers the feed and resumes on close.
  *  - Save (D): a choice between the Video Library and a file on this device. "Save to library"
  *    adds the video's link and details to the shared library (library.html: the server keeps the
- *    link and fetches its own copy, as "Download to library" does there) and, when the video comes
- *    as one file, writes the bytes this page has (the media cache, else a fresh fetch) into the
- *    library's own store on this device, so it plays there at once, offline too. "Download to this
- *    device" fetches the cookie-free CDN URL (CORS *) as a blob and saves it as @author_id.mp4;
- *    falls back to the server proxy when the direct fetch fails.
+ *    link, title, author, cover and length, as "Save link" does there, never the video) and keeps
+ *    the video in the library's own store on this device: the bytes this page has (the media
+ *    cache, else a fresh fetch) when the video comes as one file, otherwise (YouTube: separate
+ *    sound) through the library's downloader, where a server job merges picture and sound into a
+ *    temporary file this device fetches. Another device sees the entry and downloads its own copy
+ *    from the library page. "Download to this device" fetches the cookie-free CDN URL (CORS *) as
+ *    a blob and saves it as @author_id.mp4; falls back to the server proxy when the direct fetch
+ *    fails.
  *
  * Playback is canvas-only (see player.ts): the WebCodecs pipeline (fetch → mp4box → VideoDecoder →
  * canvas 2D + Web Audio) paints each item's <canvas>; no <video> element is on the page. Where
@@ -37,12 +40,13 @@
  * back to this app from another, the saved feed after the page was closed) is fed from disk first,
  * the rest from the network. A sweep between videos makes room (see mediaCache.ts).
  */
-import type { FeedAuthor, FeedItem, FeedSource, FollowState, LoginMode, MediaFormat, SessionInputRequest, SessionStatus } from '../../../shared/types';
+import type { FeedAuthor, FeedItem, FeedSource, FollowState, LibraryEntry, LoginMode, MediaFormat, SessionInputRequest, SessionStatus } from '../../../shared/types';
 import { api, ApiError, apiUrl } from '../api';
 import { pressed } from '../busy';
 import type { MediaPrefix } from '../media/demuxer';
 import { canSaveFiles, hasIndexedDb } from '../library/capabilities';
 import * as libdb from '../library/db';
+import * as libdl from '../library/downloads';
 import { currentPlatform, PLATFORMS, rememberApp, type PlatformDef } from '../platforms';
 import { fileKey, getCached, itemKey, MAX_AGE as CACHE_MAX_AGE, overBudget, putCached, sweep, type CacheRole } from './mediaCache';
 import { FeedPlayer, feedPlayerMode } from './player';
@@ -2480,8 +2484,8 @@ function download(entry: Entry): void {
   el.saveWhat.textContent = item.desc?.trim() ? `${who} · ${item.desc.trim()}` : who;
   el.saveLibrary.disabled = !item.canonicalUrl;
   el.saveLibraryNote.textContent = cands[0]?.audioUrl
-    ? 'Kept in your Video Library: the server fetches picture and sound · watch it any time, on every device'
-    : 'Kept in your Video Library, on the server and on this device · watch it any time';
+    ? 'Kept in your Video Library · the server merges picture and sound, then a copy stays on this device'
+    : 'Kept in your Video Library · a copy stays on this device · watch it any time';
   el.saveDevice.classList.toggle('hidden', !canSaveFiles);
   el.saveDevice.disabled = !cands.length;
   el.save.classList.remove('hidden');
@@ -2559,16 +2563,18 @@ async function fetchVideoBlob(cands: SourceCandidate[]): Promise<{ blob: Blob; k
 }
 
 /**
- * "Save to library": the link and details go to the shared library (the server fetches its own copy,
- * converted when needed), and this device keeps the file for in-app playback when the video comes as
- * one file (YouTube's separate sound is merged by the server; this device gets that copy later).
+ * "Save to library": the link and its details go to the shared library (the server keeps only those,
+ * as "Save link" on library.html does), and this device keeps the video for in-app playback: the bytes
+ * this page has when the video comes as one file, otherwise (YouTube: the sound is a separate file)
+ * the library's own downloader, whose server job merges picture and sound into a temporary file that
+ * this device fetches. A device without the copy downloads its own from the library page.
  */
 async function saveToLibrary(entry: Entry): Promise<void> {
   const item = entry.item;
   if (!item.canonicalUrl) return toast('This video has no link to save', true);
   const done = saveBusy('Saving…');
   try {
-    const r = await api.libraryImport(item.canonicalUrl, [], {
+    const r = await api.librarySave(item.canonicalUrl, [], {
       title: item.desc?.trim() || undefined,
       author: item.author.nickname || item.author.uniqueId || undefined,
       duration: item.duration,
@@ -2577,30 +2583,51 @@ async function saveToLibrary(entry: Entry): Promise<void> {
       cover: item.cover,
     });
     const saved = r.entry;
-    const already = r.duplicate && !r.importStarted;
-    const server = saved.file?.state === 'ready' ? 'a copy is on the server' : r.importStarted || saved.file ? 'the server is fetching its copy' : 'the link is saved';
+    const head = r.duplicate ? 'Already in your Video Library' : 'Saved to your Video Library';
+    if (!hasIndexedDb) return toast(`${head} · this browser cannot keep a copy, so the library plays it from the source`, false, 6000);
+    const have = await libdb.getVideo(saved.id).catch(() => undefined);
+    if (have) return toast(`${head} · already on this device (${fmtBytes(have.sizeBytes)})`, false, 6000);
     const cands = sourceCandidates(item);
     const muxed = cands.length > 0 && !cands[0].audioUrl;
-    let local = '';
-    if (muxed && hasIndexedDb) {
-      const have = await libdb.getVideo(saved.id).catch(() => undefined);
-      if (have) local = ' · already on this device';
-      else {
-        try {
-          const bytes = await storeLibraryCopy(entry, saved, cands);
-          local = ` · ${fmtBytes(bytes)} kept on this device`;
-        } catch (e) {
-          console.warn('[feed] library copy on this device failed', e);
-          local = ` · this device's copy failed (${errMsg(e)}); the library will play the server's`;
-        }
-      }
+    try {
+      const bytes = muxed ? await storeLibraryCopy(entry, saved, cands) : await storeViaLibrary(saved);
+      toast(`${head} · ${fmtBytes(bytes)} kept on this device`, false, 6000);
+    } catch (e) {
+      console.warn('[feed] library copy on this device failed', e);
+      toast(`${head} · this device's copy failed (${errMsg(e)}) · download it from the library page`, true, 8000);
     }
-    toast(`${already ? 'Already in your Video Library' : 'Saved to your Video Library'} · ${server}${local}`, false, 6000);
   } catch (e) {
     toast(`Could not save to the library: ${errMsg(e)}`, true, 7000);
   } finally {
     done();
   }
+}
+/**
+ * The library page's own in-app download for a saved entry (YouTube: the server merges picture and
+ * sound into a temporary file, fetched here into the library's store). Returns the bytes kept.
+ */
+async function storeViaLibrary(saved: LibraryEntry): Promise<number> {
+  setSaveStep('Preparing…');
+  const opts = await api.libraryOptions(saved.id);
+  const videos = opts.options.filter((o) => o.kind === 'video');
+  const o = videos.find((x) => x.recommended) || videos[0];
+  if (!o) throw new Error('the source offers no quality for this video');
+  const off = libdl.onTasksChange(() => {
+    const t = libdl.taskFor(saved.id);
+    if (!t) return;
+    if (t.percent !== undefined) el.actDownloadIco.textContent = `${Math.round(t.percent)}%`;
+    setSaveStep(/merging/i.test(t.text) ? 'Merging…' : t.phase === 'storing' ? 'Storing…' : 'Fetching…');
+  });
+  try {
+    await libdl.downloadInApp(saved, o, opts.probeId);
+  } finally {
+    off();
+  }
+  const t = libdl.taskFor(saved.id);
+  if (t?.phase !== 'done') throw new Error(t?.error || t?.text || 'the download did not finish');
+  libdl.dismiss(saved.id);
+  const v = await libdb.getVideo(saved.id);
+  return v?.sizeBytes || 0;
 }
 /** Writes the video's file into the library's store on this device (the media cache's whole file when it has one, else a fetch). Returns the bytes. */
 async function storeLibraryCopy(entry: Entry, saved: { id: string; title: string }, cands: SourceCandidate[]): Promise<number> {
