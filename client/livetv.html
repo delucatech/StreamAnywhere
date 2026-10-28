@@ -68,9 +68,11 @@
         <div class="filters" id="filters">
           <input id="search" class="search" type="search" placeholder="Search channels" aria-label="Search channels" autocomplete="off" />
           <select id="providerSel" class="select" aria-label="Provider"></select>
-          <button type="button" id="favsOnly" class="toggle" aria-pressed="false" title="Only favorite channels">
-            <span class="toggle-dot" aria-hidden="true"></span>Favorites
-          </button>
+          <!-- All channels, or only the favorites: the categories below follow the choice -->
+          <div class="seg" id="viewSeg" role="radiogroup" aria-label="Show">
+            <button type="button" class="seg-btn on" role="radio" aria-checked="true" data-view="all">All</button>
+            <button type="button" class="seg-btn" role="radio" aria-checked="false" data-view="favs"><span class="seg-star" aria-hidden="true">★</span>Favorites <small id="favCount"></small></button>
+          </div>
         </div>
         <div class="chips" id="chips" role="radiogroup" aria-label="Category"></div>
         <p class="status hidden" id="status" role="status"></p>

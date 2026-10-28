@@ -38,7 +38,8 @@ const el = {
   contBtn: $<HTMLButtonElement>('continueBtn'),
   search: $<HTMLInputElement>('search'),
   providerSel: $<HTMLSelectElement>('providerSel'),
-  favsOnly: $<HTMLButtonElement>('favsOnly'),
+  viewSeg: $('viewSeg'),
+  favCount: $('favCount'),
   chips: $('chips'),
   status: $('status'),
   grid: $('grid'),
@@ -107,6 +108,8 @@ function busy(btn: HTMLButtonElement, work: () => Promise<unknown>, label?: stri
 // ---------------------------------------------------------------- state
 const PREFS_KEY = 'streamanywhere.livetv.prefs';
 const VIEW_KEY = 'streamanywhere.livetv.view';
+/** Closed captions on the picture: a setting of this device (the Tesla and the phone differ); off until turned on */
+const CAPTIONS_KEY = 'streamanywhere.livetv.captions';
 let state: LiveTvState = { rev: 0, channelsRev: 0, providers: [], prefs: { favorites: [] }, remux: false };
 let channels: LiveTvChannel[] = [];
 let channelsRev = -1;
@@ -163,6 +166,14 @@ const player = new LiveTvPlayer(el.theater, {
   },
   onFavorite: (ch, on) => void setFavorite(ch.key, on),
   isFavorite: (key) => favorites.has(key),
+  onCaptions: (on) => {
+    try {
+      localStorage.setItem(CAPTIONS_KEY, on ? '1' : '0');
+    } catch {
+      /* ignore */
+    }
+    if (!el.settingsOverlay.classList.contains('hidden')) renderSettings();
+  },
   providerName: (ch) => (state.providers.length > 1 ? providerById(ch.providerId)?.name || '' : ''),
   guide: (key) => api.liveTvGuide(key),
   nowNext: async (key) => {
@@ -172,6 +183,11 @@ const player = new LiveTvPlayer(el.theater, {
     return nn;
   },
 });
+try {
+  player.setCaptions(localStorage.getItem(CAPTIONS_KEY) === '1');
+} catch {
+  /* off */
+}
 
 async function setFavorite(key: string, on: boolean): Promise<void> {
   if (on) favorites.add(key);
@@ -183,12 +199,25 @@ async function setFavorite(key: string, on: boolean): Promise<void> {
     const p = await api.liveTvPrefs({ favorite: { key, on } });
     favorites = new Set(p.favorites);
     savePrefs();
+    renderFavButtons();
   } catch (e) {
     toast(errMsg(e), true);
   }
 }
 
+/** All / Favorites: which is on, and how many favorites there are among the channels loaded */
+function renderViewSeg(): void {
+  for (const b of el.viewSeg.querySelectorAll<HTMLElement>('[data-view]')) {
+    const on = (b.dataset.view === 'favs') === view.favs;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-checked', String(on));
+  }
+  const count = channels.reduce((a, c) => a + (favorites.has(c.key) ? 1 : 0), 0);
+  el.favCount.textContent = count ? n(count) : '';
+}
+
 function renderFavButtons(): void {
+  renderViewSeg();
   for (const b of el.grid.querySelectorAll<HTMLElement>('.ch')) {
     const on = favorites.has(b.dataset.key || '');
     const fav = b.querySelector<HTMLElement>('.ch-fav');
@@ -274,9 +303,9 @@ function filtered(): LiveTvChannel[] {
   return channels.filter((c) => {
     if (view.provider !== 'all' && c.providerId !== view.provider) return false;
     if (view.favs && !favorites.has(c.key)) return false;
-    if (view.group !== 'all' && c.group !== view.group) return false;
+    if (view.group !== 'all' && !c.groups.includes(view.group)) return false;
     if (words.length) {
-      const hay = `${c.name} ${c.group} ${c.number || ''}`.toLowerCase();
+      const hay = `${c.name} ${c.groups.join(' ')} ${c.number || ''}`.toLowerCase();
       for (const w of words) if (!hay.includes(w)) return false;
     }
     return true;
@@ -284,18 +313,21 @@ function filtered(): LiveTvChannel[] {
 }
 
 function renderChips(): void {
-  // the groups of the channels that pass the other filters (provider, favorites, search)
+  // the groups of the channels that pass the other filters (provider, favorites, search);
+  // a channel in several groups counts in each of them
   const counts = new Map<string, number>();
   const q = view.q.trim().toLowerCase();
+  let total = 0;
   for (const c of channels) {
     if (view.provider !== 'all' && c.providerId !== view.provider) continue;
     if (view.favs && !favorites.has(c.key)) continue;
-    if (q && !`${c.name} ${c.group}`.toLowerCase().includes(q)) continue;
-    counts.set(c.group, (counts.get(c.group) || 0) + 1);
+    if (q && !`${c.name} ${c.groups.join(' ')}`.toLowerCase().includes(q)) continue;
+    total++;
+    if (!c.groups.length) counts.set('', (counts.get('') || 0) + 1);
+    for (const g of c.groups) counts.set(g, (counts.get(g) || 0) + 1);
   }
   const groups = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 250);
   if (view.group !== 'all' && !counts.has(view.group)) view.group = 'all';
-  const total = [...counts.values()].reduce((a, b) => a + b, 0);
   const chip = (id: string, label: string, count: number): string => `<button type="button" class="chip${view.group === id ? ' on' : ''}" role="radio" aria-checked="${view.group === id}" data-group="${esc(id)}">${esc(label)} <small>${n(count)}</small></button>`;
   el.chips.innerHTML = chip('all', 'All', total) + groups.map(([g, c]) => chip(g, g || 'Ungrouped', c)).join('');
   el.chips.classList.toggle('hidden', groups.length < 2);
@@ -304,7 +336,7 @@ function renderChips(): void {
 function tileHtml(c: LiveTvChannel): string {
   const fav = favorites.has(c.key);
   const prov = state.providers.length > 1 ? providerById(c.providerId)?.name : '';
-  const sub = [c.group, prov].filter(Boolean).join(' · ');
+  const sub = [...c.groups, prov].filter(Boolean).join(' · ');
   return `<button type="button" class="ch${player.current?.key === c.key ? ' playing' : ''}" data-key="${esc(c.key)}" aria-label="Play ${esc(c.name)}">
     <span class="ch-logo">${c.logo ? `<img src="${esc(c.logo)}" alt="" loading="lazy" draggable="false" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'initials',textContent:this.dataset.i}))" data-i="${esc(initials(c.name))}" />` : `<span class="initials">${esc(initials(c.name))}</span>`}
       ${c.number ? `<span class="ch-num">${c.number}</span>` : ''}${c.drm ? '<span class="ch-drm">DRM</span>' : ''}
@@ -315,6 +347,7 @@ function tileHtml(c: LiveTvChannel): string {
 }
 
 function render(): void {
+  renderViewSeg();
   renderChips();
   visible = filtered();
   player.setItems(visible);
@@ -454,12 +487,12 @@ el.providerSel.addEventListener('change', () => {
   saveView();
   render();
 });
-el.favsOnly.classList.toggle('on', view.favs);
-el.favsOnly.setAttribute('aria-pressed', String(view.favs));
-el.favsOnly.addEventListener('click', () => {
-  view.favs = !view.favs;
-  el.favsOnly.classList.toggle('on', view.favs);
-  el.favsOnly.setAttribute('aria-pressed', String(view.favs));
+el.viewSeg.addEventListener('click', (e) => {
+  const b = (e.target as HTMLElement).closest<HTMLElement>('[data-view]');
+  if (!b) return;
+  const favs = b.dataset.view === 'favs';
+  if (favs === view.favs) return;
+  view.favs = favs;
   shown = 0;
   saveView();
   render();
@@ -581,7 +614,14 @@ function renderSettings(): void {
           .join(''),
     )
     .join('');
+  const cc = player.captions;
   el.settingsBody.innerHTML = `
+    <p class="sh-section">Playback</p>
+    <div class="prov">
+      <div class="prov-head"><span class="prov-name">Closed captions</span>
+        <button type="button" class="toggle small${cc ? ' on' : ''}" data-set="captions" aria-pressed="${cc}" title="${cc ? 'Turn captions off' : 'Turn captions on'}"><span class="toggle-dot" aria-hidden="true"></span>${cc ? 'On' : 'Off'}</button></div>
+      <div class="prov-status">${cc ? 'The captions or subtitles a channel carries are shown on the picture.' : 'Captions are never shown, even when a channel carries them.'} A setting of this device; the CC button in the player (or the C key) is the same switch.</div>
+    </div>
     <p class="sh-section">Providers</p>
     ${rows.join('') || '<p class="sh-note">No providers yet. Add your own playlist or Xtream account below, or one of the community playlists.</p>'}
     <div class="sh-actions"><button type="button" class="btn small primary" data-add="m3u">Add M3U playlist</button><button type="button" class="btn small primary" data-add="xtream">Add Xtream Codes</button></div>
@@ -595,6 +635,11 @@ el.settingsBody.addEventListener('click', async (e) => {
   const t = e.target as HTMLElement;
   const add = t.closest<HTMLElement>('[data-add]');
   if (add) return openForm(add.dataset.add as 'm3u' | 'xtream');
+  if (t.closest('[data-set="captions"]')) {
+    player.setCaptions(!player.captions);
+    renderSettings();
+    return;
+  }
   const pre = t.closest<HTMLButtonElement>('[data-preset]');
   if (pre) {
     const preset = presets.find((p) => p.id === pre.dataset.preset);

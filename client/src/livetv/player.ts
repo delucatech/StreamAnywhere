@@ -24,6 +24,8 @@ export interface PlayerHooks {
   onChannel(ch: LiveTvChannel): void;
   onFavorite(ch: LiveTvChannel, on: boolean): void;
   isFavorite(key: string): boolean;
+  /** Closed captions were turned on / off (the page keeps the setting) */
+  onCaptions(on: boolean): void;
   guide(key: string): Promise<LiveTvChannelGuideResponse>;
   nowNext(key: string): Promise<{ now?: LiveTvProgramme; next?: LiveTvProgramme }>;
   /** The provider's name for the subtitle (several providers) */
@@ -47,6 +49,7 @@ const ICON = {
   star: icon('<path d="M12 3.5l2.6 5.6 6.1.7-4.5 4.2 1.2 6-5.4-3-5.4 3 1.2-6L3.3 9.8l6.1-.7z"/>'),
   starOn: icon('<path d="M12 3.5l2.6 5.6 6.1.7-4.5 4.2 1.2 6-5.4-3-5.4 3 1.2-6L3.3 9.8l6.1-.7z" fill="currentColor"/>'),
   guide: icon('<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18M8 5v14"/>'),
+  cc: icon('<rect x="2.5" y="5" width="19" height="14" rx="2.5"/><path d="M10.5 10.2a2.2 2.2 0 1 0 0 3.6M17 10.2a2.2 2.2 0 1 0 0 3.6"/>'),
   warn: icon('<path d="M12 3 2.5 20h19z"/><path d="M12 9v5M12 17.5v.5"/>'),
   off: icon('<circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/>'),
 };
@@ -65,6 +68,7 @@ export class LiveTvPlayer {
   private nameEl: HTMLElement;
   private subEl: HTMLElement;
   private favBtn: HTMLButtonElement;
+  private ccBtn: HTMLButtonElement;
   private guideBtn: HTMLButtonElement;
   private playBtn: HTMLButtonElement;
   private muteBtn: HTMLButtonElement;
@@ -82,6 +86,14 @@ export class LiveTvPlayer {
   private guideTimer = 0;
   private stallTimer = 0;
   private recovered = false;
+  /** the frozen-picture watchdog (see checkFrozen) */
+  private frozenTimer = 0;
+  private lastFrames = -1;
+  private lastTime = -1;
+  private frozenSince = 0;
+  private unfreezes = 0;
+  /** Closed captions shown on the picture (a device setting the page keeps; off by default) */
+  captions = false;
   state: PlayerState = 'idle';
 
   constructor(root: HTMLElement, private readonly hooks: PlayerHooks) {
@@ -99,6 +111,7 @@ export class LiveTvPlayer {
         <button type="button" class="th-btn th-close" aria-label="Close player" title="Close (Esc)">${ICON.close}</button>
         <div class="th-titles"><div class="th-logo"></div><div style="min-width:0"><div class="th-name"></div><div class="th-sub"></div></div></div>
         <button type="button" class="th-btn th-fav" aria-label="Favorite" title="Favorite (F)">${ICON.star}</button>
+        <button type="button" class="th-btn th-cc" aria-label="Closed captions" aria-pressed="false" title="Closed captions (C)">${ICON.cc}</button>
         <button type="button" class="th-btn th-guidebtn" aria-label="Programme guide" title="Guide (G)">${ICON.guide}</button>
         <button type="button" class="th-btn th-full" aria-label="Fullscreen" title="Fullscreen">${ICON.full}</button>
       </div>
@@ -124,6 +137,7 @@ export class LiveTvPlayer {
     this.nameEl = q('.th-name');
     this.subEl = q('.th-sub');
     this.favBtn = q<HTMLButtonElement>('.th-fav');
+    this.ccBtn = q<HTMLButtonElement>('.th-cc');
     this.guideBtn = q<HTMLButtonElement>('.th-guidebtn');
     this.playBtn = q<HTMLButtonElement>('.th-play');
     this.muteBtn = q<HTMLButtonElement>('.th-mute');
@@ -140,12 +154,20 @@ export class LiveTvPlayer {
     this.big.addEventListener('click', () => this.togglePlay());
     this.muteBtn.addEventListener('click', () => this.toggleMute());
     this.favBtn.addEventListener('click', () => this.toggleFavorite());
+    this.ccBtn.addEventListener('click', () => this.setCaptions(!this.captions));
     this.guideBtn.addEventListener('click', () => this.toggleGuide());
+    // text tracks appear as the stream is parsed (hls.js adds <track>s; Safari lists the manifest's):
+    // each one gets the captions setting applied
+    this.video.textTracks.addEventListener('addtrack', () => this.applyCaptions());
+    this.video.addEventListener('loadedmetadata', () => this.applyCaptions());
     q('.th-guideclose').addEventListener('click', () => this.toggleGuide(false));
     q('.th-full').addEventListener('click', () => this.toggleFullscreen());
     this.video.addEventListener('click', () => this.wake());
     this.video.addEventListener('dblclick', () => this.toggleFullscreen());
-    this.video.addEventListener('playing', () => this.setState('playing'));
+    this.video.addEventListener('playing', () => {
+      this.setState('playing');
+      this.watchFrozen();
+    });
     this.video.addEventListener('pause', () => {
       if (this.state === 'playing') this.setState('paused');
     });
@@ -225,10 +247,11 @@ export class LiveTvPlayer {
     const gen = ++this.generation;
     this.index = index;
     this.recovered = false;
+    this.unfreezes = 0;
     this.stopMedia();
     this.logoEl.innerHTML = ch.logo ? `<img src="${esc(ch.logo)}" alt="" draggable="false" />` : '';
     this.nameEl.textContent = (ch.number ? `${ch.number} · ` : '') + ch.name;
-    this.subEl.textContent = [ch.group, this.hooks.providerName(ch)].filter(Boolean).join(' · ');
+    this.subEl.textContent = [...ch.groups, this.hooks.providerName(ch)].filter(Boolean).join(' · ');
     this.nowEl.textContent = '';
     this.nextEl.textContent = '';
     this.barEl.classList.add('hidden');
@@ -271,6 +294,8 @@ export class LiveTvPlayer {
         fragLoadingMaxRetry: 3,
         enableWorker: true,
       });
+      // the manifest's subtitle tracks follow the captions setting (CEA-608 tracks: applyCaptions)
+      hls.subtitleDisplay = this.captions;
       this.hls = hls;
       hls.on(Events.ERROR, (_e, data) => this.onHlsError(data, gen));
       hls.on(Events.MANIFEST_PARSED, () => {
@@ -305,6 +330,7 @@ export class LiveTvPlayer {
 
   private stopMedia(): void {
     this.disarmStall();
+    this.stopWatchFrozen();
     if (this.hls) {
       this.hls.destroy();
       this.hls = undefined;
@@ -362,6 +388,112 @@ export class LiveTvPlayer {
     if (code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED) return this.showMessage('unsupported', 'This browser cannot play this stream format.', err?.message);
     if (code === MediaError.MEDIA_ERR_DECODE) return this.showMessage('unsupported', 'The browser could not decode this stream (a codec it does not support, or a broken stream).', err?.message);
     this.showMessage('unavailable', `This channel is not available right now: ${err?.message || 'the stream stopped'}.`);
+  }
+
+  // ---------------------------------------------------------------- closed captions
+
+  /** Turns captions on / off (the page is told, and keeps the setting). */
+  setCaptions(on: boolean): void {
+    const changed = this.captions !== on;
+    this.captions = on;
+    this.ccBtn.classList.toggle('on', on);
+    this.ccBtn.setAttribute('aria-pressed', String(on));
+    this.ccBtn.title = on ? 'Closed captions: on (C)' : 'Closed captions: off (C)';
+    this.applyCaptions();
+    if (changed) this.hooks.onCaptions(on);
+  }
+
+  /**
+   * The text tracks of the <video> follow the setting. Off: every track disabled, so nothing
+   * is drawn even when the channel carries CEA-608 captions or the browser would show a
+   * subtitle track by itself. On: hls.js shows the manifest's subtitle track when there is one;
+   * otherwise the first captions / subtitles track (CEA-608 from the video, or Safari's own list).
+   */
+  private applyCaptions(): void {
+    const on = this.captions;
+    if (this.hls) this.hls.subtitleDisplay = on;
+    const tracks = this.video.textTracks;
+    if (!tracks) return;
+    const hlsSubtitles = !!this.hls && this.hls.subtitleTracks.length > 0;
+    let shown = false;
+    for (let i = 0; i < tracks.length; i++) {
+      const t = tracks[i];
+      if (t.kind !== 'captions' && t.kind !== 'subtitles') continue;
+      if (!on) {
+        if (t.mode !== 'disabled') t.mode = 'disabled';
+        continue;
+      }
+      if (hlsSubtitles) continue; // hls.js's subtitle-track controller owns their modes
+      const mode: TextTrackMode = shown ? 'hidden' : 'showing';
+      shown = true;
+      if (t.mode !== mode) t.mode = mode;
+    }
+  }
+
+  // ---------------------------------------------------------------- the frozen-picture watchdog
+
+  /**
+   * The picture freezes while the sound goes on: Chromium stops rendering video after a hole or
+   * a broken frame in the video buffer while the audio buffer still plays (hls.js nudges across
+   * holes under a second; bigger ones, and a stuck decoder, it does not see since the clock
+   * keeps running). Every 2 s, while playing and visible: when the clock advanced but no new
+   * video frame was produced for 4 s, the pipeline is flushed: a seek to the live edge first,
+   * then hls.js's media-error recovery, then the channel is tuned again.
+   */
+  private watchFrozen(): void {
+    this.stopWatchFrozen();
+    this.lastFrames = -1;
+    this.lastTime = -1;
+    this.frozenSince = 0;
+    this.frozenTimer = window.setInterval(() => this.checkFrozen(), 2000);
+  }
+  private stopWatchFrozen(): void {
+    if (this.frozenTimer) window.clearInterval(this.frozenTimer);
+    this.frozenTimer = 0;
+    this.frozenSince = 0;
+  }
+  private checkFrozen(): void {
+    const v = this.video;
+    if (this.state !== 'playing' || v.paused || v.seeking || document.hidden || !v.videoWidth) {
+      this.frozenSince = 0;
+      return;
+    }
+    const q = typeof v.getVideoPlaybackQuality === 'function' ? v.getVideoPlaybackQuality() : undefined;
+    const frames = q ? q.totalVideoFrames : (v as HTMLVideoElement & { webkitDecodedFrameCount?: number }).webkitDecodedFrameCount;
+    if (frames === undefined) return;
+    const time = v.currentTime;
+    const clockMoved = this.lastTime >= 0 && time > this.lastTime + 0.5;
+    const framesMoved = this.lastFrames < 0 || frames !== this.lastFrames;
+    this.lastFrames = frames;
+    this.lastTime = time;
+    if (!clockMoved || framesMoved) {
+      this.frozenSince = 0;
+      return;
+    }
+    if (!this.frozenSince) this.frozenSince = Date.now();
+    else if (Date.now() - this.frozenSince >= 4000) {
+      this.frozenSince = 0;
+      this.unfreeze();
+    }
+  }
+  private unfreeze(): void {
+    const v = this.video;
+    const attempt = ++this.unfreezes;
+    console.warn(`[livetv] picture frozen while the sound plays (attempt ${attempt})`);
+    this.showWait('Buffering…');
+    if (attempt === 1) {
+      // a seek flushes the decoder; the live edge is where a live stream belongs anyway
+      const live = this.hls?.liveSyncPosition;
+      if (typeof live === 'number' && Number.isFinite(live) && live > v.currentTime) v.currentTime = live;
+      else if (v.seekable.length) v.currentTime = Math.max(v.currentTime, v.seekable.end(v.seekable.length - 1) - 1);
+      else v.currentTime += 0.001;
+      return;
+    }
+    if (attempt === 2 && this.hls) {
+      this.hls.recoverMediaError();
+      return;
+    }
+    void this.play(this.index);
   }
 
   /** No progress for 30 s while playing: the stream died quietly. */
@@ -540,6 +672,9 @@ export class LiveTvPlayer {
         break;
       case 'f':
         this.toggleFavorite();
+        break;
+      case 'c':
+        this.setCaptions(!this.captions);
         break;
       case 'g':
         this.toggleGuide();

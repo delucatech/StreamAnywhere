@@ -35,7 +35,7 @@ import type { FeedResponse } from '../../../shared/types';
 import { openUpstream } from '../http';
 import { daemonStatus, detectYtDlp, shutdownYtDlp, ytdlpInfo } from '../ytdlp';
 import type { ResolveResponse } from '../../../shared/types';
-import { parseAttrs, parseM3u, cleanChannelName } from '../livetvM3u';
+import { parseAttrs, parseM3u, cleanChannelName, countGroups, splitGroups } from '../livetvM3u';
 import { XmltvScanner, nowNext, parseXmltvTime, resolveGuideId } from '../livetvEpg';
 import { decryptJson, decryptText, encryptJson, encryptText, useEphemeralLiveTvKey } from '../livetvCrypto';
 import { redactUrl } from '../livetvHttp';
@@ -85,6 +85,8 @@ not-a-url
   check('license props mark DRM; #EXTGRP groups', pl.channels[3].drm === true && pl.channels[4].group === 'Radio');
   check('clean name drops quality and geo tags', cleanChannelName('CNN HD (720p) [Geo-blocked]') === 'CNN HD' && cleanChannelName('BBC One [Not 24/7]') === 'BBC One');
   check('attrs parser handles unquoted values', parseAttrs('tvg-id=abc group-title="A B"')['group-title'] === 'A B' && parseAttrs('tvg-id=abc')['tvg-id'] === 'abc');
+  check('semicolon-joined categories split into groups', JSON.stringify(splitGroups('Animation;Kids ; ;Kids')) === '["Animation","Kids"]' && splitGroups('').length === 0 && splitGroups('News').length === 1, splitGroups('Animation;Kids ; ;Kids'));
+  check('group count sees each joined category once', countGroups([{ group: 'Animation;Kids' }, { group: 'Kids' }, { group: 'News' }, { group: '' }]) === 3);
 
   console.log('\n== 1d. Live TV: XMLTV guide');
   const now = Date.parse('2026-10-28T12:00:00Z');

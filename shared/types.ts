@@ -840,8 +840,13 @@ export interface LiveTvChannel {
   key: string;
   providerId: string;
   name: string;
-  /** The group / category as the provider names it ("News", "Sports", a country...) */
+  /** The first group / category the provider names ("News", "Sports", a country...) */
   group: string;
+  /**
+   * Every group the channel is in: iptv-org lists write a channel's categories as one
+   * semicolon-joined group-title ("Animation;Kids"); the browser filters by any of them.
+   */
+  groups: string[];
   logo?: string;
   /** Guide id (tvg-id / epg_channel_id) */
   epgId?: string;

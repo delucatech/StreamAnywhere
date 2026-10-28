@@ -37,6 +37,27 @@ export function parseAttrs(s: string): Record<string, string> {
   return out;
 }
 
+/**
+ * "Animation;Kids" -> ["Animation", "Kids"]: iptv-org (and lists made from it) join a channel's
+ * categories with semicolons in one group-title; each is a group of its own. Trimmed, no
+ * empties, no repeats.
+ */
+export function splitGroups(group: string): string[] {
+  const out: string[] = [];
+  for (const g of (group || '').split(';')) {
+    const t = g.replace(/\s+/g, ' ').trim();
+    if (t && !out.includes(t)) out.push(t);
+  }
+  return out;
+}
+
+/** The distinct groups across a channel list (each semicolon-joined category counted apart) */
+export function countGroups(channels: { group: string }[]): number {
+  const set = new Set<string>();
+  for (const c of channels) for (const g of splitGroups(c.group)) set.add(g);
+  return set.size;
+}
+
 const shortHash = (s: string): string => crypto.createHash('sha1').update(s).digest('hex').slice(0, 12);
 
 /** "CNN HD (720p) [Geo-blocked]" -> "CNN HD": the name without the quality / availability tags lists append */

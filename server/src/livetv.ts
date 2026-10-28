@@ -23,7 +23,7 @@ import { detectFfmpeg } from './ffmpeg';
 import { decryptJson, encryptJson, setLiveTvCryptoLogger } from './livetvCrypto';
 import { EPG_TTL_MS, epgLoading, epgStore, forgetEpg, loadEpg, nowNext, programmesFor, setEpgDir, type EpgWanted } from './livetvEpg';
 import { checkLiveUrl, fetchLiveText, redactUrl, safeHost } from './livetvHttp';
-import { cleanChannelName, parseM3u, type M3uChannel } from './livetvM3u';
+import { cleanChannelName, countGroups, parseM3u, splitGroups, type M3uChannel } from './livetvM3u';
 import { LIVETV_PRESETS, presetById } from './livetvPresets';
 import { classify, ensureRemux, registerLiveTvStreamRoutes, remuxStats, setLiveTvStreamLogger, shutdownLiveTvStreams, type StreamSource, type Verdict } from './livetvStream';
 import { normalizeXtreamServer, xtreamAccount, xtreamEpgUrl, xtreamLiveChannels, xtreamLiveUrl, xtreamSecrets, XtreamError, type XtreamCreds } from './livetvXtream';
@@ -252,7 +252,8 @@ export function liveTvChannels(): LiveTvChannelsResponse {
     const l = listOf(p);
     if (!l) continue;
     for (const c of l.channels) {
-      const ch: LiveTvChannel = { key: keyOf(p.id, c.id), providerId: p.id, name: cleanChannelName(c.name) || c.name, group: c.group };
+      const groups = splitGroups(c.group);
+      const ch: LiveTvChannel = { key: keyOf(p.id, c.id), providerId: p.id, name: cleanChannelName(c.name) || c.name, group: groups[0] || '', groups };
       if (c.logo) ch.logo = c.logo;
       if (c.epgId) ch.epgId = c.epgId;
       if (c.number) ch.number = c.number;
@@ -478,11 +479,11 @@ export function refreshProvider(id: string): Promise<void> {
       const r = await fetchChannels(p);
       const l: CachedList = { at: Date.now(), channels: r.channels, epgUrls: r.epgUrls };
       saveList(p, l);
-      const groups = new Set(r.channels.map((c) => c.group));
-      p.refresh = { state: 'ok', at: Date.now(), channels: r.channels.length, groups: groups.size, ms: Date.now() - t0 };
+      const groups = countGroups(r.channels);
+      p.refresh = { state: 'ok', at: Date.now(), channels: r.channels.length, groups, ms: Date.now() - t0 };
       if (r.account) p.account = r.account;
       p.epgSource = epgSourceOf(p, l);
-      log(`${p.name}: ${r.message}, ${groups.size} groups, ${Date.now() - t0} ms`);
+      log(`${p.name}: ${r.message}, ${groups} groups, ${Date.now() - t0} ms`);
       changed(true);
       void ensureEpg(p, true).catch(() => undefined);
     } catch (e) {
@@ -525,7 +526,7 @@ export async function testProvider(input: LiveTvTestRequest): Promise<LiveTvTest
       secretsCache.set('test', { url });
       const r = await fetchChannels(tmp);
       secretsCache.delete('test');
-      const groups = new Set(r.channels.map((c) => c.group)).size;
+      const groups = countGroups(r.channels);
       const src = epgSourceOf(tmp, { at: 0, channels: [], epgUrls: r.epgUrls });
       return { ok: true, message: `Playlist OK: ${r.channels.length} channels in ${groups} groups${src === 'none' ? ', no programme guide named' : src === 'playlist' ? ', guide named by the playlist' : ', guide URL set'}`, channels: r.channels.length, groups, epgSource: src, elapsedMs: Date.now() - t0 };
     }
@@ -542,7 +543,7 @@ export async function testProvider(input: LiveTvTestRequest): Promise<LiveTvTest
     const creds: XtreamCreds = { server, username, password };
     const acc = await xtreamAccount(creds, log);
     const channels = await xtreamLiveChannels(creds, log);
-    const groups = new Set(channels.map((c) => c.group)).size;
+    const groups = countGroups(channels);
     return { ok: true, message: `Connected: ${acc.message}; ${channels.length} live channels in ${groups} categories; guide from the panel`, channels: channels.length, groups, account: acc.account, epgSource: 'panel', elapsedMs: Date.now() - t0 };
   } catch (e) {
     secretsCache.delete('test');
