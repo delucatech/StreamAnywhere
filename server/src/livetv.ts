@@ -18,7 +18,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import type { LiveTvAccount, LiveTvChannel, LiveTvChannelGuideResponse, LiveTvChannelsResponse, LiveTvGuideNowResponse, LiveTvPrefs, LiveTvProvider, LiveTvProviderInput, LiveTvProviderKind, LiveTvState, LiveTvTestRequest, LiveTvTestResponse, LiveTvTuneRequest, LiveTvTuneResponse } from '../../shared/types';
+import type { LiveTvAccount, LiveTvChannel, LiveTvChannelGuideResponse, LiveTvChannelsResponse, LiveTvGuideNowResponse, LiveTvPrefs, LiveTvPrefsPatch, LiveTvProvider, LiveTvProviderInput, LiveTvProviderKind, LiveTvState, LiveTvTestRequest, LiveTvTestResponse, LiveTvTuneRequest, LiveTvTuneResponse } from '../../shared/types';
 import { detectFfmpeg } from './ffmpeg';
 import { decryptJson, encryptJson, setLiveTvCryptoLogger } from './livetvCrypto';
 import { EPG_TTL_MS, epgLoading, epgStore, forgetEpg, loadEpg, nowNext, programmesFor, setEpgDir, type EpgWanted } from './livetvEpg';
@@ -126,9 +126,17 @@ function loadPrefs(): LiveTvPrefs {
   if (prefs) return prefs;
   try {
     const parsed = JSON.parse(fs.readFileSync(PREFS_FILE, 'utf8')) as Partial<LiveTvPrefs>;
-    prefs = { favorites: Array.isArray(parsed.favorites) ? parsed.favorites.map(String) : [], lastKey: typeof parsed.lastKey === 'string' ? parsed.lastKey : undefined, lastAt: Number(parsed.lastAt) || undefined };
+    const broken: Record<string, number> = {};
+    if (parsed.broken && typeof parsed.broken === 'object') for (const [k, v] of Object.entries(parsed.broken)) if (Number(v) > 0) broken[k] = Number(v);
+    prefs = {
+      favorites: Array.isArray(parsed.favorites) ? parsed.favorites.map(String) : [],
+      hidden: Array.isArray(parsed.hidden) ? parsed.hidden.map(String) : [],
+      broken,
+      lastKey: typeof parsed.lastKey === 'string' ? parsed.lastKey : undefined,
+      lastAt: Number(parsed.lastAt) || undefined,
+    };
   } catch {
-    prefs = { favorites: [] };
+    prefs = { favorites: [], hidden: [], broken: {} };
   }
   return prefs;
 }
@@ -432,10 +440,12 @@ export function deleteProvider(id: string): void {
   }
   for (const k of [...verdicts.keys()]) if (k.startsWith(id + ':')) verdicts.delete(k);
   const pr = loadPrefs();
-  const before = pr.favorites.length;
+  const before = pr.favorites.length + pr.hidden.length + Object.keys(pr.broken).length;
   pr.favorites = pr.favorites.filter((k) => !k.startsWith(id + ':'));
+  pr.hidden = pr.hidden.filter((k) => !k.startsWith(id + ':'));
+  for (const k of Object.keys(pr.broken)) if (k.startsWith(id + ':')) delete pr.broken[k];
   if (pr.lastKey?.startsWith(id + ':')) pr.lastKey = undefined;
-  if (pr.favorites.length !== before || !pr.lastKey) prefsChanged();
+  if (pr.favorites.length + pr.hidden.length + Object.keys(pr.broken).length !== before || !pr.lastKey) prefsChanged();
   changed(true);
   log(`provider deleted: ${p.name}`);
 }
@@ -497,7 +507,11 @@ export function refreshProvider(id: string): Promise<void> {
   return job;
 }
 
-/** Enabled providers whose list is old (or missing) are refreshed in the background; one at a time. */
+/**
+ * Enabled providers whose list is old (or missing) are refreshed in the background; one at a
+ * time. Runs when the page asks for the state, and on a timer, so the lists (and their guides,
+ * loaded after each refresh) are fresh before anyone opens the page.
+ */
 function keepFresh(): void {
   for (const p of load().providers) {
     if (!p.enabled || running.size) return;
@@ -511,6 +525,8 @@ function keepFresh(): void {
     }
   }
 }
+const freshTimer = setInterval(keepFresh, 30 * 60_000);
+freshTimer.unref?.();
 
 export async function testProvider(input: LiveTvTestRequest): Promise<LiveTvTestResponse> {
   const t0 = Date.now();
@@ -656,7 +672,26 @@ function sourceOf(key: string): StreamSource | undefined {
   return src;
 }
 
+/**
+ * Whether the channel's last tune worked is kept with the preferences (every device ranks
+ * channels that did not play last time after the others; a tune that works clears it).
+ */
+function noteTune(key: string, ok: boolean): void {
+  const pr = loadPrefs();
+  if (ok) {
+    if (!(key in pr.broken)) return;
+    delete pr.broken[key];
+  } else pr.broken[key] = Date.now();
+  prefsChanged();
+}
+
 export async function tune(key: string): Promise<LiveTvTuneResponse> {
+  const r = await tuneChannel(key);
+  noteTune(key, r.state === 'ok');
+  return r;
+}
+
+async function tuneChannel(key: string): Promise<LiveTvTuneResponse> {
   const t0 = Date.now();
   const found = findChannel(key);
   if (!found) throw new LiveTvError('That channel is not in the list any more (the provider changed its playlist?)', 404);
@@ -697,7 +732,7 @@ export async function tune(key: string): Promise<LiveTvTuneResponse> {
 
 // ---------------------------------------------------------------- preferences
 
-export function setPrefs(patch: { favorite?: { key: string; on: boolean }; lastKey?: string | null }): LiveTvPrefs {
+export function setPrefs(patch: LiveTvPrefsPatch): LiveTvPrefs {
   const pr = loadPrefs();
   let dirty = false;
   if (patch.favorite && typeof patch.favorite.key === 'string') {
@@ -706,11 +741,30 @@ export function setPrefs(patch: { favorite?: { key: string; on: boolean }; lastK
     if (patch.favorite.on && !has) {
       if (!findChannel(k)) throw new LiveTvError('Unknown channel', 404);
       pr.favorites.push(k);
+      pr.hidden = pr.hidden.filter((x) => x !== k); // a favorite is never hidden
       dirty = true;
     } else if (!patch.favorite.on && has) {
       pr.favorites = pr.favorites.filter((x) => x !== k);
       dirty = true;
     }
+  }
+  if (patch.hidden && typeof patch.hidden.key === 'string') {
+    const k = patch.hidden.key;
+    const has = pr.hidden.includes(k);
+    if (patch.hidden.on && !has) {
+      if (!findChannel(k)) throw new LiveTvError('Unknown channel', 404);
+      pr.hidden.push(k);
+      pr.favorites = pr.favorites.filter((x) => x !== k);
+      if (pr.lastKey === k) pr.lastKey = undefined;
+      dirty = true;
+    } else if (!patch.hidden.on && has) {
+      pr.hidden = pr.hidden.filter((x) => x !== k);
+      dirty = true;
+    }
+  }
+  if (patch.unhideAll && pr.hidden.length) {
+    pr.hidden = [];
+    dirty = true;
   }
   if (patch.lastKey !== undefined) {
     if (patch.lastKey === null) {
@@ -793,7 +847,7 @@ export function registerLiveTv(app: FastifyInstance): void {
       return fail(reply, e);
     }
   });
-  app.post<{ Body: { favorite?: { key: string; on: boolean }; lastKey?: string | null } }>('/api/livetv/prefs', async (req, reply) => {
+  app.post<{ Body: LiveTvPrefsPatch }>('/api/livetv/prefs', async (req, reply) => {
     try {
       return setPrefs(req.body || {});
     } catch (e) {

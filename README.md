@@ -474,16 +474,21 @@ are encrypted too, since Xtream stream URLs embed the account. The page gets a p
 URL and username back for the edit form, never the password (`hasPassword`; an empty password on
 save keeps the saved one). The log sees providers by name and URLs redacted (`redactUrl`: the
 `/live/<user>/<password>/` path segments, `username=`/`password=`/`token=` query values, and the
-account's strings themselves are masked). Favorites and the last channel watched are in
-`LIVETV_DIR/prefs.json` (mirrored in the browser's localStorage for an instant first paint).
+account's strings themselves are masked). Favorites, hidden channels, which channels did not
+play last time, and the last channel watched are in `LIVETV_DIR/prefs.json` – shared by every
+device, mirrored in the browser's localStorage for an instant first paint. Closed captions on /
+off and the logos that failed to load are per device (localStorage only).
 
 *Channel lists.* A refresh fetches the playlist (up to 64 MB; `livetvM3u.ts` reads `#EXTINF`
 attributes, `#EXTGRP`, `#EXTVLCOPT` / `#KODIPROP` / `#EXTHTTP` request headers, DRM license props
 – such a channel is listed but marked *DRM* and refused with the reason – and the `url-tvg` guide
 URL) or asks the Xtream panel (`livetvXtream.ts`: `player_api.php` for the account, the live
 categories and the live streams; `xmltv.php` for the guide). Channel ids are stable across refreshes
-(the guide id + name, else the URL, hashed), so favorites survive. Enabled providers whose list is
-older than 12 h are refreshed when the page asks for the state. `GET /api/livetv` (providers,
+(the guide id + name, else the URL, hashed), so favorites survive. A group-title with semicolons
+(iptv-org writes a channel's categories as `Animation;Kids`) is split: the channel is in each group.
+Enabled providers whose list is older than 12 h are refreshed when the page asks for the state
+and on a 30 min timer (so the lists, and the guides loaded after them, are fresh before the
+page opens); the refresh button at the top and **Refresh channels** in Settings do it now. `GET /api/livetv` (providers,
 preferences; `?rev=N` answers `unchanged`) and `GET /api/livetv/channels` (`?rev=N` likewise) feed
 the page, which polls them.
 
@@ -525,16 +530,29 @@ pipeline, which reads whole MP4 files; live chains are what MSE is for. States: 
 *Loading…* → playing (controls hide after 3 s; LIVE badge; now / next with progress), or
 *unavailable* / *unsupported* with the message, **Try again**, **Next channel**, **Close**; a fatal
 hls.js network error maps to *unavailable* (with the relay's error text), a media error (one recovery
-attempt first) to *unsupported*; 30 s without progress ends in *unavailable*. Previous / next
-channel follow the browser's current list (buttons, ↑ ↓, a vertical swipe), **F** favorite, **G**
-the guide panel, **M** mute, fullscreen (the theater, or the iPhone's native player).
+attempt first) to *unsupported*; 30 s without progress ends in *unavailable*. A picture that
+freezes while the sound goes on (Chromium stops rendering after a hole or a broken frame in the
+video buffer while audio is buffered; hls.js only nudges across holes under a second) is caught
+by a watchdog: no new video frame for 4 s while the clock runs → a seek to the live edge, then
+hls.js's media-error recovery, then a re-tune. Previous / next channel follow the browser's
+current list (buttons, ↑ ↓, a vertical swipe), **F** favorite, **H** hide the channel (also a
+button in the error message), **C** closed captions, **G** the guide panel, **M** mute, fullscreen
+(the theater, or the iPhone's native player). Closed captions are **off by default** (Settings >
+Playback, the CC button, per device): off, every text track of the video is disabled, so neither
+CEA-608 captions in the stream nor a subtitle track of the manifest is drawn.
 
 **Browser** (`client/src/livetv/livetv.ts`): search, a provider dropdown (shown with two or more),
-a *Favorites* switch, group chips with counts (scrollable; the categories of the enabled lists),
-tiles with logo (initials when none), number, DRM mark, star, group · provider, and what is on now;
-the grid renders 120 tiles at a time (*Show more*, and as the page scrolls), with now / next asked
-for the tiles on screen only. *Continue watching* offers the last channel. Settings opens by itself
-on a first visit without providers.
+an **All / Favorites** switch (the favorites count on it; the group chips follow the choice), group
+chips with counts (scrollable; a channel in several groups counts in each), tiles with logo
+(initials when none), number, DRM mark, star, groups · provider, and what is on now; the grid
+renders 120 tiles at a time (*Show more*, and as the page scrolls), with now / next asked for the
+tiles on screen only. The **All** view is ranked: channels with a working logo first, then those
+without one (or whose logo failed to load in this browser before), then those that **did not play
+last time** (dimmed; the server notes every tune's outcome) – Favorites keep the provider's order.
+**Hidden channels** (the eye button in the player, **H**, or *Hide channel* in the error message)
+leave every view and search on every device; Settings lists them with *Show* / *Show all again*.
+Hiding removes the channel from the favorites and vice versa. *Continue watching* offers the last
+channel. Settings opens by itself on a first visit without providers.
 
 Not done: Xtream VOD / series (live channels only), catch-up / timeshift, DASH playback (dash.js
 would add it), recording.

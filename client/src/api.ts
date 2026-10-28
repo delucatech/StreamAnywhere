@@ -1,4 +1,4 @@
-import type { LiveTvChannelGuideResponse, LiveTvChannelsResponse, LiveTvGuideNowResponse, LiveTvPrefs, LiveTvPreset, LiveTvProvider, LiveTvProviderInput, LiveTvState, LiveTvTestRequest, LiveTvTestResponse, LiveTvTuneResponse, ConversationResponse, DownloadJob, DownloadProbeResponse, DownloadSource, FeedProgress, LibraryCategory, LibraryEntry, LibraryEntryPatch, LibraryOptionsResponse, LibrarySaveHint, LibrarySaveResponse, LibraryState, FeedRequest, FeedResponse, FollowRequest, FollowResponse, HealthResponse, InboxResponse, LoginMode, Platform, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SendMessageResponse, ServerProbe, SessionInputRequest, SessionStatus } from '../../shared/types';
+import type { LiveTvChannelGuideResponse, LiveTvChannelsResponse, LiveTvGuideNowResponse, LiveTvPrefs, LiveTvPrefsPatch, LiveTvPreset, LiveTvProvider, LiveTvProviderInput, LiveTvState, LiveTvTestRequest, LiveTvTestResponse, LiveTvTuneResponse, ConversationResponse, DownloadJob, DownloadProbeResponse, DownloadSource, FeedProgress, LibraryCategory, LibraryEntry, LibraryEntryPatch, LibraryOptionsResponse, LibrarySaveHint, LibrarySaveResponse, LibraryState, FeedRequest, FeedResponse, FollowRequest, FollowResponse, HealthResponse, InboxResponse, LoginMode, Platform, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SendMessageResponse, ServerProbe, SessionInputRequest, SessionStatus } from '../../shared/types';
 
 /**
  * API base URL. Empty = same origin (dev server proxy or SERVE_CLIENT deployments). When the
@@ -201,7 +201,7 @@ export const api = {
   /** A connection test of a form being filled in, or of a saved provider (its id): up to a minute for a big playlist */
   liveTvTest: (req: LiveTvTestRequest): Promise<LiveTvTestResponse> => post('/api/livetv/providers/test', req, 90_000),
   liveTvTune: (key: string): Promise<LiveTvTuneResponse> => post('/api/livetv/tune', { key }, 60_000),
-  liveTvPrefs: (patch: { favorite?: { key: string; on: boolean }; lastKey?: string | null }): Promise<LiveTvPrefs> => post('/api/livetv/prefs', patch),
+  liveTvPrefs: (patch: LiveTvPrefsPatch): Promise<LiveTvPrefs> => post('/api/livetv/prefs', patch),
   liveTvGuideNow: (keys: string[]): Promise<LiveTvGuideNowResponse> => getJson(`/api/livetv/guide?keys=${encodeURIComponent(keys.join(','))}`),
   liveTvGuide: (key: string): Promise<LiveTvChannelGuideResponse> => getJson(`/api/livetv/guide/${encodeURIComponent(key)}`),
 };

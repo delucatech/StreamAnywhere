@@ -26,6 +26,10 @@ export interface PlayerHooks {
   isFavorite(key: string): boolean;
   /** Closed captions were turned on / off (the page keeps the setting) */
   onCaptions(on: boolean): void;
+  /** The viewer hid this channel (the hide button, the H key, or from the error message) */
+  onHide(ch: LiveTvChannel): void;
+  /** The server answered a tune: did the channel open (the page ranks channels that did not) */
+  onTuned(ch: LiveTvChannel, ok: boolean): void;
   guide(key: string): Promise<LiveTvChannelGuideResponse>;
   nowNext(key: string): Promise<{ now?: LiveTvProgramme; next?: LiveTvProgramme }>;
   /** The provider's name for the subtitle (several providers) */
@@ -50,6 +54,7 @@ const ICON = {
   starOn: icon('<path d="M12 3.5l2.6 5.6 6.1.7-4.5 4.2 1.2 6-5.4-3-5.4 3 1.2-6L3.3 9.8l6.1-.7z" fill="currentColor"/>'),
   guide: icon('<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18M8 5v14"/>'),
   cc: icon('<rect x="2.5" y="5" width="19" height="14" rx="2.5"/><path d="M10.5 10.2a2.2 2.2 0 1 0 0 3.6M17 10.2a2.2 2.2 0 1 0 0 3.6"/>'),
+  hide: icon('<path d="M3 3l18 18"/><path d="M10.6 5.3A10.4 10.4 0 0 1 12 5.2c5 0 8.6 4.1 9.8 6.8-.5 1.1-1.3 2.3-2.4 3.4M6.4 6.6C4.2 8 2.9 10 2.2 12c1.2 2.7 4.8 6.8 9.8 6.8 1.7 0 3.2-.4 4.5-1.1"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/>'),
   warn: icon('<path d="M12 3 2.5 20h19z"/><path d="M12 9v5M12 17.5v.5"/>'),
   off: icon('<circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/>'),
 };
@@ -111,6 +116,7 @@ export class LiveTvPlayer {
         <button type="button" class="th-btn th-close" aria-label="Close player" title="Close (Esc)">${ICON.close}</button>
         <div class="th-titles"><div class="th-logo"></div><div style="min-width:0"><div class="th-name"></div><div class="th-sub"></div></div></div>
         <button type="button" class="th-btn th-fav" aria-label="Favorite" title="Favorite (F)">${ICON.star}</button>
+        <button type="button" class="th-btn th-hide" aria-label="Hide this channel" title="Hide this channel (H)">${ICON.hide}</button>
         <button type="button" class="th-btn th-cc" aria-label="Closed captions" aria-pressed="false" title="Closed captions (C)">${ICON.cc}</button>
         <button type="button" class="th-btn th-guidebtn" aria-label="Programme guide" title="Guide (G)">${ICON.guide}</button>
         <button type="button" class="th-btn th-full" aria-label="Fullscreen" title="Fullscreen">${ICON.full}</button>
@@ -155,6 +161,7 @@ export class LiveTvPlayer {
     this.muteBtn.addEventListener('click', () => this.toggleMute());
     this.favBtn.addEventListener('click', () => this.toggleFavorite());
     this.ccBtn.addEventListener('click', () => this.setCaptions(!this.captions));
+    q('.th-hide').addEventListener('click', () => this.hideCurrent());
     this.guideBtn.addEventListener('click', () => this.toggleGuide());
     // text tracks appear as the stream is parsed (hls.js adds <track>s; Safari lists the manifest's):
     // each one gets the captions setting applied
@@ -271,6 +278,7 @@ export class LiveTvPlayer {
       return this.showMessage('unavailable', `The server could not open this channel: ${m}`);
     }
     if (gen !== this.generation) return;
+    this.hooks.onTuned(ch, t.state === 'ok' && !!t.playUrl);
     if (t.state !== 'ok' || !t.playUrl) return this.showMessage(t.state === 'unsupported' ? 'unsupported' : 'unavailable', t.message || 'This channel is not available right now.', t.detail);
     this.setState('loading');
     this.showWait('Loading…');
@@ -536,9 +544,10 @@ export class LiveTvPlayer {
     this.setState(kind);
     this.msg.className = `th-msg ${kind}`;
     this.msg.innerHTML = `<div class="th-ico">${kind === 'unsupported' ? ICON.warn : ICON.off}</div><p>${esc(text)}</p>${detail ? `<small>${esc(detail)}</small>` : ''}
-      <div class="sh-actions"><button type="button" class="btn small primary" data-act="retry">Try again</button><button type="button" class="btn small" data-act="next">Next channel</button><button type="button" class="btn small ghost" data-act="close">Close</button></div>`;
+      <div class="sh-actions"><button type="button" class="btn small primary" data-act="retry">Try again</button><button type="button" class="btn small" data-act="next">Next channel</button><button type="button" class="btn small" data-act="hide">Hide channel</button><button type="button" class="btn small ghost" data-act="close">Close</button></div>`;
     this.msg.querySelector('[data-act="retry"]')!.addEventListener('click', () => void this.play(this.index));
     this.msg.querySelector('[data-act="next"]')!.addEventListener('click', () => this.step(1));
+    this.msg.querySelector('[data-act="hide"]')!.addEventListener('click', () => this.hideCurrent());
     this.msg.querySelector('[data-act="close"]')!.addEventListener('click', () => this.close());
     this.msg.classList.remove('hidden');
     this.wake();
@@ -569,6 +578,18 @@ export class LiveTvPlayer {
     if (!c) return;
     this.hooks.onFavorite(c, !this.hooks.isFavorite(c.key));
     this.refreshFavorite();
+  }
+
+  /** Hides the channel playing and moves on to the next one (or closes when it was the last). */
+  private hideCurrent(): void {
+    const c = this.current;
+    if (!c) return;
+    this.hooks.onHide(c);
+    const rest = this.items.filter((x) => x.key !== c.key);
+    if (!rest.length) return this.close();
+    const next = Math.min(this.index, rest.length - 1);
+    this.items = rest;
+    void this.play(next);
   }
 
   private toggleGuide(on = !this.root.classList.contains('guide-open')): void {
@@ -675,6 +696,9 @@ export class LiveTvPlayer {
         break;
       case 'c':
         this.setCaptions(!this.captions);
+        break;
+      case 'h':
+        this.hideCurrent();
         break;
       case 'g':
         this.toggleGuide();

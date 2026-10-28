@@ -872,8 +872,21 @@ export interface LiveTvChannelsResponse {
   channels: LiveTvChannel[];
 }
 
+/** A change to the preferences (POST /api/livetv/prefs); the whole preferences come back */
+export interface LiveTvPrefsPatch {
+  favorite?: { key: string; on: boolean };
+  hidden?: { key: string; on: boolean };
+  /** Every hidden channel shown again */
+  unhideAll?: boolean;
+  lastKey?: string | null;
+}
+
 export interface LiveTvPrefs {
   favorites: string[];
+  /** Channels hidden from the browser (dead, unwanted): shared by every device, undone in Settings */
+  hidden: string[];
+  /** Channel key -> when its last tune failed (cleared by a tune that works): ranked last in the All view */
+  broken: Record<string, number>;
   lastKey?: string;
   lastAt?: number;
 }

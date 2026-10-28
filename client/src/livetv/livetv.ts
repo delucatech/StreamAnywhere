@@ -110,12 +110,23 @@ const PREFS_KEY = 'streamanywhere.livetv.prefs';
 const VIEW_KEY = 'streamanywhere.livetv.view';
 /** Closed captions on the picture: a setting of this device (the Tesla and the phone differ); off until turned on */
 const CAPTIONS_KEY = 'streamanywhere.livetv.captions';
-let state: LiveTvState = { rev: 0, channelsRev: 0, providers: [], prefs: { favorites: [] }, remux: false };
+let state: LiveTvState = { rev: 0, channelsRev: 0, providers: [], prefs: { favorites: [], hidden: [], broken: {} }, remux: false };
 let channels: LiveTvChannel[] = [];
 let channelsRev = -1;
 let presets: LiveTvPreset[] = [];
 let favorites = new Set<string>();
+/** Channels hidden from the browser (server-side, every device) */
+let hidden = new Set<string>();
+/** Channel key -> when its last tune failed (server-side): ranked last in the All view */
+let broken: Record<string, number> = {};
 let lastKey: string | undefined;
+/**
+ * Logos that failed to load in this browser (key -> when), kept a week: a channel without a
+ * working logo ranks after those with one in the All view, from the next render on.
+ */
+const BAD_LOGOS_KEY = 'streamanywhere.livetv.badlogos';
+const BAD_LOGO_TTL = 7 * 86400_000;
+let badLogos: Record<string, number> = {};
 const view = { q: '', provider: 'all', group: 'all', favs: false };
 let shown = 0;
 const PAGE = 120;
@@ -128,12 +139,33 @@ try {
   const p = JSON.parse(localStorage.getItem(PREFS_KEY) || 'null') as LiveTvPrefs | null;
   if (p) {
     favorites = new Set(p.favorites || []);
+    hidden = new Set(p.hidden || []);
+    broken = p.broken || {};
     lastKey = p.lastKey;
   }
   const v = JSON.parse(localStorage.getItem(VIEW_KEY) || 'null') as Partial<typeof view> | null;
   if (v) Object.assign(view, v);
+  const bad = JSON.parse(localStorage.getItem(BAD_LOGOS_KEY) || 'null') as Record<string, number> | null;
+  const cutoff = Date.now() - BAD_LOGO_TTL;
+  if (bad) for (const [k, t] of Object.entries(bad)) if (typeof t === 'number' && t > cutoff) badLogos[k] = t;
 } catch {
   /* no storage */
+}
+let badLogosTimer = 0;
+function noteBadLogo(key: string): void {
+  if (badLogos[key]) return;
+  badLogos[key] = Date.now();
+  window.clearTimeout(badLogosTimer);
+  badLogosTimer = window.setTimeout(() => {
+    // at most 3,000 entries: the oldest go first
+    const entries = Object.entries(badLogos).sort((a, b) => b[1] - a[1]).slice(0, 3000);
+    badLogos = Object.fromEntries(entries);
+    try {
+      localStorage.setItem(BAD_LOGOS_KEY, JSON.stringify(badLogos));
+    } catch {
+      /* ignore */
+    }
+  }, 1000);
 }
 const saveView = (): void => {
   try {
@@ -144,14 +176,16 @@ const saveView = (): void => {
 };
 const savePrefs = (): void => {
   try {
-    localStorage.setItem(PREFS_KEY, JSON.stringify({ favorites: [...favorites], lastKey } as LiveTvPrefs));
+    localStorage.setItem(PREFS_KEY, JSON.stringify({ favorites: [...favorites], hidden: [...hidden], broken, lastKey } as LiveTvPrefs));
   } catch {
     /* ignore */
   }
 };
 
 const providerById = (id: string): LiveTvProvider | undefined => state.providers.find((p) => p.id === id);
-const channelByKey = (key: string | undefined): LiveTvChannel | undefined => (key ? channels.find((c) => c.key === key) : undefined);
+const channelByKey = (key: string | undefined): LiveTvChannel | undefined => (key && !hidden.has(key) ? channels.find((c) => c.key === key) : undefined);
+/** The order of the All view: channels that did not play last time last, those without a working logo before them */
+const rankOf = (c: LiveTvChannel): number => (broken[c.key] ? 2 : !c.logo || badLogos[c.key] ? 1 : 0);
 const anyRefreshRunning = (): boolean => state.providers.some((p) => p.refresh.state === 'running' || p.epg.state === 'running');
 
 // ---------------------------------------------------------------- the player
@@ -166,6 +200,18 @@ const player = new LiveTvPlayer(el.theater, {
   },
   onFavorite: (ch, on) => void setFavorite(ch.key, on),
   isFavorite: (key) => favorites.has(key),
+  onHide: (ch) => void setHidden(ch.key, true),
+  onTuned: (ch, ok) => {
+    // the server keeps this too; the tile dims (or brightens) right away
+    if (ok) delete broken[ch.key];
+    else broken[ch.key] = Date.now();
+    savePrefs();
+    const tile = el.grid.querySelector<HTMLElement>(`.ch[data-key="${CSS.escape(ch.key)}"]`);
+    if (tile) {
+      tile.classList.toggle('dim', !ok);
+      tile.title = ok ? '' : BROKEN_TITLE;
+    }
+  },
   onCaptions: (on) => {
     try {
       localStorage.setItem(CAPTIONS_KEY, on ? '1' : '0');
@@ -189,9 +235,13 @@ try {
   /* off */
 }
 
+const BROKEN_TITLE = 'Did not play last time';
+
 async function setFavorite(key: string, on: boolean): Promise<void> {
-  if (on) favorites.add(key);
-  else favorites.delete(key);
+  if (on) {
+    favorites.add(key);
+    hidden.delete(key);
+  } else favorites.delete(key);
   savePrefs();
   renderFavButtons();
   if (view.favs) render();
@@ -203,6 +253,32 @@ async function setFavorite(key: string, on: boolean): Promise<void> {
   } catch (e) {
     toast(errMsg(e), true);
   }
+}
+
+/** Hides a channel from the browser (or shows it again); the server keeps the list for every device. */
+async function setHidden(key: string, on: boolean): Promise<void> {
+  if (on) {
+    hidden.add(key);
+    favorites.delete(key);
+  } else hidden.delete(key);
+  savePrefs();
+  render();
+  if (!el.settingsOverlay.classList.contains('hidden')) renderSettings();
+  if (on) toast('Channel hidden: Settings lists the hidden channels');
+  try {
+    const p = await api.liveTvPrefs({ hidden: { key, on } });
+    applyPrefs(p);
+  } catch (e) {
+    toast(errMsg(e), true);
+  }
+}
+
+function applyPrefs(p: LiveTvPrefs): void {
+  favorites = new Set(p.favorites);
+  hidden = new Set(p.hidden || []);
+  broken = p.broken || {};
+  if (p.lastKey) lastKey = p.lastKey;
+  savePrefs();
 }
 
 /** All / Favorites: which is on, and how many favorites there are among the channels loaded */
@@ -240,9 +316,7 @@ async function sync(): Promise<void> {
     const r = await api.liveTv(state.rev || undefined);
     if (!('unchanged' in r)) {
       state = r;
-      favorites = new Set(r.prefs.favorites);
-      if (r.prefs.lastKey) lastKey = r.prefs.lastKey;
-      savePrefs();
+      applyPrefs(r.prefs);
       renderProviders();
       if (!el.settingsOverlay.classList.contains('hidden')) renderSettings();
     }
@@ -300,7 +374,8 @@ function renderProviders(): void {
 function filtered(): LiveTvChannel[] {
   const q = view.q.trim().toLowerCase();
   const words = q ? q.split(/\s+/) : [];
-  return channels.filter((c) => {
+  const list = channels.filter((c) => {
+    if (hidden.has(c.key)) return false;
     if (view.provider !== 'all' && c.providerId !== view.provider) return false;
     if (view.favs && !favorites.has(c.key)) return false;
     if (view.group !== 'all' && !c.groups.includes(view.group)) return false;
@@ -310,6 +385,10 @@ function filtered(): LiveTvChannel[] {
     }
     return true;
   });
+  // Favorites keep the provider's order; the All view puts the channels most likely to play
+  // (and to look right) first: working logo, then no logo, then "did not play last time"
+  if (!view.favs) list.sort((a, b) => rankOf(a) - rankOf(b));
+  return list;
 }
 
 function renderChips(): void {
@@ -319,6 +398,7 @@ function renderChips(): void {
   const q = view.q.trim().toLowerCase();
   let total = 0;
   for (const c of channels) {
+    if (hidden.has(c.key)) continue;
     if (view.provider !== 'all' && c.providerId !== view.provider) continue;
     if (view.favs && !favorites.has(c.key)) continue;
     if (q && !`${c.name} ${c.groups.join(' ')}`.toLowerCase().includes(q)) continue;
@@ -337,7 +417,8 @@ function tileHtml(c: LiveTvChannel): string {
   const fav = favorites.has(c.key);
   const prov = state.providers.length > 1 ? providerById(c.providerId)?.name : '';
   const sub = [...c.groups, prov].filter(Boolean).join(' · ');
-  return `<button type="button" class="ch${player.current?.key === c.key ? ' playing' : ''}" data-key="${esc(c.key)}" aria-label="Play ${esc(c.name)}">
+  const dim = !!broken[c.key];
+  return `<button type="button" class="ch${player.current?.key === c.key ? ' playing' : ''}${dim ? ' dim' : ''}" data-key="${esc(c.key)}" aria-label="Play ${esc(c.name)}"${dim ? ` title="${BROKEN_TITLE}"` : ''}>
     <span class="ch-logo">${c.logo ? `<img src="${esc(c.logo)}" alt="" loading="lazy" draggable="false" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'initials',textContent:this.dataset.i}))" data-i="${esc(initials(c.name))}" />` : `<span class="initials">${esc(initials(c.name))}</span>`}
       ${c.number ? `<span class="ch-num">${c.number}</span>` : ''}${c.drm ? '<span class="ch-drm">DRM</span>' : ''}
       <span class="ch-fav${fav ? ' on' : ''}" role="button" aria-label="${fav ? 'Remove from favorites' : 'Add to favorites'}" data-fav="${esc(c.key)}">${fav ? STAR_ON : STAR}</span>
@@ -506,6 +587,17 @@ el.chips.addEventListener('click', (e) => {
   render();
 });
 el.moreBtn.addEventListener('click', appendMore);
+// a logo that fails to load (error events do not bubble: captured) is remembered for the ranking
+el.grid.addEventListener(
+  'error',
+  (e) => {
+    const t = e.target as HTMLElement;
+    if (t.tagName !== 'IMG') return;
+    const key = t.closest<HTMLElement>('.ch')?.dataset.key;
+    if (key) noteBadLogo(key);
+  },
+  true,
+);
 window.addEventListener('scroll', () => {
   if (el.moreRow.classList.contains('hidden')) return;
   if (window.innerHeight + window.scrollY > document.body.offsetHeight - 900) appendMore();
@@ -615,6 +707,20 @@ function renderSettings(): void {
     )
     .join('');
   const cc = player.captions;
+  const hiddenRows = [...hidden]
+    .map((key) => ({ key, c: channels.find((x) => x.key === key) }))
+    .filter((x): x is { key: string; c: LiveTvChannel } => !!x.c)
+    .sort((a, b) => a.c.name.localeCompare(b.c.name))
+    .map(
+      ({ key, c }) => `<div class="preset"><div class="preset-text"><div class="preset-name">${esc(c.name)}</div><div class="preset-desc">${esc([...c.groups, state.providers.length > 1 ? providerById(c.providerId)?.name || '' : ''].filter(Boolean).join(' · '))}</div></div>
+        <button type="button" class="btn small" data-unhide="${esc(key)}">Show</button></div>`,
+    );
+  const hiddenHtml = hiddenRows.length
+    ? `<p class="sh-section">Hidden channels <small class="muted">${n(hiddenRows.length)}</small></p>
+       <p class="sh-note">Hidden on every device, out of every view and search. The eye button in the player (or the H key) hides the channel playing.</p>
+       ${hiddenRows.join('')}
+       <div class="sh-actions"><button type="button" class="btn small" data-unhide-all>Show all again</button></div>`
+    : '';
   el.settingsBody.innerHTML = `
     <p class="sh-section">Playback</p>
     <div class="prov">
@@ -622,10 +728,11 @@ function renderSettings(): void {
         <button type="button" class="toggle small${cc ? ' on' : ''}" data-set="captions" aria-pressed="${cc}" title="${cc ? 'Turn captions off' : 'Turn captions on'}"><span class="toggle-dot" aria-hidden="true"></span>${cc ? 'On' : 'Off'}</button></div>
       <div class="prov-status">${cc ? 'The captions or subtitles a channel carries are shown on the picture.' : 'Captions are never shown, even when a channel carries them.'} A setting of this device; the CC button in the player (or the C key) is the same switch.</div>
     </div>
+    ${hiddenHtml}
     <p class="sh-section">Providers</p>
     ${rows.join('') || '<p class="sh-note">No providers yet. Add your own playlist or Xtream account below, or one of the community playlists.</p>'}
     <div class="sh-actions"><button type="button" class="btn small primary" data-add="m3u">Add M3U playlist</button><button type="button" class="btn small primary" data-add="xtream">Add Xtream Codes</button></div>
-    <p class="sh-note">Providers and their credentials are kept on the server, encrypted, for every browser of this site; passwords never come back to the page or into the log. Streams are relayed by the server, so the provider sees the server, not your device.</p>
+    <p class="sh-note">Channel lists refresh by themselves every 12 hours (and their guides with them); the refresh button at the top, or Refresh channels here, does it now. Providers and their credentials are kept on the server, encrypted, for every browser of this site; passwords never come back to the page or into the log. Streams are relayed by the server, so the provider sees the server, not your device.</p>
     <p class="sh-section">Community playlists (free)</p>
     <p class="sh-note">Public lists maintained by volunteers: which channels are up, geo-blocked, or in a format this browser plays changes all the time. ${presets.length ? '' : '<span class="spinner small"></span>Loading…'}</p>
     ${presetHtml}`;
@@ -638,6 +745,20 @@ el.settingsBody.addEventListener('click', async (e) => {
   if (t.closest('[data-set="captions"]')) {
     player.setCaptions(!player.captions);
     renderSettings();
+    return;
+  }
+  const unhide = t.closest<HTMLElement>('[data-unhide]');
+  if (unhide) return void setHidden(unhide.dataset.unhide!, false);
+  if (t.closest('[data-unhide-all]')) {
+    hidden.clear();
+    savePrefs();
+    render();
+    renderSettings();
+    try {
+      applyPrefs(await api.liveTvPrefs({ unhideAll: true }));
+    } catch (err) {
+      toast(errMsg(err), true);
+    }
     return;
   }
   const pre = t.closest<HTMLButtonElement>('[data-preset]');

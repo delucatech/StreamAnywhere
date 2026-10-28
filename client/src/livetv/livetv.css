@@ -527,6 +527,14 @@ select {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px rgba(255, 138, 92, 0.4);
 }
+/* did not play last time: ranked last, and shown so */
+.ch.dim {
+  opacity: 0.55;
+}
+.ch.dim:hover,
+.ch.dim.playing {
+  opacity: 0.9;
+}
 .ch-logo {
   position: relative;
   aspect-ratio: 16 / 9;
