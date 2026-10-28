@@ -779,3 +779,172 @@ export interface LibraryOptionsResponse {
   warnings: string[];
   elapsedMs: number;
 }
+
+// ---------------------------------------------------------------- Live TV (livetv.html)
+// Providers (M3U playlists, Xtream Codes accounts) are kept on the server for every browser of
+// the site, their credentials encrypted at rest; channels are listed from the server's cached
+// copy of each playlist; streams reach the browser through the server, never with the provider's
+// credentials in them.
+
+export type LiveTvProviderKind = 'm3u' | 'xtream';
+
+export interface LiveTvProvider {
+  id: string;
+  kind: LiveTvProviderKind;
+  name: string;
+  enabled: boolean;
+  /** The built-in preset this provider was added from, if any */
+  preset?: string;
+  /** M3U: the playlist URL (the owner's own setting, shown in the edit form) */
+  url?: string;
+  /** Xtream: the panel's address and the account name; the password never leaves the server */
+  server?: string;
+  username?: string;
+  hasPassword?: boolean;
+  /** An XMLTV guide URL given explicitly (optional) */
+  epgUrl?: string;
+  /** Where the guide comes from: the explicit URL, the playlist's own header, the panel's xmltv.php, or nowhere */
+  epgSource: 'url' | 'playlist' | 'panel' | 'none';
+  createdAt: number;
+  updatedAt: number;
+  /** The last channel list refresh */
+  refresh: { state: 'never' | 'running' | 'ok' | 'error'; at?: number; error?: string; channels: number; groups: number; ms?: number };
+  /** The guide: when it was last loaded, how many of this provider's channels have programmes */
+  epg: { state: 'none' | 'running' | 'ok' | 'error'; at?: number; error?: string; channels: number; programmes: number };
+  /** Xtream: what the panel said about the account at the last refresh / test */
+  account?: LiveTvAccount;
+}
+
+export interface LiveTvAccount {
+  status?: string;
+  expiresAt?: number;
+  maxConnections?: number;
+  activeConnections?: number;
+}
+
+/** POST /api/livetv/providers (add) and POST /api/livetv/providers/:id (edit: only the fields sent change; an empty password keeps the saved one) */
+export interface LiveTvProviderInput {
+  kind?: LiveTvProviderKind;
+  name?: string;
+  url?: string;
+  server?: string;
+  username?: string;
+  password?: string;
+  epgUrl?: string;
+  enabled?: boolean;
+  preset?: string;
+}
+
+export interface LiveTvChannel {
+  /** "<providerId>:<channelId>": what favorites, the guide and tuning refer to */
+  key: string;
+  providerId: string;
+  name: string;
+  /** The group / category as the provider names it ("News", "Sports", a country...) */
+  group: string;
+  logo?: string;
+  /** Guide id (tvg-id / epg_channel_id) */
+  epgId?: string;
+  /** Channel number (tvg-chno / the panel's num) */
+  number?: number;
+  /** The playlist names DRM license keys for this channel: it cannot play here */
+  drm?: boolean;
+}
+
+export interface LiveTvState {
+  /** Grows with every change to the providers or preferences; GET /api/livetv?rev=N answers { rev, unchanged: true } */
+  rev: number;
+  /** Grows when any provider's channel list changes (GET /api/livetv/channels?rev=N) */
+  channelsRev: number;
+  providers: LiveTvProvider[];
+  prefs: LiveTvPrefs;
+  /** ffmpeg is there: raw MPEG-TS streams are remuxed into HLS for the browser */
+  remux: boolean;
+}
+
+export interface LiveTvChannelsResponse {
+  channelsRev: number;
+  channels: LiveTvChannel[];
+}
+
+export interface LiveTvPrefs {
+  favorites: string[];
+  lastKey?: string;
+  lastAt?: number;
+}
+
+/** A community playlist offered in Settings; added like any M3U provider */
+export interface LiveTvPreset {
+  id: string;
+  /** "IPTV-org", "Free-TV": the picker groups presets by their source */
+  source: string;
+  name: string;
+  description: string;
+  url: string;
+  epgUrl?: string;
+  /** Roughly how many channels the list had when it was last checked */
+  approxChannels?: number;
+}
+
+export interface LiveTvTestRequest extends LiveTvProviderInput {
+  /** Test a saved provider (its saved password is used when none is typed) */
+  id?: string;
+}
+
+export interface LiveTvTestResponse {
+  ok: boolean;
+  message: string;
+  channels?: number;
+  groups?: number;
+  account?: LiveTvAccount;
+  /** The guide source the provider names (none for a plain playlist without one) */
+  epgSource?: LiveTvProvider['epgSource'];
+  elapsedMs: number;
+}
+
+export interface LiveTvTuneRequest {
+  key: string;
+}
+
+export type LiveTvStreamKind = 'hls' | 'remux' | 'progressive';
+
+/**
+ * What the server found when it opened the channel's stream: a playable same-origin URL (HLS, a
+ * remuxed HLS copy of a raw MPEG-TS stream, or a progressive file), an unavailable stream (the
+ * provider answered with an error, nothing, or too slowly), or a format the browser cannot play here.
+ */
+export interface LiveTvTuneResponse {
+  key: string;
+  state: 'ok' | 'unavailable' | 'unsupported';
+  kind?: LiveTvStreamKind;
+  playUrl?: string;
+  /** Technical detail (status, content type), for the player's message and the log */
+  detail?: string;
+  message?: string;
+  elapsedMs: number;
+}
+
+export interface LiveTvProgramme {
+  /** ms since the epoch */
+  start: number;
+  stop: number;
+  title: string;
+  desc?: string;
+  category?: string;
+}
+
+/** GET /api/livetv/guide?keys=a,b,c: what is on now and next on those channels */
+export interface LiveTvGuideNowResponse {
+  now: Record<string, { now?: LiveTvProgramme; next?: LiveTvProgramme }>;
+  /** A guide is still being loaded for one of the providers asked about: ask again in a moment */
+  loading: boolean;
+}
+
+/** GET /api/livetv/guide/:key: the channel's programmes around now */
+export interface LiveTvChannelGuideResponse {
+  key: string;
+  programmes: LiveTvProgramme[];
+  loading: boolean;
+  /** Why there is nothing: the provider has no guide, the channel is not in it... */
+  note?: string;
+}

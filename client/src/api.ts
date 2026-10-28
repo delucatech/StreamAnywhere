@@ -1,4 +1,4 @@
-import type { ConversationResponse, DownloadJob, DownloadProbeResponse, DownloadSource, FeedProgress, LibraryCategory, LibraryEntry, LibraryEntryPatch, LibraryOptionsResponse, LibrarySaveHint, LibrarySaveResponse, LibraryState, FeedRequest, FeedResponse, FollowRequest, FollowResponse, HealthResponse, InboxResponse, LoginMode, Platform, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SendMessageResponse, ServerProbe, SessionInputRequest, SessionStatus } from '../../shared/types';
+import type { LiveTvChannelGuideResponse, LiveTvChannelsResponse, LiveTvGuideNowResponse, LiveTvPrefs, LiveTvPreset, LiveTvProvider, LiveTvProviderInput, LiveTvState, LiveTvTestRequest, LiveTvTestResponse, LiveTvTuneResponse, ConversationResponse, DownloadJob, DownloadProbeResponse, DownloadSource, FeedProgress, LibraryCategory, LibraryEntry, LibraryEntryPatch, LibraryOptionsResponse, LibrarySaveHint, LibrarySaveResponse, LibraryState, FeedRequest, FeedResponse, FollowRequest, FollowResponse, HealthResponse, InboxResponse, LoginMode, Platform, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SendMessageResponse, ServerProbe, SessionInputRequest, SessionStatus } from '../../shared/types';
 
 /**
  * API base URL. Empty = same origin (dev server proxy or SERVE_CLIENT deployments). When the
@@ -79,6 +79,15 @@ async function post<T>(path: string, body: unknown, timeoutMs?: number): Promise
     const msg = (json as { error?: string })?.error || `${res.status} ${res.statusText}`;
     throw new ApiError(msg, res.status, json);
   }
+  return json as T;
+}
+
+/** GET JSON (same conventions as post: the site's 401 goes to the login page, errors carry the server's message). */
+async function getJson<T>(path: string): Promise<T> {
+  const res = await fetch(apiUrl(path), { mode: 'cors', credentials: 'same-origin', cache: 'no-store' });
+  toLoginOn401(res);
+  const json = await res.json().catch(() => undefined);
+  if (!res.ok) throw new ApiError((json as { error?: string })?.error || `${res.status} ${res.statusText}`, res.status, json);
   return json as T;
 }
 
@@ -180,4 +189,19 @@ export const api = {
   libraryAddCategory: (name: string): Promise<{ category: LibraryCategory; state: LibraryState }> => post('/api/library/categories', { name }),
   libraryRenameCategory: (id: string, name: string): Promise<{ category: LibraryCategory; state: LibraryState }> => post(`/api/library/categories/${id}`, { name }),
   libraryDeleteCategory: (id: string): Promise<LibraryState> => post(`/api/library/categories/${id}/delete`, {}),
+  // Live TV (livetv.html)
+  /** Providers + preferences, or { rev, unchanged: true } when nothing changed since `rev` */
+  liveTv: (rev?: number): Promise<LiveTvState | { rev: number; channelsRev: number; unchanged: true }> => getJson(`/api/livetv${rev !== undefined ? `?rev=${rev}` : ''}`),
+  liveTvChannels: (rev?: number): Promise<LiveTvChannelsResponse | { channelsRev: number; unchanged: true }> => getJson(`/api/livetv/channels${rev !== undefined ? `?rev=${rev}` : ''}`),
+  liveTvPresets: (): Promise<{ presets: LiveTvPreset[] }> => getJson('/api/livetv/presets'),
+  liveTvAddProvider: (input: LiveTvProviderInput): Promise<{ provider: LiveTvProvider; state: LiveTvState }> => post('/api/livetv/providers', input, 30_000),
+  liveTvUpdateProvider: (id: string, input: LiveTvProviderInput): Promise<{ provider: LiveTvProvider; state: LiveTvState }> => post(`/api/livetv/providers/${id}`, input, 30_000),
+  liveTvDeleteProvider: (id: string): Promise<LiveTvState> => post(`/api/livetv/providers/${id}/delete`, {}),
+  liveTvRefreshProvider: (id: string): Promise<LiveTvState> => post(`/api/livetv/providers/${id}/refresh`, {}),
+  /** A connection test of a form being filled in, or of a saved provider (its id): up to a minute for a big playlist */
+  liveTvTest: (req: LiveTvTestRequest): Promise<LiveTvTestResponse> => post('/api/livetv/providers/test', req, 90_000),
+  liveTvTune: (key: string): Promise<LiveTvTuneResponse> => post('/api/livetv/tune', { key }, 60_000),
+  liveTvPrefs: (patch: { favorite?: { key: string; on: boolean }; lastKey?: string | null }): Promise<LiveTvPrefs> => post('/api/livetv/prefs', patch),
+  liveTvGuideNow: (keys: string[]): Promise<LiveTvGuideNowResponse> => getJson(`/api/livetv/guide?keys=${encodeURIComponent(keys.join(','))}`),
+  liveTvGuide: (key: string): Promise<LiveTvChannelGuideResponse> => getJson(`/api/livetv/guide/${encodeURIComponent(key)}`),
 };

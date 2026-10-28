@@ -30,6 +30,7 @@ import { exploreInstagram, forYouInstagram, instagramCategory, instagramStats, I
 import { instagramCancelLogin, instagramLogout, instagramMaySignIn, instagramSessionLog, ensureInstagramSession, instagramSessionLost, instagramSessionStatus, instagramSignedIn, instagramStartLogin, InstagramSessionError, setInstagramSessionLogger, shutdownInstagramSession } from './instagramSession';
 import { setYouTubeSessionLogger, shutdownYouTubeSession, youtubeCancelLogin, youtubeCookieFile, youtubeLogout, youtubeSessionLog, youtubeSessionLost, youtubeSessionStatus, youtubeStartLogin, YouTubeSessionError } from './youtubeSession';
 import { exploreFacebook, facebookCategory, facebookStats, FacebookError, forYouFacebook, isFacebookUrl, profileFacebook, resolveFacebook, searchFacebook, setFacebookLogger } from './facebook';
+import { flushLiveTv, liveTvStats, registerLiveTv, setLiveTvLogger } from './livetv';
 import { ensureFacebookSession, facebookCancelLogin, facebookLogout, facebookMaySignIn, facebookSessionLog, facebookSessionLost, facebookSessionStatus, facebookSignedIn, facebookStartLogin, FacebookSessionError, setFacebookSessionLogger, shutdownFacebookSession } from './facebookSession';
 
 /** After the browser path rescued an explore request, prefer it for a while (datacenter IPs). */
@@ -253,6 +254,8 @@ export async function buildServer() {
     // the owner out of /login. Trust X-Forwarded-For/-Proto only from a loopback peer (TRUST_PROXY
     // overrides, e.g. "true" on a hosting platform whose proxy is not local).
     trustProxy: config.trustProxy,
+    // Live TV segment tokens (an encrypted upstream URL in the path) run past the default 100 characters
+    maxParamLength: 4096,
   });
 
   // Same-origin deployments (SERVE_CLIENT) need no CORS; otherwise allow the configured client origins.
@@ -281,6 +284,7 @@ export async function buildServer() {
   setFacebookLogger((m) => app.log.info({ what: 'facebook' }, m));
   setDownloaderLogger((m) => app.log.info({ what: 'downloader' }, m));
   setLibraryLogger((m) => app.log.info({ what: 'library' }, m));
+  setLiveTvLogger((m) => app.log.info({ what: 'livetv' }, m));
 
   app.get('/api/health', async (): Promise<HealthResponse> => ({
     ok: true,
@@ -799,6 +803,8 @@ export async function buildServer() {
   });
 
   registerProxyRoutes(app);
+  // ---- Live TV (livetv.html): providers, channels, the guide, tuning and the stream relay
+  registerLiveTv(app);
 
   // ---- Video Downloader (download.html): look a link up, start a download, poll it, fetch the file
   const downloadError = (reply: { code(n: number): { send(b: unknown): unknown } }, e: unknown): unknown => {
@@ -988,7 +994,7 @@ export async function buildServer() {
     return reply.code(200).headers({ 'content-type': f.mime, 'cache-control': 'public, max-age=31536000, immutable' }).send(fs.createReadStream(f.path));
   });
 
-  app.get('/api/stats', async () => ({ downloads: downloaderStats(), library: libraryStats(), imports: importStats(), mediaRecords: mediaCount(), exploreStock: exploreStock(), youtubeStock: youtubeStock(), youtubeForYouStock: youtubeForYou?.stats, instagramStock: instagramStock(), instagramForYouStock: instagramForYou?.stats, instagram: instagramStats(), facebookStock: facebookStock(), facebookForYouStock: facebookForYou?.stats, facebook: facebookStats(), forYouStock: forYouStock(), mirror: mirrorStats(), jobs: jobStats(), workPage: workState(), uptimeSec: Math.round(process.uptime()) }));
+  app.get('/api/stats', async () => ({ downloads: downloaderStats(), library: libraryStats(), imports: importStats(), livetv: liveTvStats(), mediaRecords: mediaCount(), exploreStock: exploreStock(), youtubeStock: youtubeStock(), youtubeForYouStock: youtubeForYou?.stats, instagramStock: instagramStock(), instagramForYouStock: instagramForYou?.stats, instagram: instagramStats(), facebookStock: facebookStock(), facebookForYouStock: facebookForYou?.stats, facebook: facebookStats(), forYouStock: forYouStock(), mirror: mirrorStats(), jobs: jobStats(), workPage: workState(), uptimeSec: Math.round(process.uptime()) }));
 
   if (config.serveClient) {
     const dist = findUp(path.join('client', 'dist')) || findUp(path.join('client', 'dist'), process.cwd()) || path.resolve('client', 'dist');
@@ -1032,6 +1038,7 @@ if (require.main === module) {
           shutdownDownloader();
           shutdownMirror();
           flushLibrary();
+          flushLiveTv();
           void Promise.race([Promise.all([shutdownBrowsers(), shutdownYouTubeSession(), shutdownInstagram(), shutdownInstagramSession(), shutdownFacebookSession()]), new Promise((r) => setTimeout(r, 8000))]).finally(() => process.exit(0));
         });
       }

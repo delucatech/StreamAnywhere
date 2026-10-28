@@ -50,6 +50,14 @@ const LIBRARY: App = {
   tile: 'linear-gradient(145deg, #2ee6a6 0%, #0b8f6a 100%)',
   icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2.5" fill="none" stroke="#fff" stroke-width="1.9"/><path fill="#fff" d="M10 9.2v5.6l4.8-2.8z"/><path fill="#fff" opacity=".85" d="M7 21h10v1.6H7z"/></svg>',
 };
+/** Live TV: the channels of the configured providers (M3U playlists, Xtream accounts), played in the browser (livetv.html) */
+const LIVETV: App = {
+  id: 'livetv',
+  name: 'Live TV',
+  url: 'livetv.html',
+  tile: 'linear-gradient(145deg, #ff8a5c 0%, #c2185b 100%)',
+  icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6.5" width="18" height="12.5" rx="2.4" fill="none" stroke="#fff" stroke-width="1.9"/><path d="M8.5 2.8 12 6.5l3.5-3.7" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/><path d="M9.6 10.2v5.2l4.4-2.6z" fill="#fff"/><path d="M8 22h8" stroke="#fff" stroke-width="1.9" stroke-linecap="round"/></svg>',
+};
 /** Mirror: an iPhone's (or a computer's) screen shown here (mirror.html; the phone runs the Mirror app) */
 const MIRROR: App = {
   id: 'mirror',
@@ -58,7 +66,7 @@ const MIRROR: App = {
   tile: 'linear-gradient(145deg, #7aa7ff 0%, #2b4fd6 100%)',
   icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7.5" y="2.5" width="9" height="16" rx="2" fill="none" stroke="#fff" stroke-width="1.8"/><path d="M4 14.5v3.3A2.2 2.2 0 0 0 6.2 20h11.6a2.2 2.2 0 0 0 2.2-2.2v-3.3" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/><path d="M9.6 22h4.8" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="16.2" r="0.9" fill="#fff"/></svg>',
 };
-const APPS: App[] = [...PLATFORMS.map((p) => ({ id: p.id, name: p.short, url: p.url, tile: p.tile, icon: p.icon, platform: p })), MIRROR, LIBRARY, LAB];
+const APPS: App[] = [...PLATFORMS.map((p) => ({ id: p.id, name: p.short, url: p.url, tile: p.tile, icon: p.icon, platform: p })), LIVETV, MIRROR, LIBRARY, LAB];
 
 const badges = new Map<string, HTMLElement[]>();
 

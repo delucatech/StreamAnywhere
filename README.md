@@ -36,6 +36,7 @@ Windows 10 (see **Test results** for exactly what was measured):
 | **YouTube, guest mode**: Shorts by hashtag, search, channels; picture + sound as two files played in sync | **Working** (Node server with yt-dlp) – see **YouTube** |
 | **Facebook** (built 2026-10-15): **Reels** = the latest reels of a rotation of public Pages, read from facebook.com's own pages over plain HTTPS (no browser, no yt-dlp, no sign-in); pasted reel links; **For You** = the account's Reels feed after a cookie sign-in; one progressive 720p MP4 per reel, fetched by the viewer itself (CORS `*`) | **Working** on the VM: Reels (Page tabs) signed out, For You with a real account's cookies (2026-10-27: the feed read through facebook.com's own GraphQL query) – see **Facebook** |
 | **Instagram** (built 2026-10-13): **requires a sign-in** (Instagram serves nobody who is signed out): paste/upload the cookies of a signed-in browser (or a sign-in window on the server machine). **Reels** = the latest Reels of a rotation of big public accounts, **For You** = the account's Reels page, `@handle`/link/account search, profiles; one muxed MP4 per Reel | **Working mechanism, unverified signed in** (cookie parsing, rejection of bad cookies, the account rotation, embed resolving and playback are verified signed out; the signed-in feed awaits a real account) – see **Instagram** |
+| **Live TV** (built 2026-10-28): M3U / M3U8 playlists and Xtream Codes accounts managed in the app's Settings (credentials encrypted on the server), free community playlists built in (iptv-org, Free-TV), a channel browser with provider / group filters, search, logos, favorites and the last channel, a programme guide (XMLTV: the playlist's own, the panel's, or any URL), playback through the server (HLS relayed with the upstream hidden behind encrypted segment tokens; raw MPEG-TS remuxed to HLS with ffmpeg) with clear *loading* / *unavailable* / *unsupported* states | **Working** on the PC (iptv-org US and UK lists, CNN live, the UK guide, a raw MPEG-TS stream through the remux, a DASH channel refused with the reason); an Xtream panel is implemented against the standard API but not yet tried against a real account – see **Live TV** |
 
 ## Repository layout
 
@@ -64,6 +65,7 @@ client/   Vite 4 + TypeScript front end (no framework)
   home.html + src/home/home.ts    the launcher: one app icon per platform (src/platforms.ts), zoom-open animation
   mirror.html + src/mirror/       the Mirror viewer (relay + WebRTC direct link; WebCodecs or MSE decoding), mirror-send.html = a desktop sender
   feed.html + src/feed/feed.ts    the feed page (feed.html?platform=tiktok|youtube|instagram|facebook): stream that follows the finger / mouse and snaps one video at a time (TikTok-like drag), tap-to-pause, auto-scroll, playback speed, download
+  livetv.html + src/livetv/       Live TV: the channel browser + Settings (livetv.ts), the HLS player on a <video> through hls.js (player.ts)
 server/   Fastify 4 + TypeScript (Node 16 compatible)
   src/tiktok.ts                   native TikTok resolver (page JSON) + server-side CORS probe
   src/feed.ts                     Explore feed (unsigned TikTok API) + itemStruct → FeedItem conversion
@@ -76,6 +78,10 @@ server/   Fastify 4 + TypeScript (Node 16 compatible)
   src/ytdlp.ts                    yt-dlp fallback resolver
   src/mirror.ts                   Mirror relay + signalling: /api/mirror/ws (WebSocket), rooms, ICE servers
   src/proxy.ts                    GET/HEAD /api/media/:id streaming relay with Range support
+  src/livetv.ts                   Live TV: providers (encrypted credentials), cached channel lists, favorites, tuning, the routes
+  src/livetvM3u.ts / livetvXtream.ts / livetvEpg.ts   playlist parsing, the Xtream Codes API, XMLTV guides (streamed, windowed)
+  src/livetvStream.ts             the stream relay: HLS rewriting with encrypted segment tokens, ffmpeg remux of raw MPEG-TS, progressive relay
+  src/livetvCrypto.ts / livetvHttp.ts / livetvPresets.ts   AES-256-GCM at rest + tokens, http(s) opener with the private-address check, the community playlists
   src/ssrf.ts                     https-only, host allowlist, private-IP rejection
   src/tests/run.ts                executable checks (offline + live network)
 shared/types.ts                   API types shared by both sides
@@ -112,6 +118,9 @@ Configuration is optional. Copy `.env.example` to `server/.env` (or repo-root `.
 | `FACEBOOK_COOKIES_FILE` | `~/.streamanywhere/facebook-cookies.txt` | the Facebook sign-in (Netscape cookies.txt; treat like a password); `…cookies.meta.json` next to it keeps the paste's User-Agent |
 | `FACEBOOK_CATALOG_FILE` | `~/.streamanywhere/facebook-catalog.json` | each Page's last listed reels (a cache; deleting it is harmless) |
 | `INSTAGRAM_CATALOG_FILE` | `~/.streamanywhere/instagram-catalog.json` | each account's last listed Reels (a cache; deleting it is harmless) |
+| `LIVETV_DIR` | `<dir of TIKTOK_PROFILE_DIR>/livetv` | Live TV providers (`providers.json`, credentials encrypted), preferences, the encrypted channel caches and the parsed guides |
+| `LIVETV_KEY_FILE` / `LIVETV_KEY` | `<dir of TIKTOK_PROFILE_DIR>/livetv-key` | the AES-256 key that encrypts Live TV credentials and channel caches (generated on first use, 0600; `LIVETV_KEY` = 64 hex digits overrides it; losing it loses the saved providers) |
+| `LIVETV_USER_AGENT` | *(the upstream User-Agent)* | the User-Agent sent to IPTV providers |
 | `ENABLE_BROWSER_SESSION` | `1` | set `0` to disable the sign-in feature entirely |
 | `LOG_LEVEL` | `info` | `debug` adds per-request logs |
 
@@ -237,6 +246,7 @@ host's egress IP (then `/api/resolve` fails with "No embedded video JSON" and yt
 and whether the free tier's bandwidth cap matters when the proxy fallback is used a lot.
 
 ### Tests
+The offline checks include Live TV's: M3U parsing, the XMLTV scanner and guide matching, encryption and segment tokens, playlist rewriting, URL redaction, Xtream URL building.
 
 ```bash
 npm test                 # offline checks + live network checks (public MP4 + public TikTok video)
@@ -436,6 +446,98 @@ Browser notes: Safari on iPhone may clear site data (the local videos) after 7 d
 unless the app is on the Home Screen; the page asks for persistent storage where the API exists and
 says in its footer what the browser granted. Removing a library entry deletes the local copies on
 every browser the next time they open the library; deleting a local copy keeps the entry.
+
+## Live TV
+
+The **Live TV** icon on the home screen opens `livetv.html`: the channels of the providers set up
+in its **Settings** (the gear), played in the browser. Providers are shared by every browser of the
+site (the site has one account, its password) and kept on the server.
+
+**Providers** (`server/src/livetv.ts`): two kinds. An **M3U / M3U8 playlist** needs a name and the
+playlist URL; an **Xtream Codes** account needs a name, the panel's URL, a username and a password.
+Both take an optional XMLTV guide URL. Settings lists them with their state (*1,496 channels in 74
+groups · refreshed 5 min ago · guide: 53 channels, 3,028 programmes*), an on / off switch, **Test**
+(fetches the playlist or asks the panel about the account and counts the channels, without saving),
+**Refresh channels**, **Edit** and **Delete**; the add / edit form has the same **Test connection**.
+The **community playlists** section offers the free lists in one tap (`server/src/livetvPresets.ts`:
+iptv-org – the full list, by country, by category – and Free-TV; checked 2026-10-28, the full
+iptv-org list had 11,300 channels; the Pluto TV / Samsung TV Plus / Plex lists of i.mjh.nz are gone,
+their channels are in iptv-org's lists). Whether a channel in such a list is up, allowed from the
+server's country, and in a format the browser plays changes by the hour: the page says so, and the
+player says what it found per channel.
+
+*Storage.* `LIVETV_DIR/providers.json` holds the public fields in the clear and each provider's
+credentials (the playlist URL, which often embeds a token; the panel address, username and password)
+as one AES-256-GCM blob (`server/src/livetvCrypto.ts`; the key is generated on first use into
+`livetv-key` next to the cookie secret, 0600). The cached channel lists (`LIVETV_DIR/channels/<id>.enc`)
+are encrypted too, since Xtream stream URLs embed the account. The page gets a provider's playlist
+URL and username back for the edit form, never the password (`hasPassword`; an empty password on
+save keeps the saved one). The log sees providers by name and URLs redacted (`redactUrl`: the
+`/live/<user>/<password>/` path segments, `username=`/`password=`/`token=` query values, and the
+account's strings themselves are masked). Favorites and the last channel watched are in
+`LIVETV_DIR/prefs.json` (mirrored in the browser's localStorage for an instant first paint).
+
+*Channel lists.* A refresh fetches the playlist (up to 64 MB; `livetvM3u.ts` reads `#EXTINF`
+attributes, `#EXTGRP`, `#EXTVLCOPT` / `#KODIPROP` / `#EXTHTTP` request headers, DRM license props
+– such a channel is listed but marked *DRM* and refused with the reason – and the `url-tvg` guide
+URL) or asks the Xtream panel (`livetvXtream.ts`: `player_api.php` for the account, the live
+categories and the live streams; `xmltv.php` for the guide). Channel ids are stable across refreshes
+(the guide id + name, else the URL, hashed), so favorites survive. Enabled providers whose list is
+older than 12 h are refreshed when the page asks for the state. `GET /api/livetv` (providers,
+preferences; `?rev=N` answers `unchanged`) and `GET /api/livetv/channels` (`?rev=N` likewise) feed
+the page, which polls them.
+
+*Guide* (`server/src/livetvEpg.ts`). XMLTV files run to hundreds of MB uncompressed, so a guide is
+parsed as it streams in (gunzipped on the fly) and only the programmes of the provider's own
+channels from 4 h ago to 40 h ahead are kept, in memory and in `LIVETV_DIR/epg/<id>.epg.json`;
+reloaded after 6 h when asked for. Channels are matched by id (`tvg-id` / `epg_channel_id`, also
+without the `@region` suffix), else by name (lower-cased, quality tags dropped), else by the first
+words of the name (a regional variant such as *BBC One East Midlands* gets the *BBC One Lon HD*
+listing). `GET /api/livetv/guide?keys=…` gives now / next for the channels on screen (the tiles show
+the programme and its progress), `GET /api/livetv/guide/:key` a channel's listing (the player's Guide
+panel). Presets whose epgshare01 guide exists carry it (UK, IT, DE, FR, ES, MX, IN); the US one is gone.
+
+*Playback* (`server/src/livetvStream.ts`, `client/src/livetv/player.ts`). A channel's stream is
+opened by the server, never the browser: IPTV streams are mostly plain http (unloadable from an
+https page), few allow cross-origin requests, and Xtream URLs carry the password. `POST /api/livetv/tune`
+opens the stream once (`openLive`: http or https, any public host – the private-address check of
+`ssrf.ts` on every hop – redirects followed, 15 s) and classifies it by status, Content-Type and
+first bytes:
+
+- an **HLS playlist** is relayed and rewritten: every URI (variant and media playlists, segments,
+  keys, init maps) becomes a same-origin path whose token is the upstream URL AES-GCM-encrypted
+  (deterministic, so a playlist reloaded every few seconds keeps its URLs); the browser sees nothing
+  upstream and cannot forge a relay request. `GET /api/livetv/hls/:key/index.m3u8`, `…/p/:token.m3u8`,
+  `/api/livetv/seg/:key/:token`. Fastify's `maxParamLength` is raised for the tokens;
+- a **raw MPEG-TS** stream (`.ts`, the usual Xtream form) is **remuxed** by ffmpeg into a small live
+  HLS playlist in a temp folder (`-c:v copy`, sound to AAC stereo, 3 s segments, 8 kept; ready after
+  two segments, about 9 s measured), served from `/api/livetv/remux/:key/…` while someone is
+  watching and torn down 45 s after the last request. Without ffmpeg the channel is *unsupported*
+  with that said;
+- a **media file** (MP4 / WebM) is relayed as it is (`/api/livetv/file/:key`, Range forwarded);
+- **MPEG-DASH**, a **web page** (a YouTube / Twitch link in a playlist), **DRM** and unknown formats are
+  *unsupported* with the reason; an HTTP error, nothing, or a timeout is *unavailable* with the
+  status (403 = geo-blocked or refused from the server, 404 = gone…).
+
+The verdict is kept for 5 min per channel. The player is a `<video>` with **hls.js** (MSE: Chromium,
+the Tesla browser, Firefox, desktop Safari) or the native HLS of iPhone Safari – not the canvas
+pipeline, which reads whole MP4 files; live chains are what MSE is for. States: *Tuning…* →
+*Loading…* → playing (controls hide after 3 s; LIVE badge; now / next with progress), or
+*unavailable* / *unsupported* with the message, **Try again**, **Next channel**, **Close**; a fatal
+hls.js network error maps to *unavailable* (with the relay's error text), a media error (one recovery
+attempt first) to *unsupported*; 30 s without progress ends in *unavailable*. Previous / next
+channel follow the browser's current list (buttons, ↑ ↓, a vertical swipe), **F** favorite, **G**
+the guide panel, **M** mute, fullscreen (the theater, or the iPhone's native player).
+
+**Browser** (`client/src/livetv/livetv.ts`): search, a provider dropdown (shown with two or more),
+a *Favorites* switch, group chips with counts (scrollable; the categories of the enabled lists),
+tiles with logo (initials when none), number, DRM mark, star, group · provider, and what is on now;
+the grid renders 120 tiles at a time (*Show more*, and as the page scrolls), with now / next asked
+for the tiles on screen only. *Continue watching* offers the last channel. Settings opens by itself
+on a first visit without providers.
+
+Not done: Xtream VOD / series (live channels only), catch-up / timeshift, DASH playback (dash.js
+would add it), recording.
 
 ## YouTube (guest mode)
 

@@ -19,8 +19,8 @@
  * the decoding happens in the browser (WebCodecs or the <video> fallback). The library list shown
  * offline is the page's own mirror of the server's library (IndexedDB), not a cached API answer.
  */
-const CACHE = 'sa-pages-v3';
-const PAGES = ['/home.html', '/feed.html', '/library.html', '/mirror.html'];
+const CACHE = 'sa-pages-v4';
+const PAGES = ['/home.html', '/feed.html', '/library.html', '/livetv.html', '/mirror.html'];
 const STATIC = ['/icon.svg', '/manifest.webmanifest', '/apple-touch-icon.png'];
 const PAGE_WAIT_MS = 1500;
 

@@ -35,6 +35,13 @@ import type { FeedResponse } from '../../../shared/types';
 import { openUpstream } from '../http';
 import { daemonStatus, detectYtDlp, shutdownYtDlp, ytdlpInfo } from '../ytdlp';
 import type { ResolveResponse } from '../../../shared/types';
+import { parseAttrs, parseM3u, cleanChannelName } from '../livetvM3u';
+import { XmltvScanner, nowNext, parseXmltvTime, resolveGuideId } from '../livetvEpg';
+import { decryptJson, decryptText, encryptJson, encryptText, useEphemeralLiveTvKey } from '../livetvCrypto';
+import { redactUrl } from '../livetvHttp';
+import { mintToken, readToken, rewritePlaylist } from '../livetvStream';
+import { normalizeXtreamServer, xtreamLiveUrl } from '../livetvXtream';
+import { LIVETV_PRESETS } from '../livetvPresets';
 
 const TEST_MP4 = 'https://mdn.github.io/learning-area/html/multimedia-and-embedding/video-and-audio-content/rabbit320.mp4';
 const TIKTOK_URL = process.env.TIKTOK_TEST_URL || 'https://www.tiktok.com/@tiktok/video/7693184538704416031';
@@ -48,6 +55,88 @@ let failures = 0;
 function check(name: string, cond: boolean, detail?: unknown): void {
   console.log(`${cond ? 'PASS' : 'FAIL'}  ${name}${detail !== undefined ? '  -> ' + JSON.stringify(detail) : ''}`);
   if (!cond) failures++;
+}
+
+async function liveTvChecks(): Promise<void> {
+  console.log('\n== 1c. Live TV: M3U parsing');
+  const m3u = `#EXTM3U url-tvg="https://g.example/epg.xml.gz"
+#EXTINF:-1 tvg-id="CNN.us@SD" tvg-logo="https://l.example/cnn.png" group-title="News",CNN (720p) [Geo-blocked]
+https://s.example/cnn/index.m3u8
+#EXTINF:-1 tvg-id="CNN.us@SD" tvg-chno="12" group-title="News",CNN (720p) [Geo-blocked]
+https://s2.example/cnn/index.m3u8
+#EXTVLCOPT:http-user-agent=VLC/3
+#EXTVLCOPT:http-referrer=https://r.example/
+#EXTINF:-1 group-title="Sports, Live",Sports, the channel
+http://plain.example/live.ts
+#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
+#EXTINF:-1,Locked
+https://drm.example/x.mpd
+#EXTGRP:Radio
+#EXTINF:-1,Radio One
+https://radio.example/one
+not-a-url
+`;
+  const pl = parseM3u(m3u);
+  check('channels, guide url, skipped line', pl.channels.length === 5 && pl.epgUrls[0] === 'https://g.example/epg.xml.gz' && pl.skipped === 1, { n: pl.channels.length, epg: pl.epgUrls, skipped: pl.skipped });
+  check('attributes, name, logo, number', pl.channels[0].epgId === 'CNN.us@SD' && pl.channels[0].logo === 'https://l.example/cnn.png' && pl.channels[0].group === 'News' && pl.channels[0].name === 'CNN (720p) [Geo-blocked]' && pl.channels[1].number === 12, pl.channels[0]);
+  check('same id + name twice -> two distinct stable ids', pl.channels[0].id !== pl.channels[1].id && pl.channels[0].id === parseM3u(m3u).channels[0].id);
+  check('VLC options become request headers', pl.channels[2].headers?.['user-agent'] === 'VLC/3' && pl.channels[2].headers?.referer === 'https://r.example/', pl.channels[2].headers);
+  check('a comma inside a quoted group stays; the name keeps its comma', pl.channels[2].group === 'Sports, Live' && pl.channels[2].name === 'Sports, the channel', { g: pl.channels[2].group, n: pl.channels[2].name });
+  check('license props mark DRM; #EXTGRP groups', pl.channels[3].drm === true && pl.channels[4].group === 'Radio');
+  check('clean name drops quality and geo tags', cleanChannelName('CNN HD (720p) [Geo-blocked]') === 'CNN HD' && cleanChannelName('BBC One [Not 24/7]') === 'BBC One');
+  check('attrs parser handles unquoted values', parseAttrs('tvg-id=abc group-title="A B"')['group-title'] === 'A B' && parseAttrs('tvg-id=abc')['tvg-id'] === 'abc');
+
+  console.log('\n== 1d. Live TV: XMLTV guide');
+  const now = Date.parse('2026-10-28T12:00:00Z');
+  const xml = `<?xml version="1.0"?><tv>
+<channel id="BBC.One.Lon.HD.uk"><display-name lang="en">BBC One Lon HD</display-name></channel>
+<channel id="Sky.News.HD.uk"><display-name>Sky News HD</display-name></channel>
+<channel id="Other.uk"><display-name>Other</display-name></channel>
+<programme start="20261028110000 +0000" stop="20261028123000 +0000" channel="BBC.One.Lon.HD.uk"><title lang="en">Bargain &amp; Hunt</title><desc>Lunchtime <![CDATA[antiques]]></desc><category>Game</category></programme>
+<programme start="20261028123000 +0000" stop="20261028130000 +0000" channel="BBC.One.Lon.HD.uk"><title>News at One</title></programme>
+<programme start="20261020000000 +0000" stop="20261020010000 +0000" channel="BBC.One.Lon.HD.uk"><title>Too old</title></programme>
+<programme start="20261028120000 +0100" stop="20261028130000 +0100" channel="Other.uk"><title>Not wanted</title></programme>
+</tv>`;
+  const scanner = new XmltvScanner({ ids: new Set(['SkyNews.uk@HD']), names: new Set(['BBC One East Midlands (720p)', 'Sky News']) }, now);
+  // fed in awkward pieces, as the network would
+  for (let i = 0; i < xml.length; i += 37) scanner.feed(xml.slice(i, i + 37));
+  scanner.finish();
+  check('time parsing with zone', parseXmltvTime('20261028120000 +0100') === Date.parse('2026-10-28T11:00:00Z') && parseXmltvTime('20261028120000 -0500') === Date.parse('2026-10-28T17:00:00Z'));
+  const bbc = scanner.byId['BBC.One.Lon.HD.uk'] || [];
+  check('wanted channel kept, old programme dropped, entities / CDATA decoded', bbc.length === 2 && bbc[0].title === 'Bargain & Hunt' && bbc[0].desc === 'Lunchtime antiques' && bbc[0].category === 'Game', bbc);
+  check('regional variant resolves to the main listing by word prefix', resolveGuideId(scanner, undefined, 'BBC One East Midlands (720p)') === 'BBC.One.Lon.HD.uk');
+  check('name match ignores HD; unmatched stays unmatched', resolveGuideId(scanner, 'SkyNews.uk@HD', 'Sky News') === 'Sky.News.HD.uk' && resolveGuideId(scanner, undefined, 'Nothing Here') === undefined);
+  check('unwanted channel not kept', !scanner.byId['Other.uk'] && scanner.programmes === 2);
+  const nn = nowNext(bbc, now);
+  check('now / next', nn.now?.title === 'Bargain & Hunt' && nn.next?.title === 'News at One', nn);
+
+  console.log('\n== 1e. Live TV: encryption, tokens, playlist rewriting, redaction');
+  useEphemeralLiveTvKey();
+  const blob = encryptJson({ password: 'hunter2' });
+  check('encrypt / decrypt round trip; tampering fails', decryptJson<{ password: string }>(blob)?.password === 'hunter2' && decryptText(blob.slice(0, -2) + 'xx') === undefined && !blob.includes('hunter2'));
+  check('random IV for stored blobs, deterministic for tokens', encryptText('a') !== encryptText('a') && encryptText('a', true) === encryptText('a', true));
+  const tok = mintToken('http://h.example/live/u/p/1.ts');
+  check('segment token round trip, bad token refused', readToken(tok) === 'http://h.example/live/u/p/1.ts' && readToken('v1.x.y.z') === undefined && !/u\/p/.test(tok));
+  const master = `#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000,CODECS="avc1"\nlow/index.m3u8\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",URI="audio/index.m3u8"\n`;
+  const rm = rewritePlaylist(master, 'http://h.example/live/u/p/main.m3u8', 'k:1');
+  check('master: variants and media playlists go to the playlist relay', /\/api\/livetv\/hls\/k%3A1\/p\/v1\.[^\n]+\.m3u8\n/.test(rm) && /URI="\/api\/livetv\/hls\/k%3A1\/p\/v1\./.test(rm) && !rm.includes('h.example'), rm);
+  const media = `#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="k.key"\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:4.0,\nseg1.ts\n#EXTINF:4.0,\nhttps://cdn.example/seg2.ts\n#EXT-X-ENDLIST\n`;
+  const rmedia = rewritePlaylist(media, 'http://h.example/live/u/p/main.m3u8', 'k:1');
+  const segs = rmedia.split('\n').filter((l) => l.startsWith('/api/livetv/seg/'));
+  check('media: segments, keys and init maps go to the segment relay; absolute URLs kept', segs.length === 2 && readToken(segs[0].split('/').pop()!) === 'http://h.example/live/u/p/seg1.ts' && readToken(segs[1].split('/').pop()!) === 'https://cdn.example/seg2.ts' && (rmedia.match(/URI="\/api\/livetv\/seg\//g) || []).length === 2 && rmedia.includes('#EXT-X-ENDLIST'), rmedia);
+  check('redaction: xtream path, query secrets, known strings', redactUrl('http://h.example:8080/live/mario/s3cret/12.ts') === 'http://h.example:8080/live/***/***/12.ts' && redactUrl('http://h.example/get.php?username=mario&password=s3cret&type=m3u') === 'http://h.example/get.php?username=***&password=***&type=m3u' && redactUrl('error about s3cret here', ['s3cret']) === 'error about *** here');
+
+  console.log('\n== 1f. Live TV: Xtream');
+  check('server normalization', normalizeXtreamServer('host.example:8080/player_api.php?username=a') === 'http://host.example:8080' && normalizeXtreamServer('https://host.example/get.php') === 'https://host.example' && normalizeXtreamServer('http://host.example/sub/') === 'http://host.example/sub');
+  check('live url', xtreamLiveUrl({ server: 'http://h.example:8080', username: 'u', password: 'p' }, 12, 'm3u8') === 'http://h.example:8080/live/u/p/12.m3u8');
+  let bad = '';
+  try {
+    normalizeXtreamServer('ftp://x');
+  } catch (e) {
+    bad = (e as Error).message;
+  }
+  check('bad scheme refused', /http/.test(bad));
+  check('presets have distinct ids and https urls', new Set(LIVETV_PRESETS.map((p) => p.id)).size === LIVETV_PRESETS.length && LIVETV_PRESETS.every((p) => p.url.startsWith('https://')));
 }
 
 async function offline(): Promise<void> {
@@ -893,6 +982,7 @@ async function ytdlpChecks(): Promise<void> {
 
 (async () => {
   await offline();
+  await liveTvChecks();
   await downloaderChecks();
   if (skipNetwork) console.log('\n(network checks skipped: SKIP_NETWORK=1)');
   else {
