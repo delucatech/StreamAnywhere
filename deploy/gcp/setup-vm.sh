@@ -108,12 +108,20 @@ fi
 cd "$APP_DIR"
 echo "deploying $(git rev-parse --short HEAD): $(git log -1 --format=%s | cut -c1-80)"
 npm ci --no-audit --no-fund --loglevel=error
-# The Video Downloader merges YouTube's video and audio files with ffmpeg: the ffmpeg-static package
-# downloads a binary during npm ci; Debian's ffmpeg is the fallback when that download failed.
-if [ ! -x "$APP_DIR/node_modules/ffmpeg-static/ffmpeg" ] && ! command -v ffmpeg >/dev/null; then
-  apt-get install -y -qq ffmpeg >/dev/null || echo "WARN: ffmpeg install failed (the Video Downloader cannot merge video and audio)"
+# ffmpeg: Live TV records every channel through it (the browser plays that recording), the Video
+# Downloader merges YouTube's video and audio with it. The ffmpeg-static package downloads a
+# binary during npm ci, but that file can be there and still not run (a partial download, a
+# binary the kernel refuses): the test is running it, not its mode bits. Debian's ffmpeg (5.1 on
+# bookworm, enough for the recorder) is installed whenever no runnable ffmpeg exists; the server
+# tries `ffmpeg` on the PATH before the bundled binary.
+ffmpeg_runs() { "$1" -version >/dev/null 2>&1; }
+if ! ffmpeg_runs "$APP_DIR/node_modules/ffmpeg-static/ffmpeg" && ! ffmpeg_runs ffmpeg; then
+  echo "no runnable ffmpeg (bundled binary broken or missing): installing Debian's"
+  apt-get install -y -qq ffmpeg >/dev/null || echo "WARN: ffmpeg install failed (Live TV channels cannot play; the Video Downloader cannot merge video and audio)"
 fi
-echo "ffmpeg: $("$APP_DIR/node_modules/ffmpeg-static/ffmpeg" -version 2>/dev/null | head -1 || ffmpeg -version 2>/dev/null | head -1 || echo missing)"
+if ffmpeg_runs ffmpeg; then echo "ffmpeg: $(ffmpeg -version 2>/dev/null | head -1) (PATH)"
+elif ffmpeg_runs "$APP_DIR/node_modules/ffmpeg-static/ffmpeg"; then echo "ffmpeg: $("$APP_DIR/node_modules/ffmpeg-static/ffmpeg" -version 2>/dev/null | head -1) (bundled)"
+else echo "ffmpeg: MISSING"; fi
 npm run build 2>&1 | tail -5
 # Builds keep earlier scripts and styles (vite.config.ts emptyOutDir: false) for pages cached on devices; two weeks is plenty.
 find client/dist/assets -type f -mtime +14 -delete 2>/dev/null || true
