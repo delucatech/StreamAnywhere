@@ -28,6 +28,8 @@ export interface PlayerHooks {
   onCaptions(on: boolean): void;
   /** The viewer hid this channel (the hide button, the H key, or from the error message) */
   onHide(ch: LiveTvChannel): void;
+  /** Pause and rewind was turned on / off (the page keeps the setting) */
+  onDvr(on: boolean): void;
   /** The server answered a tune: did the channel open (the page ranks channels that did not) */
   onTuned(ch: LiveTvChannel, ok: boolean): void;
   guide(key: string): Promise<LiveTvChannelGuideResponse>;
@@ -45,6 +47,8 @@ const ICON = {
   close: icon('<path d="M6 6l12 12M18 6L6 18"/>'),
   prev: icon('<path d="M15 5l-7 7 7 7"/>'),
   next: icon('<path d="M9 5l7 7-7 7"/>'),
+  back: icon('<path d="M11 5 4 12l7 7M20 5l-7 7 7 7"/>'),
+  fwd: icon('<path d="M13 5l7 7-7 7M4 5l7 7-7 7"/>'),
   play: icon('<path d="M7 4.5l12 7.5-12 7.5z" fill="currentColor"/>'),
   pause: icon('<path d="M7 5v14M17 5v14" stroke-width="3.2"/>'),
   sound: icon('<path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4 4 0 0 1 0 6"/><path d="M18 6.5a7.5 7.5 0 0 1 0 11"/>'),
@@ -60,6 +64,17 @@ const ICON = {
 };
 
 const fmtClock = (ms: number): string => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+/** 95 -> "1:35", 3725 -> "1:02:05" */
+const fmtDur = (sec: number): string => {
+  const s = Math.max(0, Math.round(sec));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const r = s % 60;
+  return h ? `${h}:${String(m).padStart(2, '0')}:${String(r).padStart(2, '0')}` : `${m}:${String(r).padStart(2, '0')}`;
+};
+const SKIP_SEC = 10;
+/** Closer to the live edge than this counts as live */
+const LIVE_SLACK_SEC = 8;
 const esc = (s: string): string => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 
 export class LiveTvPlayer {
@@ -77,7 +92,10 @@ export class LiveTvPlayer {
   private guideBtn: HTMLButtonElement;
   private playBtn: HTMLButtonElement;
   private muteBtn: HTMLButtonElement;
-  private liveEl: HTMLElement;
+  private liveEl: HTMLButtonElement;
+  private seekRow: HTMLElement;
+  private range: HTMLInputElement;
+  private seekTime: HTMLElement;
   private nowEl: HTMLElement;
   private nextEl: HTMLElement;
   private barEl: HTMLElement;
@@ -99,6 +117,12 @@ export class LiveTvPlayer {
   private unfreezes = 0;
   /** Closed captions shown on the picture (a device setting the page keeps; off by default) */
   captions = false;
+  /** Pause and rewind: the server records the channel (a device setting the page keeps; on by default) */
+  dvr = true;
+  /** How far back the current stream reaches (the server's answer), 0 when unknown */
+  private windowSec = 0;
+  private timelineTimer = 0;
+  private scrubbing = false;
   state: PlayerState = 'idle';
 
   constructor(root: HTMLElement, private readonly hooks: PlayerHooks) {
@@ -122,12 +146,20 @@ export class LiveTvPlayer {
         <button type="button" class="th-btn th-full" aria-label="Fullscreen" title="Fullscreen">${ICON.full}</button>
       </div>
       <div class="th-bottom">
-        <button type="button" class="th-btn th-prev" aria-label="Previous channel" title="Previous channel (↑)">${ICON.prev}</button>
-        <button type="button" class="th-btn th-play" aria-label="Pause" title="Play / pause (Space)">${ICON.pause}</button>
-        <button type="button" class="th-btn th-mute" aria-label="Mute" title="Mute (M)">${ICON.sound}</button>
-        <span class="th-live off">LIVE</span>
-        <div class="th-prog"><div class="th-prog-now"></div><div class="ch-bar hidden"><i></i></div><div class="th-prog-next"></div></div>
-        <button type="button" class="th-btn th-next" aria-label="Next channel" title="Next channel (↓)">${ICON.next}</button>
+        <div class="th-seek hidden">
+          <input type="range" class="th-range" min="0" max="1000" value="1000" step="1" aria-label="Position: drag back to rewind, right to live" />
+          <span class="th-seek-time"></span>
+        </div>
+        <div class="th-controls">
+          <button type="button" class="th-btn th-prev" aria-label="Previous channel" title="Previous channel (↑)">${ICON.prev}</button>
+          <button type="button" class="th-btn th-back" aria-label="Back ${SKIP_SEC} seconds" title="Back ${SKIP_SEC} s (←)">${ICON.back}</button>
+          <button type="button" class="th-btn th-play" aria-label="Pause" title="Play / pause (Space)">${ICON.pause}</button>
+          <button type="button" class="th-btn th-fwd" aria-label="Forward ${SKIP_SEC} seconds" title="Forward ${SKIP_SEC} s (→)">${ICON.fwd}</button>
+          <button type="button" class="th-btn th-mute" aria-label="Mute" title="Mute (M)">${ICON.sound}</button>
+          <button type="button" class="th-live off" title="Jump to live (L)">LIVE</button>
+          <div class="th-prog"><div class="th-prog-now"></div><div class="ch-bar hidden"><i></i></div><div class="th-prog-next"></div></div>
+          <button type="button" class="th-btn th-next" aria-label="Next channel" title="Next channel (↓)">${ICON.next}</button>
+        </div>
       </div>
       <aside class="th-guide" aria-label="Programme guide">
         <div class="th-guide-head"><span>Guide</span><button type="button" class="sh-close th-guideclose" aria-label="Close guide">✕</button></div>
@@ -147,7 +179,10 @@ export class LiveTvPlayer {
     this.guideBtn = q<HTMLButtonElement>('.th-guidebtn');
     this.playBtn = q<HTMLButtonElement>('.th-play');
     this.muteBtn = q<HTMLButtonElement>('.th-mute');
-    this.liveEl = q('.th-live');
+    this.liveEl = q<HTMLButtonElement>('.th-live');
+    this.seekRow = q('.th-seek');
+    this.range = q<HTMLInputElement>('.th-range');
+    this.seekTime = q('.th-seek-time');
     this.nowEl = q('.th-prog-now');
     this.nextEl = q('.th-prog-next');
     this.barEl = q('.th-prog .ch-bar');
@@ -158,6 +193,22 @@ export class LiveTvPlayer {
     q('.th-next').addEventListener('click', () => this.step(1));
     this.playBtn.addEventListener('click', () => this.togglePlay());
     this.big.addEventListener('click', () => this.togglePlay());
+    q('.th-back').addEventListener('click', () => this.seekBy(-SKIP_SEC));
+    q('.th-fwd').addEventListener('click', () => this.seekBy(SKIP_SEC));
+    this.liveEl.addEventListener('click', () => this.goLive());
+    // the seek bar: dragging shows where it would land; letting go seeks there
+    this.range.addEventListener('input', () => {
+      this.scrubbing = true;
+      const w = this.window();
+      if (w) this.seekTime.textContent = this.behindLabel(w.live - (w.start + (Number(this.range.value) / 1000) * (w.live - w.start)));
+    });
+    this.range.addEventListener('change', () => {
+      this.scrubbing = false;
+      const w = this.window();
+      if (w) this.seekTo(w.start + (Number(this.range.value) / 1000) * (w.live - w.start));
+    });
+    this.video.addEventListener('timeupdate', () => this.refreshTimeline());
+    this.video.addEventListener('pause', () => this.refreshTimeline());
     this.muteBtn.addEventListener('click', () => this.toggleMute());
     this.favBtn.addEventListener('click', () => this.toggleFavorite());
     this.ccBtn.addEventListener('click', () => this.setCaptions(!this.captions));
@@ -213,6 +264,9 @@ export class LiveTvPlayer {
     this.items = items;
     this.root.classList.remove('hidden');
     document.body.classList.add('theater-open');
+    // the live edge moves while paused: the bar and the "behind" badge follow it
+    window.clearInterval(this.timelineTimer);
+    this.timelineTimer = window.setInterval(() => this.refreshTimeline(), 1000);
     void this.play(index);
   }
 
@@ -227,6 +281,8 @@ export class LiveTvPlayer {
   close(): void {
     if (!this.isOpen) return;
     this.generation++;
+    window.clearInterval(this.timelineTimer);
+    this.timelineTimer = 0;
     this.stopMedia();
     this.root.classList.add('hidden', 'idle');
     this.root.classList.remove('guide-open');
@@ -262,6 +318,8 @@ export class LiveTvPlayer {
     this.nowEl.textContent = '';
     this.nextEl.textContent = '';
     this.barEl.classList.add('hidden');
+    this.windowSec = 0;
+    this.seekRow.classList.add('hidden');
     this.refreshFavorite();
     this.hooks.onChannel(ch);
     this.setState('tuning');
@@ -271,7 +329,7 @@ export class LiveTvPlayer {
     if (ch.drm) return this.showMessage('unsupported', 'This channel is DRM-protected (the playlist names license keys); it cannot play here.', 'DRM');
     let t: LiveTvTuneResponse;
     try {
-      t = await api.liveTvTune(ch.key);
+      t = await api.liveTvTune(ch.key, this.dvr);
     } catch (e) {
       if (gen !== this.generation) return;
       const m = e instanceof ApiError ? e.message : (e as Error).message;
@@ -280,6 +338,7 @@ export class LiveTvPlayer {
     if (gen !== this.generation) return;
     this.hooks.onTuned(ch, t.state === 'ok' && !!t.playUrl);
     if (t.state !== 'ok' || !t.playUrl) return this.showMessage(t.state === 'unsupported' ? 'unsupported' : 'unavailable', t.message || 'This channel is not available right now.', t.detail);
+    this.windowSec = t.dvr ? t.windowSec || 0 : 0;
     this.setState('loading');
     this.showWait('Loading…');
     this.startMedia(apiUrl(t.playUrl), t.kind === 'progressive', gen);
@@ -292,9 +351,9 @@ export class LiveTvPlayer {
       const hls = new Hls({
         lowLatencyMode: false,
         liveSyncDurationCount: 3,
-        liveMaxLatencyDurationCount: 8,
-        maxBufferLength: 20,
-        backBufferLength: 10,
+        // no liveMaxLatencyDurationCount: a paused or rewound player must not be dragged back to live
+        maxBufferLength: 30,
+        backBufferLength: 30,
         manifestLoadingTimeOut: 20000,
         manifestLoadingMaxRetry: 2,
         levelLoadingTimeOut: 20000,
@@ -556,14 +615,93 @@ export class LiveTvPlayer {
   private togglePlay(): void {
     if (this.state === 'unavailable' || this.state === 'unsupported') return void this.play(this.index);
     if (this.video.paused) {
-      // a live stream paused for a while is behind: jump back to the live edge
-      if (this.hls && this.hls.liveSyncPosition !== null && this.hls.liveSyncPosition !== undefined) this.video.currentTime = this.hls.liveSyncPosition;
+      // resume where it was paused; paused longer than the stream reaches back: from the oldest point kept
+      const w = this.window();
+      if (w && this.video.currentTime < w.start + 1) this.video.currentTime = w.start + 1;
       void this.tryPlay();
       this.setState('loading');
     } else {
       this.video.pause();
       this.big.classList.remove('hidden');
     }
+    this.refreshTimeline();
+  }
+
+  // ---------------------------------------------------------------- pause and rewind
+
+  /** What can be seeked: the oldest point kept, the end of what is buffered, and the live edge. */
+  private window(): { start: number; end: number; live: number } | undefined {
+    const s = this.video.seekable;
+    if (!s.length) return undefined;
+    const start = s.start(0);
+    const end = s.end(s.length - 1);
+    const sync = this.hls?.liveSyncPosition;
+    const live = typeof sync === 'number' && Number.isFinite(sync) && sync > start ? Math.min(sync, end) : end;
+    return live > start ? { start, end, live } : undefined;
+  }
+
+  private seekTo(t: number): void {
+    const w = this.window();
+    if (!w) return;
+    const target = Math.max(w.start + 0.5, Math.min(t, w.live));
+    if (target >= w.live - 0.5) return this.goLive();
+    this.video.currentTime = target;
+    this.showWait('Loading…');
+    if (this.video.paused) void this.tryPlay();
+    this.wake();
+  }
+
+  private seekBy(delta: number): void {
+    this.seekTo(this.video.currentTime + delta);
+  }
+
+  /** Back to the live edge (and playing). */
+  private goLive(): void {
+    const w = this.window();
+    if (!w) return;
+    if (this.video.currentTime < w.live - 0.5) this.video.currentTime = w.live;
+    if (this.video.paused) {
+      void this.tryPlay();
+      this.setState('loading');
+    }
+    this.refreshTimeline();
+    this.wake();
+  }
+
+  /** "−2:35 · 1:58 PM": how far behind live, and the clock time that was (the live edge is now) */
+  private behindLabel(behind: number): string {
+    if (behind < LIVE_SLACK_SEC) return 'Live';
+    return `−${fmtDur(behind)} · ${fmtClock(Date.now() - behind * 1000)}`;
+  }
+
+  /** The seek bar (when the stream reaches back at least 20 s) and the LIVE / "behind" badge follow the player. */
+  private refreshTimeline(): void {
+    if (!this.isOpen || this.state === 'idle' || this.state === 'tuning') return;
+    const w = this.window();
+    if (!w) {
+      this.seekRow.classList.add('hidden');
+      return;
+    }
+    const pos = Math.min(this.video.currentTime, w.live);
+    const behind = Math.max(0, w.live - pos);
+    const span = w.live - w.start;
+    this.seekRow.classList.toggle('hidden', span < 20);
+    if (!this.scrubbing) {
+      this.range.value = String(Math.round(((pos - w.start) / span) * 1000));
+      this.seekTime.textContent = behind < LIVE_SLACK_SEC ? (this.windowSec ? `Live · rewind up to ${fmtDur(Math.min(span, this.windowSec))}` : 'Live') : this.behindLabel(behind);
+    }
+    const isBehind = behind >= LIVE_SLACK_SEC;
+    this.liveEl.textContent = isBehind ? `−${fmtDur(behind)}` : 'LIVE';
+    this.liveEl.classList.toggle('behind', isBehind);
+    this.liveEl.classList.toggle('off', !isBehind && this.state !== 'playing');
+    this.liveEl.title = isBehind ? 'Jump to live (L)' : 'Live';
+  }
+
+  /** Pause and rewind on / off (the page is told, and keeps the setting); applies to the next channel. */
+  setDvr(on: boolean): void {
+    const changed = this.dvr !== on;
+    this.dvr = on;
+    if (changed) this.hooks.onDvr(on);
   }
 
   private toggleMute(): void {
@@ -687,6 +825,15 @@ export class LiveTvPlayer {
       case 'ArrowDown':
       case 'PageDown':
         this.step(1);
+        break;
+      case 'ArrowLeft':
+        this.seekBy(-SKIP_SEC);
+        break;
+      case 'ArrowRight':
+        this.seekBy(SKIP_SEC);
+        break;
+      case 'l':
+        this.goLive();
         break;
       case 'm':
         this.toggleMute();

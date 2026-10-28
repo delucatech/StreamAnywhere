@@ -110,6 +110,8 @@ const PREFS_KEY = 'streamanywhere.livetv.prefs';
 const VIEW_KEY = 'streamanywhere.livetv.view';
 /** Closed captions on the picture: a setting of this device (the Tesla and the phone differ); off until turned on */
 const CAPTIONS_KEY = 'streamanywhere.livetv.captions';
+/** Pause and rewind (the server records the channel): a setting of this device; on until turned off */
+const DVR_KEY = 'streamanywhere.livetv.dvr';
 let state: LiveTvState = { rev: 0, channelsRev: 0, providers: [], prefs: { favorites: [], hidden: [], broken: {} }, remux: false };
 let channels: LiveTvChannel[] = [];
 let channelsRev = -1;
@@ -220,6 +222,14 @@ const player = new LiveTvPlayer(el.theater, {
     }
     if (!el.settingsOverlay.classList.contains('hidden')) renderSettings();
   },
+  onDvr: (on) => {
+    try {
+      localStorage.setItem(DVR_KEY, on ? '1' : '0');
+    } catch {
+      /* ignore */
+    }
+    if (!el.settingsOverlay.classList.contains('hidden')) renderSettings();
+  },
   providerName: (ch) => (state.providers.length > 1 ? providerById(ch.providerId)?.name || '' : ''),
   guide: (key) => api.liveTvGuide(key),
   nowNext: async (key) => {
@@ -231,8 +241,9 @@ const player = new LiveTvPlayer(el.theater, {
 });
 try {
   player.setCaptions(localStorage.getItem(CAPTIONS_KEY) === '1');
+  player.setDvr(localStorage.getItem(DVR_KEY) !== '0');
 } catch {
-  /* off */
+  /* the defaults */
 }
 
 const BROKEN_TITLE = 'Did not play last time';
@@ -324,7 +335,8 @@ async function sync(): Promise<void> {
     if (cr !== channelsRev) {
       const c = await api.liveTvChannels();
       if (!('unchanged' in c)) {
-        channels = c.channels;
+        // an older server build (mid-deploy) answers without `groups`
+        channels = c.channels.map((ch) => (Array.isArray(ch.groups) ? ch : { ...ch, groups: ch.group ? [ch.group] : [] }));
         channelsRev = c.channelsRev;
         player.setItems(visible);
         render();
@@ -707,6 +719,12 @@ function renderSettings(): void {
     )
     .join('');
   const cc = player.captions;
+  const dvr = player.dvr;
+  const dvrNote = !state.remux
+    ? 'Not available: this server has no ffmpeg, so channels play straight from the relay (pausing holds only a few seconds).'
+    : dvr
+      ? 'The server keeps the last 30 minutes of the channel you are watching: pause as long as you like, drag the bar or use ← → to go back, LIVE jumps to now. A setting of this device.'
+      : 'Channels play straight from the relay: they start a couple of seconds sooner, but pausing holds only a few seconds and there is no rewind. A setting of this device.';
   const hiddenRows = [...hidden]
     .map((key) => ({ key, c: channels.find((x) => x.key === key) }))
     .filter((x): x is { key: string; c: LiveTvChannel } => !!x.c)
@@ -723,6 +741,11 @@ function renderSettings(): void {
     : '';
   el.settingsBody.innerHTML = `
     <p class="sh-section">Playback</p>
+    <div class="prov${state.remux ? '' : ' off'}">
+      <div class="prov-head"><span class="prov-name">Pause and rewind</span>
+        <button type="button" class="toggle small${dvr && state.remux ? ' on' : ''}" data-set="dvr" aria-pressed="${dvr && state.remux}" title="${dvr ? 'Turn pause and rewind off' : 'Turn pause and rewind on'}"${state.remux ? '' : ' disabled'}><span class="toggle-dot" aria-hidden="true"></span>${dvr && state.remux ? 'On' : 'Off'}</button></div>
+      <div class="prov-status">${dvrNote}</div>
+    </div>
     <div class="prov">
       <div class="prov-head"><span class="prov-name">Closed captions</span>
         <button type="button" class="toggle small${cc ? ' on' : ''}" data-set="captions" aria-pressed="${cc}" title="${cc ? 'Turn captions off' : 'Turn captions on'}"><span class="toggle-dot" aria-hidden="true"></span>${cc ? 'On' : 'Off'}</button></div>
@@ -745,6 +768,12 @@ el.settingsBody.addEventListener('click', async (e) => {
   if (t.closest('[data-set="captions"]')) {
     player.setCaptions(!player.captions);
     renderSettings();
+    return;
+  }
+  if (t.closest('[data-set="dvr"]')) {
+    player.setDvr(!player.dvr);
+    renderSettings();
+    if (player.isOpen) toast(player.dvr ? 'Pause and rewind is on from the next channel' : 'Off from the next channel');
     return;
   }
   const unhide = t.closest<HTMLElement>('[data-unhide]');

@@ -922,6 +922,12 @@ export interface LiveTvTestResponse {
 
 export interface LiveTvTuneRequest {
   key: string;
+  /**
+   * Pause and rewind: the server records the channel (ffmpeg, a rolling window) and the browser
+   * plays that; false plays HLS channels straight from the relay (a couple of seconds sooner,
+   * pausing holds only what the provider's playlist still lists). Default true.
+   */
+  dvr?: boolean;
 }
 
 export type LiveTvStreamKind = 'hls' | 'remux' | 'progressive';
@@ -939,6 +945,9 @@ export interface LiveTvTuneResponse {
   /** Technical detail (status, content type), for the player's message and the log */
   detail?: string;
   message?: string;
+  /** The stream is recorded on the server: pause and rewind within `windowSec` */
+  dvr?: boolean;
+  windowSec?: number;
   elapsedMs: number;
 }
 

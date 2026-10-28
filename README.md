@@ -514,11 +514,23 @@ first bytes:
   (deterministic, so a playlist reloaded every few seconds keeps its URLs); the browser sees nothing
   upstream and cannot forge a relay request. `GET /api/livetv/hls/:key/index.m3u8`, `…/p/:token.m3u8`,
   `/api/livetv/seg/:key/:token`. Fastify's `maxParamLength` is raised for the tokens;
-- a **raw MPEG-TS** stream (`.ts`, the usual Xtream form) is **remuxed** by ffmpeg into a small live
-  HLS playlist in a temp folder (`-c:v copy`, sound to AAC stereo, 3 s segments, 8 kept; ready after
-  two segments, about 9 s measured), served from `/api/livetv/remux/:key/…` while someone is
-  watching and torn down 45 s after the last request. Without ffmpeg the channel is *unsupported*
-  with that said;
+- a **raw MPEG-TS** stream (`.ts`, the usual Xtream form) is **remuxed** by ffmpeg into a live HLS
+  playlist in a temp folder (`-c:v copy`, sound to AAC stereo, 3 s segments; ready after two
+  segments, about 9 s measured), served from `/api/livetv/remux/:key/…` while someone is watching
+  and torn down 3 min after the last request. Without ffmpeg the channel is *unsupported* with
+  that said;
+- **pause and rewind** (on by default; Settings > Playback, per device): an HLS channel goes through
+  the same ffmpeg recorder (`-c copy` of one variant – `pickVariant`: H.264 before HEVC, the best at
+  or under 1080p / 12 Mbps; with the master and `-map p:N` when the sound is a separate rendition)
+  so that the playlist the browser plays keeps the **last 30 minutes** (600 segments, deleted as
+  they age; disk, not memory: ~400 MB at 1.7 Mbps). Pausing holds the picture as long as that;
+  resuming continues from the pause point; ← → skip 10 s, the seek bar (shown once the stream
+  reaches back 20 s) drags anywhere in the window, **L** or the amber badge (*−2:35*) jumps to live.
+  The price is a slower start (about 7 s measured on CNN against 1 s for the direct relay) and no
+  bitrate adaptation; the recorder failing to start falls back to the direct relay. With the setting
+  off, HLS plays straight from the relay and pausing holds only what the provider's playlist still
+  lists. hls.js is configured without `liveMaxLatencyDurationCount`, so it never drags a paused or
+  rewound player back to live;
 - a **media file** (MP4 / WebM) is relayed as it is (`/api/livetv/file/:key`, Range forwarded);
 - **MPEG-DASH**, a **web page** (a YouTube / Twitch link in a playlist), **DRM** and unknown formats are
   *unsupported* with the reason; an HTTP error, nothing, or a timeout is *unavailable* with the

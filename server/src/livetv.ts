@@ -25,7 +25,7 @@ import { EPG_TTL_MS, epgLoading, epgStore, forgetEpg, loadEpg, nowNext, programm
 import { checkLiveUrl, fetchLiveText, redactUrl, safeHost } from './livetvHttp';
 import { cleanChannelName, countGroups, parseM3u, splitGroups, type M3uChannel } from './livetvM3u';
 import { LIVETV_PRESETS, presetById } from './livetvPresets';
-import { classify, ensureRemux, registerLiveTvStreamRoutes, remuxStats, setLiveTvStreamLogger, shutdownLiveTvStreams, type StreamSource, type Verdict } from './livetvStream';
+import { classify, DVR_WINDOW_SEC, ensureRemux, pickVariant, registerLiveTvStreamRoutes, remuxAvailable, remuxStats, setLiveTvStreamLogger, shutdownLiveTvStreams, type StreamSource, type Verdict } from './livetvStream';
 import { normalizeXtreamServer, xtreamAccount, xtreamEpgUrl, xtreamLiveChannels, xtreamLiveUrl, xtreamSecrets, XtreamError, type XtreamCreds } from './livetvXtream';
 
 export class LiveTvError extends Error {
@@ -685,13 +685,13 @@ function noteTune(key: string, ok: boolean): void {
   prefsChanged();
 }
 
-export async function tune(key: string): Promise<LiveTvTuneResponse> {
-  const r = await tuneChannel(key);
+export async function tune(key: string, dvr = true): Promise<LiveTvTuneResponse> {
+  const r = await tuneChannel(key, dvr);
   noteTune(key, r.state === 'ok');
   return r;
 }
 
-async function tuneChannel(key: string): Promise<LiveTvTuneResponse> {
+async function tuneChannel(key: string, dvr: boolean): Promise<LiveTvTuneResponse> {
   const t0 = Date.now();
   const found = findChannel(key);
   if (!found) throw new LiveTvError('That channel is not in the list any more (the provider changed its playlist?)', 404);
@@ -711,13 +711,36 @@ async function tuneChannel(key: string): Promise<LiveTvTuneResponse> {
       return { key, state: r.kind, detail: r.detail, message: r.message, elapsedMs: Date.now() - t0 };
     }
     v = { kind: r.kind === 'ts' ? 'remux' : r.kind, url: r.url, headers: r.headers, at: Date.now() };
+    if (r.kind === 'hls') {
+      // what the recorder would read: the variant picked here, checked like any upstream URL
+      const input = pickVariant(r.playlist, r.url) || { url: r.url };
+      try {
+        await checkLiveUrl(input.url);
+        v.hlsInput = input;
+      } catch (e) {
+        log(`tune ${p.name} / ${cleanChannelName(c.name)}: no recorder, variant refused: ${(e as Error).message}`);
+      }
+    }
     verdicts.set(key, v);
     detail = r.kind === 'progressive' ? r.contentType : r.kind;
   }
   let playUrl: string;
+  let recorded = false;
+  if (v.kind === 'hls' && dvr && v.hlsInput && (await remuxAvailable())) {
+    // pause and rewind: ffmpeg records the variant into a rolling window; the relay stays the fallback
+    try {
+      playUrl = (await ensureRemux(key, { url: v.hlsInput.url, headers: v.headers, input: 'hls', program: v.hlsInput.program }, src.secrets || [])).playUrl;
+      recorded = true;
+      log(`tune ${p.name} / ${cleanChannelName(c.name)}: recorder on ${v.hlsInput.resolution || '?'} ${v.hlsInput.bandwidth ? Math.round(v.hlsInput.bandwidth / 1000) + ' kbps' : ''}, ${Date.now() - t0} ms`);
+      return { key, state: 'ok', kind: 'remux', playUrl, detail: `hls, recorded${v.hlsInput.resolution ? ' at ' + v.hlsInput.resolution : ''}`, message, dvr: true, windowSec: DVR_WINDOW_SEC, elapsedMs: Date.now() - t0 };
+    } catch (e) {
+      log(`tune ${p.name} / ${cleanChannelName(c.name)}: recorder failed (${(e as Error).message}), relaying instead`);
+    }
+  }
   if (v.kind === 'remux') {
     try {
-      playUrl = (await ensureRemux(key, { url: v.url!, headers: v.headers }, src.secrets || [])).playUrl;
+      playUrl = (await ensureRemux(key, { url: v.url!, headers: v.headers, input: 'ts' }, src.secrets || [])).playUrl;
+      recorded = true;
     } catch (e) {
       verdicts.delete(key);
       const m = (e as Error).message;
@@ -727,7 +750,7 @@ async function tuneChannel(key: string): Promise<LiveTvTuneResponse> {
   } else if (v.kind === 'progressive') playUrl = `/api/livetv/file/${encodeURIComponent(key)}`;
   else playUrl = `/api/livetv/hls/${encodeURIComponent(key)}/index.m3u8`;
   log(`tune ${p.name} / ${cleanChannelName(c.name)}: ${v.kind} from ${safeHost(v.url || '')}, ${Date.now() - t0} ms`);
-  return { key, state: 'ok', kind: v.kind, playUrl, detail, message, elapsedMs: Date.now() - t0 };
+  return { key, state: 'ok', kind: v.kind, playUrl, detail, message, dvr: recorded, windowSec: recorded ? DVR_WINDOW_SEC : undefined, elapsedMs: Date.now() - t0 };
 }
 
 // ---------------------------------------------------------------- preferences
@@ -842,7 +865,7 @@ export function registerLiveTv(app: FastifyInstance): void {
     try {
       const key = String(req.body?.key || '');
       if (!key) throw new LiveTvError('Which channel?');
-      return await tune(key);
+      return await tune(key, req.body?.dvr !== false);
     } catch (e) {
       return fail(reply, e);
     }

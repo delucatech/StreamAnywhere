@@ -200,7 +200,7 @@ export const api = {
   liveTvRefreshProvider: (id: string): Promise<LiveTvState> => post(`/api/livetv/providers/${id}/refresh`, {}),
   /** A connection test of a form being filled in, or of a saved provider (its id): up to a minute for a big playlist */
   liveTvTest: (req: LiveTvTestRequest): Promise<LiveTvTestResponse> => post('/api/livetv/providers/test', req, 90_000),
-  liveTvTune: (key: string): Promise<LiveTvTuneResponse> => post('/api/livetv/tune', { key }, 60_000),
+  liveTvTune: (key: string, dvr = true): Promise<LiveTvTuneResponse> => post('/api/livetv/tune', { key, dvr }, 60_000),
   liveTvPrefs: (patch: LiveTvPrefsPatch): Promise<LiveTvPrefs> => post('/api/livetv/prefs', patch),
   liveTvGuideNow: (keys: string[]): Promise<LiveTvGuideNowResponse> => getJson(`/api/livetv/guide?keys=${encodeURIComponent(keys.join(','))}`),
   liveTvGuide: (key: string): Promise<LiveTvChannelGuideResponse> => getJson(`/api/livetv/guide/${encodeURIComponent(key)}`),

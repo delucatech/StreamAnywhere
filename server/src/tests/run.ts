@@ -39,7 +39,7 @@ import { parseAttrs, parseM3u, cleanChannelName, countGroups, splitGroups } from
 import { XmltvScanner, nowNext, parseXmltvTime, resolveGuideId } from '../livetvEpg';
 import { decryptJson, decryptText, encryptJson, encryptText, useEphemeralLiveTvKey } from '../livetvCrypto';
 import { redactUrl } from '../livetvHttp';
-import { mintToken, readToken, rewritePlaylist } from '../livetvStream';
+import { mintToken, pickVariant, readToken, remuxArgs, rewritePlaylist } from '../livetvStream';
 import { normalizeXtreamServer, xtreamLiveUrl } from '../livetvXtream';
 import { LIVETV_PRESETS } from '../livetvPresets';
 
@@ -126,6 +126,25 @@ not-a-url
   const rmedia = rewritePlaylist(media, 'http://h.example/live/u/p/main.m3u8', 'k:1');
   const segs = rmedia.split('\n').filter((l) => l.startsWith('/api/livetv/seg/'));
   check('media: segments, keys and init maps go to the segment relay; absolute URLs kept', segs.length === 2 && readToken(segs[0].split('/').pop()!) === 'http://h.example/live/u/p/seg1.ts' && readToken(segs[1].split('/').pop()!) === 'https://cdn.example/seg2.ts' && (rmedia.match(/URI="\/api\/livetv\/seg\//g) || []).length === 2 && rmedia.includes('#EXT-X-ENDLIST'), rmedia);
+  const big = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=96000,CODECS="mp4a.40.2"
+audio-only/index.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720,CODECS="avc1.4d401f,mp4a.40.2"
+720/index.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080,CODECS="avc1.640028,mp4a.40.2"
+1080/index.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=18000000,RESOLUTION=3840x2160,CODECS="hvc1.2.4.L153.b0,mp4a.40.2"
+2160/index.m3u8
+`;
+  const pv = pickVariant(big, 'http://h.example/live/main.m3u8');
+  check('variant pick: the best H.264 at or under 1080p / 12 Mbps, not audio-only, not 4K HEVC', pv?.url === 'http://h.example/live/1080/index.m3u8' && pv.program === undefined && pv.resolution === '1080p' && pv.bandwidth === 6000000, pv);
+  const rend = `#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",NAME="English",URI="audio/en.m3u8"\n#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,AUDIO="aac"\nv0.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720,AUDIO="aac"\nv1.m3u8\n`;
+  const pr = pickVariant(rend, 'http://h.example/live/main.m3u8');
+  check('variant pick: separate audio rendition -> the master and the program index', pr?.url === 'http://h.example/live/main.m3u8' && pr.program === 1, pr);
+  check('variant pick: all too big -> the lightest; a media playlist -> none', pickVariant('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=20000000,RESOLUTION=3840x2160\na.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=15000000,RESOLUTION=3840x2160\nb.m3u8\n', 'http://h.example/x.m3u8')?.url === 'http://h.example/b.m3u8' && pickVariant(media, 'http://h.example/m.m3u8') === undefined);
+  const ra = remuxArgs({ url: 'http://h.example/live/main.m3u8', input: 'hls', program: 1, headers: { referer: 'http://r.example/' } }, '/tmp/x').join(' ');
+  const rb = remuxArgs({ url: 'http://h.example/live/1.ts', input: 'ts' }, '/tmp/x').join(' ');
+  check('recorder args: HLS copies both streams by program with a 30 min window; TS re-encodes the sound', / -map p:1 -sn -dn /.test(ra) && / -c:a copy /.test(ra) && / -hls_list_size 600 /.test(ra) && / -allowed_extensions ALL /.test(ra) && /-headers referer: http:\/\/r.example\//.test(ra) && / -map 0:v:0\? -map 0:a:0\? /.test(rb) && / -c:a aac /.test(rb) && !/allowed_extensions/.test(rb), { ra, rb });
   check('redaction: xtream path, query secrets, known strings', redactUrl('http://h.example:8080/live/mario/s3cret/12.ts') === 'http://h.example:8080/live/***/***/12.ts' && redactUrl('http://h.example/get.php?username=mario&password=s3cret&type=m3u') === 'http://h.example/get.php?username=***&password=***&type=m3u' && redactUrl('error about s3cret here', ['s3cret']) === 'error about *** here');
 
   console.log('\n== 1f. Live TV: Xtream');

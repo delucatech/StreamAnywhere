@@ -7,9 +7,13 @@
  *      HLS playlist      -> relayed and rewritten: every URI in it (variants, segments, keys, init
  *                           maps) becomes a same-origin path whose token is the upstream URL
  *                           encrypted (livetvCrypto), so nothing upstream is visible or forgeable;
- *      raw MPEG-TS       -> ffmpeg turns it into a small live HLS playlist in a temp folder
- *                           (video copied, sound to AAC; a "remux"), served from there while
- *                           someone is watching, torn down 45 s after the last request;
+ *      raw MPEG-TS       -> ffmpeg turns it into a live HLS playlist in a temp folder (video
+ *                           copied, sound to AAC; a "remux"), served from there while someone is
+ *                           watching, torn down 3 min after the last request. The playlist keeps
+ *                           the last DVR_WINDOW_SEC: pause and rewind within it ("pause and
+ *                           rewind"); an HLS channel goes through the same recorder when the
+ *                           viewer wants that (one variant, picked here: pickVariant), else it
+ *                           is relayed as below;
  *      a media file      -> relayed as it is (Range forwarded);
  *      DASH, a web page, DRM, anything else -> "unsupported", with the reason;
  *      an error, nothing, a timeout -> "unavailable".
@@ -170,10 +174,111 @@ export function rewritePlaylist(text: string, baseUrl: string, key: string): str
   return out.join('\n') + '\n';
 }
 
-// ---------------------------------------------------------------- the remux (ffmpeg: MPEG-TS -> HLS)
+// ---------------------------------------------------------------- the variant of a master playlist to record
+
+export interface HlsInput {
+  /** The media playlist (or the master, when the variant's sound is a separate rendition) */
+  url: string;
+  /** With the master: the variant's index among its #EXT-X-STREAM-INF entries (ffmpeg's program id) */
+  program?: number;
+  bandwidth?: number;
+  resolution?: string;
+}
+
+const VARIANT_MAX_HEIGHT = 1080;
+const VARIANT_MAX_BPS = 12_000_000;
+
+/**
+ * The variant of a master playlist the recorder should read: a video variant, H.264 before HEVC
+ * (which not every browser decodes), the highest bandwidth at or under 1080p and 12 Mbps when
+ * there is one, else the lightest of the rest. A media playlist (no variants) gives undefined.
+ * When the variant's audio is a separate rendition (#EXT-X-MEDIA with a URI), ffmpeg needs the
+ * master and the program index to pick the pair; else the media playlist itself.
+ */
+export function pickVariant(master: string, baseUrl: string): HlsInput | undefined {
+  const lines = master.split(/\r?\n/).map((l) => l.trim());
+  const audioGroupsWithUri = new Set<string>();
+  for (const l of lines) {
+    if (!l.startsWith('#EXT-X-MEDIA:')) continue;
+    const a = attrsOf(l.slice(13));
+    if ((a.TYPE || '').toUpperCase() === 'AUDIO' && a.URI && a['GROUP-ID']) audioGroupsWithUri.add(a['GROUP-ID']);
+  }
+  type V = { index: number; uri: string; bandwidth: number; height: number; avc: boolean; video: boolean; audioGroup?: string };
+  const variants: V[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].startsWith('#EXT-X-STREAM-INF:')) continue;
+    const a = attrsOf(lines[i].slice(18));
+    let uri = '';
+    for (let j = i + 1; j < lines.length; j++) {
+      if (!lines[j]) continue;
+      if (!lines[j].startsWith('#')) uri = lines[j];
+      break;
+    }
+    if (!uri) continue;
+    const codecs = (a.CODECS || '').toLowerCase();
+    const res = /^(\d+)x(\d+)$/.exec(a.RESOLUTION || '');
+    variants.push({
+      index: variants.length,
+      uri,
+      bandwidth: Number(a.BANDWIDTH || a['AVERAGE-BANDWIDTH']) || 0,
+      height: res ? Number(res[2]) : 0,
+      avc: !codecs || /avc1|avc3/.test(codecs),
+      // codecs naming only audio (mp4a / ac-3 / ec-3) = an audio-only variant
+      video: !codecs || /avc1|avc3|hvc1|hev1|av01|vp09|dvh1|dvhe/.test(codecs) || !!res,
+      audioGroup: a.AUDIO,
+    });
+  }
+  if (!variants.length) return undefined;
+  const withVideo = variants.filter((v) => v.video);
+  const pool = withVideo.length ? withVideo : variants;
+  const fits = (v: V): boolean => (!v.height || v.height <= VARIANT_MAX_HEIGHT) && (!v.bandwidth || v.bandwidth <= VARIANT_MAX_BPS);
+  const prefer = pool.filter((v) => v.avc && fits(v));
+  const fallback = pool.filter((v) => fits(v));
+  let pick: V;
+  if (prefer.length) pick = prefer.reduce((a, b) => (b.bandwidth > a.bandwidth ? b : a));
+  else if (fallback.length) pick = fallback.reduce((a, b) => (b.bandwidth > a.bandwidth ? b : a));
+  else pick = pool.reduce((a, b) => (b.bandwidth && b.bandwidth < a.bandwidth ? b : a));
+  const abs = (uri: string): string => {
+    try {
+      return new URL(uri, baseUrl).toString();
+    } catch {
+      return uri;
+    }
+  };
+  const separateAudio = !!pick.audioGroup && audioGroupsWithUri.has(pick.audioGroup);
+  const out: HlsInput = separateAudio ? { url: baseUrl, program: pick.index } : { url: abs(pick.uri) };
+  if (pick.bandwidth) out.bandwidth = pick.bandwidth;
+  if (pick.height) out.resolution = `${pick.height}p`;
+  return out;
+}
+
+/** KEY=VALUE,KEY="quoted, value" attribute lists of #EXT-X-STREAM-INF / #EXT-X-MEDIA */
+function attrsOf(s: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const re = /([A-Z0-9-]+)=("([^"]*)"|([^,]*))/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(s))) out[m[1]] = (m[3] ?? m[4] ?? '').trim();
+  return out;
+}
+
+// ---------------------------------------------------------------- the remux / recorder (ffmpeg -> HLS with a window)
+
+export interface RemuxSource {
+  url: string;
+  headers?: Record<string, string>;
+  /** a raw MPEG-TS stream (sound re-encoded to AAC), or an HLS playlist (streams copied) */
+  input: 'ts' | 'hls';
+  /** HLS with the master: the variant to read (see pickVariant) */
+  program?: number;
+}
+
+/** How far back the recorder's playlist reaches: pause and rewind within it */
+export const DVR_WINDOW_SEC = 30 * 60;
+const SEGMENT_SEC = 3;
 
 interface RemuxSession {
   key: string;
+  input: RemuxSource['input'];
   dir: string;
   proc: ChildProcess;
   startedAt: number;
@@ -183,37 +288,53 @@ interface RemuxSession {
   stderr: string[];
 }
 const sessions = new Map<string, RemuxSession>();
-const REMUX_IDLE_MS = 45_000;
+/**
+ * Nobody asked for the playlist for this long: stop. A paused player keeps reloading the live
+ * playlist (so its window keeps growing), but a browser in a background tab is throttled to a
+ * timer a minute, hence minutes rather than seconds.
+ */
+const REMUX_IDLE_MS = 3 * 60_000;
 const REMUX_READY_MS = 30_000;
 const safeDirName = (key: string): string => key.replace(/[^\w.-]/g, '_').slice(0, 80);
 const remuxRoot = (): string => path.join(os.tmpdir(), 'streamanywhere-livetv');
 
 const segmentsIn = (playlist: string): number => (playlist.match(/#EXTINF/g) || []).length;
 
-async function startRemux(key: string, src: { url: string; headers?: Record<string, string> }, ffmpeg: string, secrets: string[]): Promise<RemuxSession> {
-  const dir = path.join(remuxRoot(), safeDirName(key));
-  fs.rmSync(dir, { recursive: true, force: true });
-  fs.mkdirSync(dir, { recursive: true });
+/** The ffmpeg arguments of a recorder (exported for the checks) */
+export function remuxArgs(src: RemuxSource, dir: string): string[] {
   const headerLines = Object.entries(src.headers || {})
     .filter(([k]) => k !== 'user-agent')
     .map(([k, v]) => `${k}: ${v}\r\n`)
     .join('');
-  const args = [
+  const hls = src.input === 'hls';
+  return [
     '-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
     '-user_agent', src.headers?.['user-agent'] || LIVETV_USER_AGENT,
     ...(headerLines ? ['-headers', headerLines] : []),
+    // segments named .php / .html / nothing at all are common in IPTV lists
+    ...(hls ? ['-allowed_extensions', 'ALL'] : []),
     '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5',
-    '-fflags', '+genpts+discardcorrupt', '-analyzeduration', '3000000', '-probesize', '3000000',
+    '-fflags', '+genpts+discardcorrupt',
+    // an HLS input starts a few segments behind live: one segment is enough to see the streams
+    '-analyzeduration', hls ? '2000000' : '3000000', '-probesize', hls ? '2000000' : '3000000',
     '-i', src.url,
-    '-map', '0:v:0?', '-map', '0:a:0?',
-    '-c:v', 'copy', '-c:a', 'aac', '-ac', '2', '-b:a', '128k',
-    '-f', 'hls', '-hls_time', '3', '-hls_list_size', '8',
-    '-hls_flags', 'delete_segments+omit_endlist+independent_segments+temp_file',
+    ...(hls && src.program !== undefined ? ['-map', `p:${src.program}`, '-sn', '-dn'] : ['-map', '0:v:0?', '-map', '0:a:0?']),
+    // HLS carries AAC already (what a browser plays); a raw TS may carry MP2 / AC-3: to AAC
+    '-c:v', 'copy', ...(hls ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-ac', '2', '-b:a', '128k']),
+    '-f', 'hls', '-hls_time', String(SEGMENT_SEC), '-hls_list_size', String(Math.ceil(DVR_WINDOW_SEC / SEGMENT_SEC)),
+    '-hls_flags', 'delete_segments+omit_endlist+independent_segments+temp_file+program_date_time',
     '-hls_segment_filename', path.join(dir, 'seg%05d.ts'),
     path.join(dir, 'index.m3u8'),
   ];
+}
+
+async function startRemux(key: string, src: RemuxSource, ffmpeg: string, secrets: string[]): Promise<RemuxSession> {
+  const dir = path.join(remuxRoot(), safeDirName(key));
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  const args = remuxArgs(src, dir);
   const proc = spawn(ffmpeg, args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
-  const s: RemuxSession = { key, dir, proc, startedAt: Date.now(), lastHit: Date.now(), ready: Promise.resolve(), stderr: [] };
+  const s: RemuxSession = { key, input: src.input, dir, proc, startedAt: Date.now(), lastHit: Date.now(), ready: Promise.resolve(), stderr: [] };
   proc.stderr?.on('data', (d: Buffer) => {
     for (const line of d.toString().split(/\r?\n/)) {
       if (!line.trim()) continue;
@@ -248,7 +369,7 @@ async function startRemux(key: string, src: { url: string; headers?: Record<stri
     tick();
   });
   sessions.set(key, s);
-  log(`remux ${key}: ffmpeg started for ${safeHost(src.url)}`);
+  log(`remux ${key}: ffmpeg started for ${safeHost(src.url)} (${src.input}${src.program !== undefined ? ` program ${src.program}` : ''})`);
   return s;
 }
 
@@ -266,12 +387,12 @@ function stopRemux(s: RemuxSession, why: string): void {
 }
 
 /** The remux of a channel, started if not running; resolves once two segments exist. */
-export async function ensureRemux(key: string, src: { url: string; headers?: Record<string, string> }, secrets: string[]): Promise<{ playUrl: string }> {
+export async function ensureRemux(key: string, src: RemuxSource, secrets: string[]): Promise<{ playUrl: string }> {
   const ff = await detectFfmpeg();
   if (!ff.available || !ff.path) throw new Error('This channel is a raw MPEG-TS stream, which needs ffmpeg on the server to play in a browser; ffmpeg is not installed there.');
   let s = sessions.get(key);
-  if (s && s.exited) {
-    stopRemux(s, 'restarting after an exit');
+  if (s && (s.exited || s.input !== src.input)) {
+    stopRemux(s, s.exited ? 'restarting after an exit' : 'the source changed');
     s = undefined;
   }
   if (!s) s = await startRemux(key, src, ff.path, secrets);
@@ -302,7 +423,14 @@ export function shutdownLiveTvStreams(): void {
 // ---------------------------------------------------------------- routes
 
 export type ResolveSource = (key: string) => Promise<StreamSource | undefined>;
-export type Verdict = { kind: LiveTvStreamKind; url?: string; headers?: Record<string, string>; at: number };
+export type Verdict = {
+  kind: LiveTvStreamKind;
+  url?: string;
+  headers?: Record<string, string>;
+  at: number;
+  /** HLS: what the recorder reads for pause and rewind (the variant, or the master + program) */
+  hlsInput?: HlsInput;
+};
 
 /** Relays one upstream resource (segment, key, init map, or a whole file) to the browser. */
 async function relay(req: FastifyRequest, reply: FastifyReply, url: string, headers: Record<string, string> | undefined, secrets: string[], what: string): Promise<unknown> {
@@ -419,7 +547,7 @@ export function registerLiveTvStreamRoutes(app: FastifyInstance, resolveSource: 
   app.get<{ Params: { key: string; file: string } }>('/api/livetv/remux/:key/:file', async (req, reply) => {
     const s = sessions.get(req.params.key);
     if (!s) return reply.code(404).send({ error: 'This channel is not being remuxed any more: tune it again' });
-    if (!/^(index\.m3u8|seg\d{5}\.ts)$/.test(req.params.file)) return reply.code(400).send({ error: 'Bad file name' });
+    if (!/^(index\.m3u8|seg\d{5,}\.ts)$/.test(req.params.file)) return reply.code(400).send({ error: 'Bad file name' });
     s.lastHit = Date.now();
     const file = path.join(s.dir, req.params.file);
     if (req.params.file === 'index.m3u8') {
