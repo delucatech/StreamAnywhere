@@ -28,7 +28,7 @@ import { Reservoir, expiredSoon } from '../reservoir';
 import { lastFeedDir, rememberBatch, resetLastBatches, staleBatch } from '../lastBatch';
 import { invalidateJobs, jobsDir, resetJobs, sharedJob } from '../jobs';
 import { buildOptions, downloadSourceOf, saveName } from '../downloader';
-import { canonicalize, fileExtOf, normalizeUrl } from '../library';
+import { canonicalize, cleanHint, fileExtOf, normalizeUrl } from '../library';
 import { parseFfmpegInfo, planConversion } from '../ffmpeg';
 import type { FeedItem } from '../../../shared/types';
 import type { FeedResponse } from '../../../shared/types';
@@ -471,6 +471,14 @@ At least one output file must be specified`);
     noVideo = (e as Error).message;
   }
   check('a file without video is refused', /no video stream/.test(noVideo), noVideo);
+
+  console.log('\n== 2e. Save from the feed: the details the feed sends with the link (LibrarySaveRequest.hint)');
+  const hint = cleanHint({ title: '  A title  ', author: 'someone', duration: 14, width: 576, height: 768, cover: 'https://p16-sign.tiktokcdn.com/x.jpeg?x-expires=1' });
+  check('a feed hint is kept field by field, the title trimmed', hint?.title === 'A title' && hint.author === 'someone' && hint.duration === 14 && hint.width === 576 && hint.height === 768 && hint.cover === 'https://p16-sign.tiktokcdn.com/x.jpeg?x-expires=1', hint);
+  const bad = cleanHint({ title: '', author: 42, duration: -1, width: 'wide', cover: '/api/library/thumb/x', extra: 'ignored' });
+  check('an empty or wrong-typed hint is dropped (a relative cover too)', bad === undefined, bad);
+  check('no hint, no object', cleanHint(undefined) === undefined && cleanHint('x') === undefined && cleanHint({}) === undefined);
+  check('a long title is cut to 300', cleanHint({ title: 'x'.repeat(400) })?.title?.length === 300);
 }
 
 async function jobChecks(): Promise<void> {

@@ -12,7 +12,7 @@ import { registerProxyRoutes } from './proxy';
 import { isTikTokUrl, probeUrl, resolveTikTokNative, TikTokError } from './tiktok';
 import { detectFfmpeg } from './ffmpeg';
 import { cancelJob, DOWNLOAD_SOURCES, DownloadError, downloaderStats, getJob, jobFile, jobServed, MAX_BYTES, probeDownload, setDownloaderLogger, shutdownDownloader, startDownload } from './downloader';
-import { addCategory, deleteCategory, deleteEntry, deleteFile, entryOptions, flushLibrary, LibraryError, libraryState, libraryStats, patchEntry, refreshEntry, renameCategory, saveLink, setLibraryLogger, thumbFile } from './library';
+import { addCategory, cleanHint, deleteCategory, deleteEntry, deleteFile, entryOptions, flushLibrary, LibraryError, libraryState, libraryStats, patchEntry, refreshEntry, renameCategory, saveLink, setLibraryLogger, thumbFile } from './library';
 import { cancelImport, dismissImport, fileInfo, importLink, importStats, resumeImports, startImport, sweepFiles } from './libraryFiles';
 import { daemonStatus, detectYtDlp, resolveWithYtDlp, setYtDlpLogger, shutdownYtDlp, warmYtDlp } from './ytdlp';
 import { logStream, recentLog } from './logbuf';
@@ -863,7 +863,7 @@ export async function buildServer() {
   });
   app.post<{ Body: LibrarySaveRequest }>('/api/library', resolveLimit, async (req, reply) => {
     try {
-      const r = saveLink(String(req.body?.url || ''), Array.isArray(req.body?.categoryIds) ? req.body!.categoryIds!.map(String) : []);
+      const r = saveLink(String(req.body?.url || ''), Array.isArray(req.body?.categoryIds) ? req.body!.categoryIds!.map(String) : [], { hint: cleanHint(req.body?.hint) });
       return { ...r, state: libraryState() };
     } catch (e) {
       return libraryError(reply, e);
@@ -925,7 +925,7 @@ export async function buildServer() {
   // ---- "Download to library": the video fetched to the server once (converted to MP4 when needed), served to every browser
   app.post<{ Body: LibrarySaveRequest }>('/api/library/import', resolveLimit, async (req, reply) => {
     try {
-      const r = importLink(String(req.body?.url || ''), Array.isArray(req.body?.categoryIds) ? req.body!.categoryIds!.map(String) : []);
+      const r = importLink(String(req.body?.url || ''), Array.isArray(req.body?.categoryIds) ? req.body!.categoryIds!.map(String) : [], cleanHint(req.body?.hint));
       return { ...r, state: libraryState() };
     } catch (e) {
       return libraryError(reply, e);

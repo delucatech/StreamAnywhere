@@ -19,7 +19,12 @@
  *  - Search (top bar) and account profiles (social.ts) hand the feed a play list: search results
  *    or an account's videos then play in place of the source, with a pill to go back. The video
  *    pauses while any panel (search, profile, inbox, sign-in) covers the feed and resumes on close.
- *  - Download: fetches the cookie-free CDN URL (CORS *) as a blob and saves it as @author_id.mp4;
+ *  - Save (D): a choice between the Video Library and a file on this device. "Save to library"
+ *    adds the video's link and details to the shared library (library.html: the server keeps the
+ *    link and fetches its own copy, as "Download to library" does there) and, when the video comes
+ *    as one file, writes the bytes this page has (the media cache, else a fresh fetch) into the
+ *    library's own store on this device, so it plays there at once, offline too. "Download to this
+ *    device" fetches the cookie-free CDN URL (CORS *) as a blob and saves it as @author_id.mp4;
  *    falls back to the server proxy when the direct fetch fails.
  *
  * Playback is canvas-only (see player.ts): the WebCodecs pipeline (fetch → mp4box → VideoDecoder →
@@ -36,6 +41,8 @@ import type { FeedAuthor, FeedItem, FeedSource, FollowState, LoginMode, MediaFor
 import { api, ApiError, apiUrl } from '../api';
 import { pressed } from '../busy';
 import type { MediaPrefix } from '../media/demuxer';
+import { canSaveFiles, hasIndexedDb } from '../library/capabilities';
+import * as libdb from '../library/db';
 import { currentPlatform, PLATFORMS, rememberApp, type PlatformDef } from '../platforms';
 import { fileKey, getCached, itemKey, MAX_AGE as CACHE_MAX_AGE, overBudget, putCached, sweep, type CacheRole } from './mediaCache';
 import { FeedPlayer, feedPlayerMode } from './player';
@@ -84,6 +91,13 @@ const el = {
   actMuteIco: $('actMuteIco'),
   actDownload: $<HTMLButtonElement>('actDownload'),
   actDownloadIco: $('actDownloadIco'),
+  save: $('save'),
+  saveCard: $('saveCard'),
+  saveWhat: $('saveWhat'),
+  saveLibrary: $<HTMLButtonElement>('saveLibrary'),
+  saveLibraryNote: $('saveLibraryNote'),
+  saveDevice: $<HTMLButtonElement>('saveDevice'),
+  saveCancel: $<HTMLButtonElement>('saveCancel'),
   actAuto: $<HTMLButtonElement>('actAuto'),
   actAutoLabel: $('actAutoLabel'),
   actFull: $<HTMLButtonElement>('actFull'),
@@ -474,7 +488,7 @@ renderSourceUi();
 el.actMute.addEventListener('click', () => toggleMute());
 el.actDownload.addEventListener('click', () => {
   const cur = activeEntry();
-  if (cur) void download(cur);
+  if (cur) download(cur);
 });
 el.actAuto.addEventListener('click', () => toggleAutoscroll());
 el.actFull.addEventListener('click', () => toggleFullscreen());
@@ -2448,62 +2462,215 @@ function toggleMute(): void {
   toast(prefs.muted ? 'Muted' : 'Sound on');
 }
 
-// ---------- download ----------
-async function download(entry: Entry): Promise<void> {
+// ---------- save: to the library, or a file on this device ----------
+/** The entry the Save dialog is open for */
+let saveFor: Entry | undefined;
+function saveMenuOpen(): boolean {
+  return !el.save.classList.contains('hidden');
+}
+/** The Save action / D: asks where the video goes (the dialog closes on a choice, Cancel, Esc or a tap outside). */
+function download(entry: Entry): void {
+  if (saveMenuOpen()) return closeSaveMenu();
+  if (el.actDownload.classList.contains('busy')) return toast('A save is still running: one video at a time');
+  const item = entry.item;
+  const cands = sourceCandidates(item);
+  if (!cands.length && !item.canonicalUrl) return toast('No downloadable URL for this video', true);
+  saveFor = entry;
+  const who = item.author.uniqueId ? `@${item.author.uniqueId}` : item.author.nickname || P.name;
+  el.saveWhat.textContent = item.desc?.trim() ? `${who} · ${item.desc.trim()}` : who;
+  el.saveLibrary.disabled = !item.canonicalUrl;
+  el.saveLibraryNote.textContent = cands[0]?.audioUrl
+    ? 'Kept in your Video Library: the server fetches picture and sound · watch it any time, on every device'
+    : 'Kept in your Video Library, on the server and on this device · watch it any time';
+  el.saveDevice.classList.toggle('hidden', !canSaveFiles);
+  el.saveDevice.disabled = !cands.length;
+  el.save.classList.remove('hidden');
+  (el.saveLibrary.disabled ? el.saveDevice : el.saveLibrary).focus();
+}
+function closeSaveMenu(): void {
+  el.save.classList.add('hidden');
+  saveFor = undefined;
+  el.feed.focus();
+}
+el.save.addEventListener('click', (e) => {
+  if (e.target === el.save) closeSaveMenu();
+});
+el.saveCancel.addEventListener('click', () => closeSaveMenu());
+el.saveLibrary.addEventListener('click', () => {
+  const entry = saveFor;
+  closeSaveMenu();
+  if (entry) void saveToLibrary(entry);
+});
+el.saveDevice.addEventListener('click', () => {
+  const entry = saveFor;
+  closeSaveMenu();
+  if (entry) void saveToDevice(entry);
+});
+
+/** The Save action shows what is going on (the icon = the progress, the label = the step) until the returned function is called. */
+function saveBusy(label: string): () => void {
+  el.actDownload.disabled = true;
+  el.actDownload.classList.add('busy');
+  const small = el.actDownload.querySelector('small');
+  const smallText = small?.textContent || 'Save';
+  if (small) small.textContent = label;
+  el.actDownloadIco.textContent = '…';
+  return () => {
+    el.actDownload.disabled = false;
+    el.actDownload.classList.remove('busy');
+    if (small) small.textContent = smallText;
+    el.actDownloadIco.innerHTML = ICON.save;
+  };
+}
+const setSaveStep = (label: string): void => {
+  const small = el.actDownload.querySelector('small');
+  if (small) small.textContent = label;
+};
+/** Fetches the video's file (the first URL that answers), the progress on the Save icon. */
+async function fetchVideoBlob(cands: SourceCandidate[]): Promise<{ blob: Blob; kind: SourceCandidate['kind'] }> {
+  const errors: string[] = [];
+  for (const c of cands) {
+    try {
+      const res = await fetch(c.url, { mode: 'cors', credentials: 'same-origin' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const total = Number(res.headers.get('content-length') || 0);
+      const reader = res.body?.getReader();
+      const chunks: BlobPart[] = [];
+      let got = 0;
+      if (reader) {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value as BlobPart);
+          got += value.length;
+          el.actDownloadIco.textContent = total ? `${Math.round((100 * got) / total)}%` : `${(got / 1048576).toFixed(1)}M`;
+        }
+      } else {
+        chunks.push(new Uint8Array(await res.arrayBuffer()));
+      }
+      const blob = new Blob(chunks, { type: 'video/mp4' });
+      if (!blob.size) throw new Error('empty file');
+      return { blob, kind: c.kind };
+    } catch (e) {
+      errors.push(`${c.kind}: ${(e as Error).message}`);
+    }
+  }
+  throw new Error(errors.join('; ') || 'no URL to fetch');
+}
+
+/**
+ * "Save to library": the link and details go to the shared library (the server fetches its own copy,
+ * converted when needed), and this device keeps the file for in-app playback when the video comes as
+ * one file (YouTube's separate sound is merged by the server; this device gets that copy later).
+ */
+async function saveToLibrary(entry: Entry): Promise<void> {
+  const item = entry.item;
+  if (!item.canonicalUrl) return toast('This video has no link to save', true);
+  const done = saveBusy('Saving…');
+  try {
+    const r = await api.libraryImport(item.canonicalUrl, [], {
+      title: item.desc?.trim() || undefined,
+      author: item.author.nickname || item.author.uniqueId || undefined,
+      duration: item.duration,
+      width: item.width,
+      height: item.height,
+      cover: item.cover,
+    });
+    const saved = r.entry;
+    const already = r.duplicate && !r.importStarted;
+    const server = saved.file?.state === 'ready' ? 'a copy is on the server' : r.importStarted || saved.file ? 'the server is fetching its copy' : 'the link is saved';
+    const cands = sourceCandidates(item);
+    const muxed = cands.length > 0 && !cands[0].audioUrl;
+    let local = '';
+    if (muxed && hasIndexedDb) {
+      const have = await libdb.getVideo(saved.id).catch(() => undefined);
+      if (have) local = ' · already on this device';
+      else {
+        try {
+          const bytes = await storeLibraryCopy(entry, saved, cands);
+          local = ` · ${fmtBytes(bytes)} kept on this device`;
+        } catch (e) {
+          console.warn('[feed] library copy on this device failed', e);
+          local = ` · this device's copy failed (${errMsg(e)}); the library will play the server's`;
+        }
+      }
+    }
+    toast(`${already ? 'Already in your Video Library' : 'Saved to your Video Library'} · ${server}${local}`, false, 6000);
+  } catch (e) {
+    toast(`Could not save to the library: ${errMsg(e)}`, true, 7000);
+  } finally {
+    done();
+  }
+}
+/** Writes the video's file into the library's store on this device (the media cache's whole file when it has one, else a fetch). Returns the bytes. */
+async function storeLibraryCopy(entry: Entry, saved: { id: string; title: string }, cands: SourceCandidate[]): Promise<number> {
+  const item = entry.item;
+  const f = pickFormat(item);
+  const cached = await getCached(fileKey(P.id, item.id, 'video'));
+  let blob: Blob;
+  if (cached?.complete) blob = cached.blob;
+  else {
+    setSaveStep('Fetching…');
+    blob = (await fetchVideoBlob(cands)).blob;
+  }
+  setSaveStep('Storing…');
+  const partKey = `${saved.id}#${Date.now().toString(36)}`;
+  const parts = Math.max(1, Math.ceil(blob.size / libdb.PART_BYTES));
+  try {
+    for (let i = 0; i < parts; i++) {
+      await libdb.putPart(partKey, i, blob.slice(i * libdb.PART_BYTES, Math.min(blob.size, (i + 1) * libdb.PART_BYTES), blob.type || 'video/mp4'));
+      el.actDownloadIco.textContent = `${Math.round((100 * (i + 1)) / parts)}%`;
+    }
+    const previous = await libdb.getVideo(saved.id);
+    await libdb.putVideo({
+      entryId: saved.id,
+      partKey,
+      parts,
+      sizeBytes: blob.size,
+      mime: blob.type || 'video/mp4',
+      ext: 'mp4',
+      optionId: `feed:${f?.id || 'video'}`,
+      label: f?.height ? `${f.height}p` : f?.label || 'Feed quality',
+      detail: `From the ${P.name} feed`,
+      width: f?.width || item.width,
+      height: f?.height || item.height,
+      vcodec: f?.codec,
+      savedAt: Date.now(),
+      title: saved.title,
+    });
+    if (previous && previous.partKey !== partKey) await libdb.deleteParts(previous.partKey).catch(() => undefined);
+  } catch (e) {
+    await libdb.deleteParts(partKey).catch(() => undefined);
+    const name = (e as { name?: string })?.name;
+    if (name === 'QuotaExceededError' || /quota/i.test((e as Error).message || '')) throw new Error('this browser is out of storage');
+    throw e;
+  }
+  return blob.size;
+}
+
+/** "Download to this device": the file lands in the browser's downloads as @author_id.mp4. */
+async function saveToDevice(entry: Entry): Promise<void> {
   const item = entry.item;
   const cands = sourceCandidates(item);
   if (!cands.length) return toast('No downloadable URL for this video', true);
   const name = `@${(item.author.uniqueId || P.id).replace(/[^\w.-]+/g, '_')}_${item.id}.mp4`;
   if (cands[0].audioUrl) toast(`${P.name} serves the sound as a separate file: the saved MP4 has the picture only`, false, 5000);
-  if (el.actDownload.classList.contains('busy')) return;
-  el.actDownload.disabled = true;
-  el.actDownload.classList.add('busy');
-  const small = el.actDownload.querySelector('small');
-  const smallText = small?.textContent || 'Save';
-  if (small) small.textContent = 'Saving…';
-  el.actDownloadIco.textContent = '…';
-  const errors: string[] = [];
+  const done = saveBusy('Saving…');
   try {
-    for (const c of cands) {
-      try {
-        const res = await fetch(c.url, { mode: 'cors', credentials: 'same-origin' });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const total = Number(res.headers.get('content-length') || 0);
-        const reader = res.body?.getReader();
-        const chunks: BlobPart[] = [];
-        let got = 0;
-        if (reader) {
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            chunks.push(value as BlobPart);
-            got += value.length;
-            el.actDownloadIco.textContent = total ? `${Math.round((100 * got) / total)}%` : `${(got / 1048576).toFixed(1)}M`;
-          }
-        } else {
-          chunks.push(new Uint8Array(await res.arrayBuffer()));
-        }
-        const blob = new Blob(chunks, { type: 'video/mp4' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = name;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
-        toast(`Saved ${name} (${(blob.size / 1048576).toFixed(1)} MB, ${c.kind})`);
-        return;
-      } catch (e) {
-        errors.push(`${c.kind}: ${(e as Error).message}`);
-      }
-    }
-    toast(`Download failed – ${errors.join('; ')}`, true, 7000);
+    const { blob, kind } = await fetchVideoBlob(cands);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    toast(`Saved ${name} (${(blob.size / 1048576).toFixed(1)} MB, ${kind})`);
+  } catch (e) {
+    toast(`Download failed – ${errMsg(e)}`, true, 7000);
   } finally {
-    el.actDownload.disabled = false;
-    el.actDownload.classList.remove('busy');
-    if (small) small.textContent = smallText;
-    el.actDownloadIco.innerHTML = ICON.save;
+    done();
   }
 }
 
@@ -2561,6 +2728,10 @@ document.addEventListener('keydown', (e) => {
       else openSpeedMenu();
       break;
     case 'Escape':
+      if (saveMenuOpen()) {
+        closeSaveMenu();
+        break;
+      }
       if (speedMenuOpen()) {
         closeSpeedMenu();
         break;
@@ -2577,7 +2748,7 @@ document.addEventListener('keydown', (e) => {
       break;
     case 'd':
     case 'D':
-      if (cur) void download(cur);
+      if (cur) download(cur);
       break;
     case 'a':
     case 'A':

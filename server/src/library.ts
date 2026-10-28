@@ -20,7 +20,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { LibraryCategory, LibraryEntry, LibraryOption, LibraryOptionsResponse, LibrarySource, LibraryState, MediaFormat, ResolveResponse } from '../../shared/types';
+import type { LibraryCategory, LibraryEntry, LibraryOption, LibraryOptionsResponse, LibrarySaveHint, LibrarySource, LibraryState, MediaFormat, ResolveResponse } from '../../shared/types';
 import { config } from './config';
 import { DownloadError, downloadSourceOf, probeDownload } from './downloader';
 import { facebookVideoId, resolveFacebook, FacebookError } from './facebook';
@@ -205,11 +205,22 @@ const placeholderTitle = (url: string, source: LibrarySource, sourceId?: string)
   return sourceId ? `${names[source]} ${sourceId}` : names[source];
 };
 
+/** What a sender says it knows about the video (LibrarySaveRequest.hint), checked field by field. */
+export function cleanHint(raw: unknown): LibrarySaveHint | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const h = raw as Record<string, unknown>;
+  const str = (v: unknown, max: number): string | undefined => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : undefined);
+  const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined);
+  const cover = str(h.cover, 2000);
+  const out: LibrarySaveHint = { title: str(h.title, 300), author: str(h.author, 120), duration: num(h.duration), width: num(h.width), height: num(h.height), cover: cover && /^https?:\/\//i.test(cover) ? cover : undefined };
+  return Object.values(out).some((v) => v !== undefined) ? out : undefined;
+}
+
 /**
  * Saves a link. `lookup: false` skips the metadata lookup (an import of a plain file finds the
- * details in the file itself).
+ * details in the file itself). `hint`: details the sender knows already (the feed), shown at once.
  */
-export function saveLink(rawUrl: string, categoryIds: string[] = [], opts: { lookup?: boolean } = {}): { entry: LibraryEntry; duplicate: boolean } {
+export function saveLink(rawUrl: string, categoryIds: string[] = [], opts: { lookup?: boolean; hint?: LibrarySaveHint } = {}): { entry: LibraryEntry; duplicate: boolean } {
   const s = load();
   const url = normalizeUrl(rawUrl);
   const c = canonicalize(url);
@@ -218,13 +229,18 @@ export function saveLink(rawUrl: string, categoryIds: string[] = [], opts: { loo
   const now = Date.now();
   const valid = new Set(s.categories.map((x) => x.id));
   const doLookup = opts.lookup !== false;
+  const h = opts.hint;
   const entry: LibraryEntry = {
     id: newId(),
     url,
     canonicalUrl: c.canonicalUrl,
     source: c.source,
     sourceId: c.sourceId,
-    title: placeholderTitle(url, c.source, c.sourceId),
+    title: h?.title || placeholderTitle(url, c.source, c.sourceId),
+    author: h?.author,
+    duration: h?.duration,
+    width: h?.width,
+    height: h?.height,
     categoryIds: categoryIds.filter((id) => valid.has(id)),
     addedAt: now,
     updatedAt: now,
@@ -232,7 +248,9 @@ export function saveLink(rawUrl: string, categoryIds: string[] = [], opts: { loo
   };
   s.entries.unshift(entry);
   changed();
-  log(`saved ${c.source} ${c.canonicalUrl}`);
+  log(`saved ${c.source} ${c.canonicalUrl}${h ? ' (with the details the sender knew)' : ''}`);
+  // the sender's cover first (the lookup's replaces it); a thumbnail is there even when the lookup fails
+  if (h?.cover) void cacheThumb(entry, h.cover).catch((e) => log(`thumb ${entry.id} from the hint failed: ${(e as Error).message}`));
   if (doLookup) scheduleLookup(entry.id);
   return { entry, duplicate: false };
 }

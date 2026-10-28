@@ -22,7 +22,7 @@ import * as http from 'node:http';
 import * as https from 'node:https';
 import type { IncomingMessage } from 'node:http';
 import * as path from 'node:path';
-import type { LibraryEntry, LibraryFile, LibraryOption } from '../../shared/types';
+import type { LibraryEntry, LibraryFile, LibraryOption, LibrarySaveHint } from '../../shared/types';
 import { config } from './config';
 import { cancelJob, getJob, jobFile, jobServed, MAX_BYTES, startDownload } from './downloader';
 import { convertToMp4, frameToJpeg, planConversion, probeMedia } from './ffmpeg';
@@ -62,10 +62,10 @@ export function filesBytes(): number {
 // ---------------------------------------------------------------- starting
 
 /** "Download to library" for a pasted link: the entry is saved (or found) and the import queued. */
-export function importLink(rawUrl: string, categoryIds: string[] = []): { entry: LibraryEntry; duplicate: boolean; importStarted: boolean } {
+export function importLink(rawUrl: string, categoryIds: string[] = [], hint?: LibrarySaveHint): { entry: LibraryEntry; duplicate: boolean; importStarted: boolean } {
   // a plain file's details come from the file itself; a platform video is looked up as usual (title, cover)
   const url = normalizeUrl(rawUrl);
-  const r = saveLink(url, categoryIds, { lookup: canonicalize(url).source !== 'other' });
+  const r = saveLink(url, categoryIds, { lookup: canonicalize(url).source !== 'other', hint });
   const started = startImport(r.entry.id);
   return { entry: r.entry, duplicate: r.duplicate, importStarted: started };
 }
@@ -167,9 +167,29 @@ async function run(e: LibraryEntry, r: Running): Promise<void> {
     }
   };
   const gone = (): boolean => !getEntry(e.id) || r.abort.signal.aborted;
+  // The source dropping the connection mid-file ("aborted", a reset): TikTok's CDN does that to
+  // slow parallel streams from one address (the browser saving its own copy at the same time). A
+  // second attempt a moment later usually sails through, so one is made before giving up.
+  const fetchOnce = async (): Promise<string | undefined> => {
+    if (e.source === 'other') {
+      await fetchFile(e, r, src);
+      return undefined;
+    }
+    return fetchPlatform(e, r, src);
+  };
+  const dropped = (err: unknown): boolean => /^aborted$|ECONNRESET|socket hang up|stopped at /i.test((err as Error)?.message || String(err));
   try {
-    const label = e.source === 'other' ? undefined : await fetchPlatform(e, r, src);
-    if (e.source === 'other') await fetchFile(e, r, src);
+    let label: string | undefined;
+    try {
+      label = await fetchOnce();
+    } catch (err) {
+      if (gone() || !dropped(err)) throw err;
+      log(`import ${e.id}: the source dropped the connection (${(err as Error).message}); trying once more`);
+      update(e, { text: 'The source dropped the connection; trying again…', percent: undefined });
+      await new Promise((res) => setTimeout(res, 3000));
+      if (gone()) throw new Error('Cancelled');
+      label = await fetchOnce();
+    }
     if (gone()) throw new Error('Cancelled');
     update(e, { state: 'converting', percent: undefined, text: 'Reading the file…' });
     const info = await probeMedia(src);

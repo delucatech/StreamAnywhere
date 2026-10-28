@@ -154,7 +154,7 @@
           <div class="act stat hidden" id="actLikes" title="Likes"><span class="ico"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 20.3l-1.2-1.1C5.9 14.8 3 12.1 3 8.9 3 6.3 5 4.3 7.6 4.3c1.5 0 2.9.7 3.9 1.8 1-1.1 2.4-1.8 3.9-1.8C18 4.3 20 6.3 20 8.9c0 3.2-2.9 5.9-7.8 10.3L12 20.3z" /></svg></span><small id="actLikesLabel"></small></div>
           <div class="act stat hidden" id="actComments" title="Comments"><span class="ico"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 3.5c-5 0-9 3.3-9 7.4 0 2.3 1.3 4.4 3.3 5.8L5.5 20.5l4.2-1.8c.7.1 1.5.2 2.3.2 5 0 9-3.3 9-7.4s-4-7.5-9-7.5z" /></svg></span><small id="actCommentsLabel"></small></div>
           <button class="act" id="actMute" type="button" title="Sound on/off (M)"><span class="ico" id="actMuteIco"></span><small>Sound</small></button>
-          <button class="act" id="actDownload" type="button" title="Download this video (D)"><span class="ico" id="actDownloadIco"></span><small>Save</small></button>
+          <button class="act" id="actDownload" type="button" title="Save this video: to your library or to this device (D)"><span class="ico" id="actDownloadIco"></span><small>Save</small></button>
           <button class="act" id="actAuto" type="button" title="Auto-scroll to the next video when one ends (A)"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 6l9 6-9 6z" /><path d="M18 6v12" /></svg></span><small id="actAutoLabel">Auto</small></button>
           <button class="act" id="actSpeed" type="button" title="Playback speed (S)"><span class="ico" id="actSpeedIco">1×</span><small>Speed</small></button>
           <button class="act" id="actFull" type="button" title="Full screen (F)"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5" /><path d="M20 9V4h-5" /><path d="M4 15v5h5" /><path d="M20 15v5h-5" /></svg></span><small>Full</small></button>
@@ -335,6 +335,16 @@
           <button class="speed-opt" type="button" data-rate="1.25">1.25×</button>
           <button class="speed-opt" type="button" data-rate="1.5">1.5×</button>
           <button class="speed-opt" type="button" data-rate="2">2×</button>
+        </div>
+      </div>
+      <!-- Save (the Save action / D): to the Video Library (server + this device) or as a file on this device -->
+      <div id="save" class="speed hidden" role="dialog" aria-label="Save this video">
+        <div class="speed-card save-card" id="saveCard">
+          <div class="speed-title">Save this video</div>
+          <div class="save-what" id="saveWhat"></div>
+          <button class="speed-opt save-opt" type="button" id="saveLibrary"><span>Save to library</span><small id="saveLibraryNote">Kept in your Video Library · watch it any time, on every device</small></button>
+          <button class="speed-opt save-opt" type="button" id="saveDevice"><span>Download to this device</span><small>An MP4 file in this browser's downloads</small></button>
+          <button class="speed-opt save-opt save-cancel" type="button" id="saveCancel"><span>Cancel</span></button>
         </div>
       </div>
       <!-- kept for the handlers; the feed starts by itself (maybeAutoStart) -->

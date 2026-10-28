@@ -1,4 +1,4 @@
-import type { ConversationResponse, DownloadJob, DownloadProbeResponse, DownloadSource, FeedProgress, LibraryCategory, LibraryEntry, LibraryEntryPatch, LibraryOptionsResponse, LibrarySaveResponse, LibraryState, FeedRequest, FeedResponse, FollowRequest, FollowResponse, HealthResponse, InboxResponse, LoginMode, Platform, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SendMessageResponse, ServerProbe, SessionInputRequest, SessionStatus } from '../../shared/types';
+import type { ConversationResponse, DownloadJob, DownloadProbeResponse, DownloadSource, FeedProgress, LibraryCategory, LibraryEntry, LibraryEntryPatch, LibraryOptionsResponse, LibrarySaveHint, LibrarySaveResponse, LibraryState, FeedRequest, FeedResponse, FollowRequest, FollowResponse, HealthResponse, InboxResponse, LoginMode, Platform, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SendMessageResponse, ServerProbe, SessionInputRequest, SessionStatus } from '../../shared/types';
 
 /**
  * API base URL. Empty = same origin (dev server proxy or SERVE_CLIENT deployments). When the
@@ -151,7 +151,7 @@ export const api = {
   },
   librarySave: (url: string, categoryIds?: string[]): Promise<LibrarySaveResponse> => post('/api/library', { url, categoryIds }, 30_000),
   /** "Download to library": the server fetches the video (converted to MP4 when needed) and keeps it for every device */
-  libraryImport: (url: string, categoryIds?: string[]): Promise<LibrarySaveResponse> => post('/api/library/import', { url, categoryIds }, 30_000),
+  libraryImport: (url: string, categoryIds?: string[], hint?: LibrarySaveHint): Promise<LibrarySaveResponse> => post('/api/library/import', { url, categoryIds, hint }, 30_000),
   libraryImportEntry: (id: string): Promise<{ started: boolean; state: LibraryState }> => post(`/api/library/entries/${id}/import`, {}, 30_000),
   /** Stops a running import, or forgets a failed one */
   libraryImportCancel: (id: string): Promise<LibraryState> => post(`/api/library/entries/${id}/import/cancel`, {}),

@@ -725,6 +725,21 @@ export interface LibraryState {
 export interface LibrarySaveRequest {
   url: string;
   categoryIds?: string[];
+  /**
+   * What the sender already knows about the video (the feed saving the video in view): shown at
+   * once and kept when the server's own lookup fails; the lookup's answer wins otherwise.
+   */
+  hint?: LibrarySaveHint;
+}
+
+export interface LibrarySaveHint {
+  title?: string;
+  author?: string;
+  duration?: number;
+  width?: number;
+  height?: number;
+  /** A cover URL the server copies to its thumbnails (platform cover URLs expire within days) */
+  cover?: string;
 }
 
 export interface LibrarySaveResponse {

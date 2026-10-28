@@ -663,6 +663,35 @@ button {
 .speed-opt.on small {
   color: rgba(255, 255, 255, 0.85);
 }
+/* the Save dialog: the same card, with a line about the video and a description under each choice */
+.save-card {
+  max-width: min(420px, calc(100vw - 32px));
+}
+.save-what {
+  font-size: 13px;
+  color: var(--muted);
+  text-align: center;
+  margin: -2px 0 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.save-opt {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  text-align: left;
+}
+.save-opt small {
+  white-space: normal;
+  line-height: 1.3;
+}
+.save-cancel {
+  align-items: center;
+  background: transparent;
+  color: var(--muted);
+  font-size: 15px;
+}
 .toast {
   position: absolute;
   left: 50%;

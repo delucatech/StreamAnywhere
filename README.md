@@ -256,8 +256,15 @@ Open **`/feed.html`** (from the launcher; `?platform=youtube` for YouTube). It i
   hidden; the browser's fullscreen too where it allows it). **Exit full screen** (top right), **F** or Esc leaves it.
 - **Auto-scroll** (checkbox / **A**): when on, a finished video advances to the next one; when off,
   videos loop.
-- **⬇ Download** fetches the cookie-free CDN URL as a blob (progress on the button) and saves it as
-  `@author_<id>.mp4`; if the direct fetch fails it goes through the server proxy.
+- **⬇ Save** (the Save action / **D**) asks where the video goes. **Save to library** adds the link
+  and its details (title, author, cover, length) to the Video Library, where the server fetches its
+  own copy as *Download to library* does (see **Video Library**); when the video comes as one file
+  (TikTok, Instagram, Facebook) the bytes this page already has (the media cache, else a fresh fetch)
+  are also written into the library's store on this device, so it plays there at once and offline.
+  YouTube's sound is a separate file: the server merges the two and the device fetches that copy
+  later. **Download to this device** fetches the cookie-free CDN URL as a blob (progress on the
+  button) and saves it as `@author_<id>.mp4`; if the direct fetch fails it goes through the server
+  proxy. The car's browser cannot save files, so only the library choice is shown there.
 - Sources: **Explore** (TikTok's public explore feed, with the same categories as tiktok.com/explore;
   no sign-in; works with both the Node server and the IIS handler) and **For You** (your own feed
   after signing in; Node server only). On YouTube the two are **Shorts** (hashtag Shorts, guest)
