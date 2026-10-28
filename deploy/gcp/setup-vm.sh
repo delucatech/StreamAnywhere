@@ -115,8 +115,10 @@ npm ci --no-audit --no-fund --loglevel=error
 # bookworm, enough for the recorder) is installed whenever no runnable ffmpeg exists; the server
 # tries `ffmpeg` on the PATH before the bundled binary.
 ffmpeg_runs() { "$1" -version >/dev/null 2>&1; }
-if ! ffmpeg_runs "$APP_DIR/node_modules/ffmpeg-static/ffmpeg" && ! ffmpeg_runs ffmpeg; then
-  echo "no runnable ffmpeg (bundled binary broken or missing): installing Debian's"
+# Debian's ffmpeg always, and first: the bundled static build crashed (SIGSEGV) recording a live
+# channel on the VM (2026-10-28), where the distro build is the one that is exercised and patched.
+if ! ffmpeg_runs ffmpeg; then
+  echo "installing Debian's ffmpeg (the server prefers it to the bundled static binary)"
   apt-get install -y -qq ffmpeg >/dev/null || echo "WARN: ffmpeg install failed (Live TV channels cannot play; the Video Downloader cannot merge video and audio)"
 fi
 if ffmpeg_runs ffmpeg; then echo "ffmpeg: $(ffmpeg -version 2>/dev/null | head -1) (PATH)"
