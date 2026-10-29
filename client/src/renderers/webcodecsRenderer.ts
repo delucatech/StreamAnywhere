@@ -83,6 +83,12 @@ export class WebCodecsRenderer implements Renderer {
   private flushing = false;
   private pendingSeekUs: number | undefined;
   private needKey = true;
+  /** NAL unit length prefix of the video samples (avcC / hvcC lengthSizeMinusOne + 1), for the key-frame check */
+  private nalLength = 4;
+  private fakeKeyFrames = 0;
+  private fakeKeyWarned = false;
+  /** When the video decoder was restarted after refusing a chunk (recoverDecoder) */
+  private decoderRestarts: number[] = [];
   private lastVideoSampleUs = 0;
   private lastReleasedSample = 0;
   private volume = 1;
@@ -271,6 +277,7 @@ export class WebCodecsRenderer implements Renderer {
       return;
     }
     this.videoDecoder = this.makeVideoDecoder(video.videoConfig);
+    this.nalLength = nalLengthSize(video.codec, video.videoConfig.description as BufferSource | undefined);
     this.events.onLog('info', `VideoDecoder configured: ${video.codec} ${w}x${h}, description ${video.videoConfig.description ? (video.videoConfig.description as Uint8Array).byteLength + ' bytes' : 'none'}`);
 
     if (audio?.audioConfig && typeof AudioDecoder !== 'undefined') {
@@ -469,19 +476,33 @@ export class WebCodecsRenderer implements Renderer {
     if (!vd || !vt || vd.state !== 'configured') return;
     while (this.frames.length + vd.decodeQueueSize < TARGET_DECODED_FRAMES && vd.decodeQueueSize < MAX_DECODE_QUEUE && this.videoSamples.length) {
       const s = this.videoSamples.shift()!;
-      if (this.needKey && !s.is_sync) continue;
+      // The file's sync flag is not enough: some live streams (open GOP, recovery-point SEI) flag
+      // frames as sync that hold no IDR picture, and the decoder refuses such a chunk marked `key`
+      // ("was marked as type key but wasn't a key frame"). Only a real one counts.
+      let key = s.is_sync;
+      if (key && !isKeyFrame(s.data!, vt.codec, this.nalLength)) {
+        key = false;
+        this.st.extra['Fake key frames'] = String(++this.fakeKeyFrames);
+        if (!this.fakeKeyWarned) {
+          this.fakeKeyWarned = true;
+          this.events.onLog('warn', 'the stream flags frames as key frames that are not (open GOP); waiting for a real one');
+        }
+      }
+      if (this.needKey && !key) continue;
       this.needKey = false;
       try {
         vd.decode(
           new EncodedVideoChunk({
-            type: s.is_sync ? 'key' : 'delta',
+            type: key ? 'key' : 'delta',
             timestamp: this.toUs(s.cts, vt),
             duration: Math.round((s.duration * 1e6) / vt.timescale),
             data: s.data!,
           }),
         );
       } catch (e) {
-        this.fail(new Error(`decode() threw: ${(e as Error).message}`));
+        const msg = (e as Error).message;
+        if (/key ?frame/i.test(msg) && this.recoverDecoder(msg)) return;
+        this.fail(new Error(`decode() threw: ${msg}`));
         return;
       }
       if (s.number - this.lastReleasedSample > 60) {
@@ -708,6 +729,32 @@ export class WebCodecsRenderer implements Renderer {
     this.audioTrack = undefined;
   }
 
+  /**
+   * The video decoder refused a chunk (a key frame it did not accept as one): restarted at once
+   * and fed from the next real key frame, the picture pausing for a moment instead of the stream
+   * failing. Three restarts within a minute are a stream this browser cannot play: false.
+   */
+  private recoverDecoder(why: string): boolean {
+    const vd = this.videoDecoder;
+    const cfg = this.videoTrack?.videoConfig;
+    const now = performance.now();
+    this.decoderRestarts = this.decoderRestarts.filter((t) => now - t < 60_000);
+    if (!vd || !cfg || this.decoderRestarts.length >= 3) return false;
+    this.decoderRestarts.push(now);
+    this.st.extra['Decoder restarts'] = String(this.decoderRestarts.length);
+    try {
+      vd.reset();
+      vd.configure(cfg);
+    } catch (e) {
+      this.events.onLog('warn', `the video decoder would not restart: ${(e as Error).message}`);
+      return false;
+    }
+    this.needKey = true;
+    this.events.onLog('warn', `the video decoder refused a chunk (${why}); restarted, continuing from the next key frame`);
+    window.setTimeout(() => this.pump(), 0);
+    return true;
+  }
+
   private fail(err: Error): void {
     this.events.onLog('error', err.message);
     this.setState('error');
@@ -909,4 +956,37 @@ export class WebCodecsRenderer implements Renderer {
       this.events.onFirstFrame();
     }
   }
+}
+
+/** NAL length prefix size from an avcC / hvcC description (4 when there is none or it cannot be read) */
+export function nalLengthSize(codec: string, description: BufferSource | undefined): number {
+  if (!description) return 4;
+  const b = description instanceof ArrayBuffer ? new Uint8Array(description) : new Uint8Array(description.buffer, description.byteOffset, description.byteLength);
+  if (/^(avc|avc1|avc3)/i.test(codec) && b.length > 4) return (b[4] & 3) + 1;
+  if (/^(hev1|hvc1)/i.test(codec) && b.length > 21) return (b[21] & 3) + 1;
+  return 4;
+}
+
+/**
+ * Whether a length-prefixed (AVCC / HVCC) sample holds a real random access picture: an IDR slice
+ * (H.264 NAL type 5) or an IRAP picture (H.265 NAL types 16-21). A sample that cannot be walked is
+ * taken as the file says.
+ */
+export function isKeyFrame(data: Uint8Array | ArrayBuffer, codec: string, nalLength: number): boolean {
+  const b = data instanceof Uint8Array ? data : new Uint8Array(data);
+  const h265 = /^(hev1|hvc1)/i.test(codec);
+  if (!h265 && !/^(avc|avc1|avc3)/i.test(codec)) return true;
+  let i = 0;
+  let sawSlice = false;
+  while (i + nalLength <= b.length) {
+    let len = 0;
+    for (let k = 0; k < nalLength; k++) len = (len << 8) | b[i + k];
+    i += nalLength;
+    if (len <= 0 || i + len > b.length) return !sawSlice; // not walkable: trust the file
+    const t = h265 ? (b[i] >> 1) & 0x3f : b[i] & 0x1f;
+    if (h265 ? t >= 16 && t <= 21 : t === 5) return true;
+    if (h265 ? t <= 9 : t === 1) sawSlice = true;
+    i += len;
+  }
+  return !sawSlice; // no picture at all (metadata only): leave the flag alone
 }

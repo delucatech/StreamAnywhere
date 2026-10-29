@@ -652,6 +652,16 @@ the poll retries anyway. The HLS relay
 routes (`/api/livetv/hls/…`, `/api/livetv/seg/…`) stay for an HLS player that wants them; the
 page does not use them.
 
+Key frames that are not (seen in the car 2026-10-29: "An EncodedVideoChunk was marked as type `key`
+but wasn't a key frame"): some live streams flag frames as sync samples that hold no IDR picture
+(open GOP, recovery-point SEI), and Chrome's decoder refuses such a chunk. The renderer now walks
+each sync sample's NAL units (`isKeyFrame`, length prefix from avcC/hvcC) and treats one without an
+IDR / IRAP picture as a delta frame (counted as *Fake key frames* in the stats), so decoding waits
+for a real key frame. Should the decoder still refuse a chunk, it is reset and configured again and
+fed from the next key frame (*Decoder restarts*; three within a minute = the stream fails as before),
+and the Live TV player answers a decoder failure by opening the same stream once more before it shows
+anything.
+
 Sound that stops while the picture goes on (seen in the car: "audio works for about a second, then
 nothing") has a watchdog in the WebCodecs renderer (`audioWatch`, every frame step while playing with
 sound): no chunk placed on the audio timeline for 2 s although there is sound to decode means the

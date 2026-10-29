@@ -155,6 +155,8 @@ export class LiveTvPlayer {
   /** When the current stream's first picture came, and how many times in a row a stream ended soon after it */
   private playingSince = 0;
   private quickEnds = 0;
+  /** Decoder errors answered with a fresh open of the same stream (one per channel open) */
+  private decodeRetries = 0;
   /** The feed is waiting for data (buffering), and the bytes it had when last looked at / since when they stopped growing */
   private waiting = false;
   private lastLoaded = 0;
@@ -412,6 +414,7 @@ export class LiveTvPlayer {
     const sameChannel = this.index === index && this.current === ch && this.sources.length > 0;
     this.index = index;
     this.quickEnds = 0;
+    if (!sameChannel) this.decodeRetries = 0;
     if (!sameChannel || sourceIdx === 0) {
       const all = ch.sources.length ? ch.sources : [{ key: ch.key, providerId: ch.providerId, name: ch.name }];
       // the streams most likely to play first (their history), DRM ones last, the list's order between equals
@@ -621,7 +624,17 @@ export class LiveTvPlayer {
     // a live recording that broke off at the network (not a stream the browser cannot play): reconnect, do not move on
     if (this.streamUrl && isConnectionError(m) && !/decode|codec|mp4box/i.test(m)) return this.lostConnection(m.replace(/^fetch\(\) failed \(likely CORS or network\): /, ''));
     if (/hev1|hvc1/i.test(m)) return this.showMessage('unsupported', 'This channel is H.265 (HEVC), which this browser cannot decode; most channels are H.264.', m);
-    if (/VideoDecoder|AudioDecoder|codec|No video track|WebCodecs|decode\(\)|mp4box/i.test(m)) return this.failSource(`This browser cannot decode this stream: ${m}`, undefined, true);
+    if (/VideoDecoder|AudioDecoder|codec|No video track|WebCodecs|decode\(\)|mp4box/i.test(m)) {
+      // A decoder that choked mid-stream (a broken segment, a key frame it refused): the same
+      // stream once more from live, before the viewer is told anything.
+      if (this.decodeRetries < 1) {
+        this.decodeRetries++;
+        this.notice('The picture broke off; opening the channel again…');
+        void this.play(this.index, this.sourceIdx);
+        return;
+      }
+      return this.failSource(`This browser cannot decode this stream: ${m}`, undefined, true);
+    }
     this.failSource(`This channel is not available right now: ${/HTTP (404|410)/.test(m) ? 'the stream is gone' : m}.`, undefined, true);
   }
 
