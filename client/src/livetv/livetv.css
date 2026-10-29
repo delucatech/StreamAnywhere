@@ -1335,3 +1335,23 @@ body.theater-open .overlay {
   text-align: center;
   pointer-events: none;
 }
+
+/* the dot before a channel's name: how its best stream has been playing (shared/livetvHealth.ts) */
+.hdot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: 1px;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
+}
+.hdot.good {
+  background: #36d379;
+}
+.hdot.weak {
+  background: #f2c037;
+}
+.hdot.bad {
+  background: #ff5c5c;
+}

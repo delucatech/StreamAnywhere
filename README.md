@@ -510,6 +510,21 @@ stops sending video moves to the next with a toast (*Stream 1 did not play (…)
 Favorites are kept under the channel's first key (taking one off clears every key), hiding hides
 every key, and Settings' hidden list shows one row per channel.
 
+*How a stream has been playing.* The lists carry no ratings or uptime (iptv-org's own checker only
+tags a name `[Not 24/7]` / `[Geo-blocked]` and drops streams that stay dead), so the server keeps
+its own: the last ten tries of every stream within 14 days (`prefs.health`, `shared/livetvHealth.ts`),
+each with whether the tune opened and, from the page's report on the first picture
+(`POST /api/livetv/health`), the milliseconds from the tap to it; a stream that stops or will not
+decode after it opened is reported as a failed try. `rateStream` turns them into **good** (the last
+try opened and at least 4 of 5 did, not slow to start), **weak** (the last try opened but others
+failed, or the first picture takes over 25 s; or the last try failed but half of them opened) or
+**bad** (the last try failed and most did), each with a line for the tooltip (*Good: played 9 of the
+last 10 times, starts in about 8 s*). The tile shows the best stream's rating as a green / yellow /
+red dot before the name (none until tried); a channel whose best stream is bad is dimmed and sorted
+last, good ones first, untried before weak; the player tries a channel's streams in that order
+too, and says *has been shaky* / *did not play last time* in the subtitle. The old `prefs.broken`
+mark stays in step (set by a failed try, cleared by one that opened).
+
 *Guide* (`server/src/livetvEpg.ts`). XMLTV files run to hundreds of MB uncompressed, so a guide is
 parsed as it streams in (gunzipped on the fly) and only the programmes of the provider's own
 channels from 4 h ago to 40 h ahead are kept, in memory and in `LIVETV_DIR/epg/<id>.epg.json`;

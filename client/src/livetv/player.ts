@@ -20,7 +20,7 @@
  * theater itself), and the controls hiding while playing.
  */
 import type { PlayerStats } from '../renderers/types';
-import type { LiveTvChannel, LiveTvChannelGuideResponse, LiveTvProgramme, LiveTvSource, LiveTvTuneResponse, LiveTvTuneStatus, LiveTvWindow } from '../../../shared/types';
+import type { LiveTvChannel, LiveTvChannelGuideResponse, LiveTvProgramme, LiveTvRating, LiveTvSource, LiveTvTuneResponse, LiveTvTuneStatus, LiveTvWindow } from '../../../shared/types';
 import { api, ApiError, apiUrl } from '../api';
 import { FeedPlayer } from '../feed/player';
 
@@ -31,8 +31,13 @@ export interface PlayerHooks {
   onChannel(ch: LiveTvChannel): void;
   onFavorite(ch: LiveTvChannel, on: boolean): void;
   isFavorite(ch: LiveTvChannel): boolean;
-  /** This stream (one of the channel's sources) did not play last time: tried after the others */
-  isBroken(key: string): boolean;
+  /** The order a channel's streams are tried in (lower first): their history (shared/livetvHealth.ts) */
+  streamRank(key: string): number;
+  streamRating(key: string): LiveTvRating;
+  /** The first picture of this stream came, `ms` after the tap (its history on the server) */
+  onPlayed(ch: LiveTvChannel, key: string, ms: number): void;
+  /** This stream failed after it had opened (stopped sending video, would not decode) */
+  onStreamFailed(ch: LiveTvChannel, key: string): void;
   /** The viewer hid this channel (the hide button, the H key, or from the error message) */
   onHide(ch: LiveTvChannel): void;
   /** The server answered a tune of one of the channel's streams: did it open (the page ranks channels that did not) */
@@ -138,6 +143,8 @@ export class LiveTvPlayer {
   private sourceIdx = 0;
   /** Why the stream before was given up, for the opening overlay of the next */
   private tuneWaitNote = '';
+  /** The first picture of this tune has been reported (a seek / go-live paints another first frame) */
+  private reported = false;
   /** This player, to the server: the recorder of a channel it leaves stops at once */
   private readonly viewer = Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
   /** The channel whose recorder runs for this player (told when leaving it) */
@@ -213,6 +220,12 @@ export class LiveTvPlayer {
     this.feed = new FeedPlayer(this.canvas, this.stage, {
       onFirstFrame: () => {
         if (this.state === 'loading') this.setState('playing');
+        const ch = this.current;
+        const src = this.sources[this.sourceIdx];
+        if (ch && src && this.streamUrl && !this.reported) {
+          this.reported = true;
+          this.hooks.onPlayed(ch, src.key, Date.now() - this.openedAt);
+        }
       },
       onEnded: () => this.onStreamEnded(),
       onError: (err) => this.onPlayerError(err),
@@ -372,10 +385,15 @@ export class LiveTvPlayer {
     this.retried = false;
     if (!sameChannel || sourceIdx === 0) {
       const all = ch.sources.length ? ch.sources : [{ key: ch.key, providerId: ch.providerId, name: ch.name }];
-      this.sources = [...all.filter((s) => !s.drm && !this.hooks.isBroken(s.key)), ...all.filter((s) => !s.drm && this.hooks.isBroken(s.key)), ...all.filter((s) => s.drm)];
+      // the streams most likely to play first (their history), DRM ones last, the list's order between equals
+      this.sources = all
+        .map((s, i) => ({ s, i, rank: (s.drm ? 100 : 0) + this.hooks.streamRank(s.key) }))
+        .sort((a, b) => a.rank - b.rank || a.i - b.i)
+        .map((x) => x.s);
     }
     this.sourceIdx = Math.min(sourceIdx, this.sources.length - 1);
     if (this.sourceIdx === 0) this.tuneWaitNote = '';
+    this.reported = false;
     const src = this.sources[this.sourceIdx];
     if (this.recordedKey !== src.key) this.leaveRecorded();
     this.stopMedia();
@@ -463,15 +481,20 @@ export class LiveTvPlayer {
   /** "News · IPTV-org – United States · stream 2 of 3 (1080p)" */
   private subtitle(ch: LiveTvChannel, src: LiveTvSource): string {
     const prov = this.hooks.providerName({ ...ch, providerId: src.providerId });
+    const rating = this.hooks.streamRating(src.key);
     const which = this.sources.length > 1 ? `stream ${this.sourceIdx + 1} of ${this.sources.length}${src.quality ? ` (${src.quality})` : ''}` : src.quality || '';
-    return [...ch.groups, prov, which].filter(Boolean).join(' · ');
+    const note = rating === 'weak' ? 'has been shaky' : rating === 'bad' ? 'did not play last time' : '';
+    return [...ch.groups, prov, which, note].filter(Boolean).join(' · ');
   }
 
   /**
    * This stream did not play: the channel's next stream is tried (the same channel from another
    * list, or at another quality), with the overlay saying so; the last one's failure is the message.
    */
-  private failSource(text: string, detail?: string): void {
+  private failSource(text: string, detail?: string, afterOpen = false): void {
+    const ch = this.current;
+    const src = this.sources[this.sourceIdx];
+    if (afterOpen && ch && src) this.hooks.onStreamFailed(ch, src.key);
     const next = this.sourceIdx + 1;
     if (next >= this.sources.length || this.sources[next].drm) return this.showMessage('unavailable', text, detail);
     this.tuneWaitNote = `Stream ${this.sourceIdx + 1} did not play (${text.replace(/\.$/, '')}).`;
@@ -494,15 +517,15 @@ export class LiveTvPlayer {
       void this.play(this.index, this.sourceIdx);
       return;
     }
-    this.failSource('The stream stopped sending video.');
+    this.failSource('The stream stopped sending video.', undefined, true);
   }
 
   private onPlayerError(err: Error): void {
     if (!this.isOpen || this.state === 'unavailable' || this.state === 'unsupported') return;
     const m = err.message || 'playback failed';
     if (/hev1|hvc1/i.test(m)) return this.showMessage('unsupported', 'This channel is H.265 (HEVC), which this browser cannot decode; most channels are H.264.', m);
-    if (/VideoDecoder|AudioDecoder|codec|No video track|WebCodecs|decode\(\)|mp4box/i.test(m)) return this.failSource(`This browser cannot decode this stream: ${m}`);
-    this.failSource(`This channel is not available right now: ${/HTTP (404|410)/.test(m) ? 'the stream is gone' : m}.`);
+    if (/VideoDecoder|AudioDecoder|codec|No video track|WebCodecs|decode\(\)|mp4box/i.test(m)) return this.failSource(`This browser cannot decode this stream: ${m}`, undefined, true);
+    this.failSource(`This channel is not available right now: ${/HTTP (404|410)/.test(m) ? 'the stream is gone' : m}.`, undefined, true);
   }
 
   /**

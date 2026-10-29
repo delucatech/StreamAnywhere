@@ -904,12 +904,31 @@ export interface LiveTvPrefsPatch {
   lastKey?: string | null;
 }
 
+/** One try of a stream: when, did it open, and (when it did) the milliseconds from the tap to the first picture */
+export interface LiveTvTry {
+  at: number;
+  ok: boolean;
+  ms?: number;
+}
+
+/** What the tries say about a stream (shared/livetvHealth.ts): the dot on the tile */
+export type LiveTvRating = 'good' | 'weak' | 'bad' | 'none';
+
+/** The page saying how a stream went: the first picture (with the time it took) or a stream that failed after it opened */
+export interface LiveTvHealthReport {
+  key: string;
+  ok: boolean;
+  ms?: number;
+}
+
 export interface LiveTvPrefs {
   favorites: string[];
   /** Channels hidden from the browser (dead, unwanted): shared by every device, undone in Settings */
   hidden: string[];
   /** Channel key -> when its last tune failed (cleared by a tune that works): ranked last in the All view */
   broken: Record<string, number>;
+  /** Stream key -> its last tries, oldest first (shared/livetvHealth.ts rates them) */
+  health: Record<string, LiveTvTry[]>;
   lastKey?: string;
   lastAt?: number;
 }

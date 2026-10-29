@@ -34,7 +34,7 @@ import type { FeedItem } from '../../../shared/types';
 import type { FeedResponse } from '../../../shared/types';
 import { openUpstream } from '../http';
 import { daemonStatus, detectYtDlp, shutdownYtDlp, ytdlpInfo } from '../ytdlp';
-import type { ResolveResponse } from '../../../shared/types';
+import type { LiveTvTry, ResolveResponse } from '../../../shared/types';
 import { parseAttrs, parseM3u, cleanChannelName, channelNameKey, countGroups, mergeChannels, qualityOf, splitGroups } from '../livetvM3u';
 import { XmltvScanner, nowNext, parseXmltvTime, resolveGuideId } from '../livetvEpg';
 import { decryptJson, decryptText, encryptJson, encryptText, useEphemeralLiveTvKey } from '../livetvCrypto';
@@ -42,6 +42,7 @@ import { redactUrl } from '../livetvHttp';
 import { initTimescales, mintToken, pickVariant, playlistSegments, readToken, remuxArgs, rewritePlaylist, segmentStartSec } from '../livetvStream';
 import { normalizeXtreamServer, xtreamLiveUrl } from '../livetvXtream';
 import { LIVETV_PRESETS } from '../livetvPresets';
+import { pushTry, rateStream, ratingRank } from '../../../shared/livetvHealth';
 
 const TEST_MP4 = 'https://mdn.github.io/learning-area/html/multimedia-and-embedding/video-and-audio-content/rabbit320.mp4';
 const TIKTOK_URL = process.env.TIKTOK_TEST_URL || 'https://www.tiktok.com/@tiktok/video/7693184538704416031';
@@ -107,6 +108,19 @@ not-a-url
     check('affiliates with different names and same-named channels of different countries stay apart', merged.some((c) => c.key === 'us:3' && c.sources.length === 1) && merged.some((c) => c.key === 'us:4') && merged.some((c) => c.key === 'news:5' && c.sources.length === 1) && merged.some((c) => c.key === 'news:6'));
     const c5 = merged.find((c) => c.key === 'x:7');
     check('without a guide id, the same name merges within one provider; DRM streams come last and mark the channel only when every stream has it', !!c5 && c5.sources.length === 2 && c5.sources[1].key === 'x:8' && c5.sources[1].drm === true && !c5.drm);
+  }
+
+  {
+    const now = Date.parse('2026-10-29T12:00:00Z');
+    const day = 24 * 3600_000;
+    const t = (daysAgo: number, ok: boolean, ms?: number): LiveTvTry => ({ at: now - daysAgo * day, ok, ms });
+    check('stream rating: untried / one good / one bad', rateStream(undefined, now).rating === 'none' && rateStream([t(1, true, 8000)], now).rating === 'good' && rateStream([t(1, false)], now).rating === 'bad');
+    const mixedOk = rateStream([t(5, false), t(4, true, 9000), t(3, false), t(2, true, 7000), t(1, true, 8000)], now);
+    check('stream rating: failures among the last tries make it weak; the median start is reported', mixedOk.rating === 'weak' && mixedOk.okCount === 3 && mixedOk.count === 5 && mixedOk.startSec === 8, mixedOk);
+    check('stream rating: 4 of 5 with the last one good is good; a slow start is weak', rateStream([t(5, false), t(4, true, 9000), t(3, true, 9000), t(2, true, 7000), t(1, true, 8000)], now).rating === 'good' && rateStream([t(2, true, 40_000), t(1, true, 50_000)], now).rating === 'weak');
+    check('stream rating: last failed but half played is weak; mostly failed is bad; old tries do not count', rateStream([t(3, true, 5000), t(2, true, 5000), t(1, false)], now).rating === 'weak' && rateStream([t(3, true, 5000), t(2, false), t(1, false)], now).rating === 'bad' && rateStream([t(20, false)], now).rating === 'none');
+    const many = Array.from({ length: 12 }, (_, i) => t(12 - i, true, 1000)).reduce((acc, x) => pushTry(acc, x), [] as LiveTvTry[]);
+    check('pushTry keeps the last 10 within 14 days', many.length === 10 && pushTry([t(20, false)], t(0, true)).length === 1 && ratingRank('good') < ratingRank('none') && ratingRank('none') < ratingRank('weak') && ratingRank('weak') < ratingRank('bad'));
   }
 
   console.log('\n== 1d. Live TV: XMLTV guide');

@@ -12,7 +12,8 @@
  *    for the channels on screen only.
  *  - Settings (the gear): add / edit / delete / enable / test / refresh providers; presets.
  */
-import type { LiveTvChannel, LiveTvPrefs, LiveTvPreset, LiveTvProgramme, LiveTvProvider, LiveTvProviderInput, LiveTvState } from '../../../shared/types';
+import type { LiveTvChannel, LiveTvPrefs, LiveTvPreset, LiveTvProgramme, LiveTvProvider, LiveTvProviderInput, LiveTvSource, LiveTvState, LiveTvTry } from '../../../shared/types';
+import { HEALTH_AMEND_MS, pushTry, rateStream, ratingRank, type StreamRating } from '../../../shared/livetvHealth';
 import { api, ApiError } from '../api';
 import { rememberApp } from '../platforms';
 import { LiveTvPlayer } from './player';
@@ -109,7 +110,7 @@ function busy(btn: HTMLButtonElement, work: () => Promise<unknown>, label?: stri
 // ---------------------------------------------------------------- state
 const PREFS_KEY = 'streamanywhere.livetv.prefs';
 const VIEW_KEY = 'streamanywhere.livetv.view';
-let state: LiveTvState = { rev: 0, channelsRev: 0, providers: [], prefs: { favorites: [], hidden: [], broken: {} }, remux: false };
+let state: LiveTvState = { rev: 0, channelsRev: 0, providers: [], prefs: { favorites: [], hidden: [], broken: {}, health: {} }, remux: false };
 let channels: LiveTvChannel[] = [];
 let channelsRev = -1;
 let presets: LiveTvPreset[] = [];
@@ -118,6 +119,8 @@ let favorites = new Set<string>();
 let hidden = new Set<string>();
 /** Channel key -> when its last tune failed (server-side): ranked last in the All view */
 let broken: Record<string, number> = {};
+/** Stream key -> its last tries (the server's; a try just made is added here first so the dot answers at once) */
+let health: Record<string, LiveTvTry[]> = {};
 let lastKey: string | undefined;
 /**
  * Logos that failed to load in this browser (key -> when), kept a week: a channel without a
@@ -140,6 +143,7 @@ try {
     favorites = new Set(p.favorites || []);
     hidden = new Set(p.hidden || []);
     broken = p.broken || {};
+    health = p.health || {};
     lastKey = p.lastKey;
   }
   const v = JSON.parse(localStorage.getItem(VIEW_KEY) || 'null') as Partial<typeof view> | null;
@@ -175,7 +179,7 @@ const saveView = (): void => {
 };
 const savePrefs = (): void => {
   try {
-    localStorage.setItem(PREFS_KEY, JSON.stringify({ favorites: [...favorites], hidden: [...hidden], broken, lastKey } as LiveTvPrefs));
+    localStorage.setItem(PREFS_KEY, JSON.stringify({ favorites: [...favorites], hidden: [...hidden], broken, health, lastKey } as LiveTvPrefs));
   } catch {
     /* ignore */
   }
@@ -186,14 +190,52 @@ const providerById = (id: string): LiveTvProvider | undefined => state.providers
 let byKey = new Map<string, LiveTvChannel>();
 const isFav = (c: LiveTvChannel): boolean => c.keys.some((k) => favorites.has(k));
 const isHidden = (c: LiveTvChannel): boolean => c.keys.some((k) => hidden.has(k));
+const ratingOf = (key: string): StreamRating => rateStream(health[key]);
+/** The channel's best stream by its history (the one the player will try first) */
+const bestOf = (c: LiveTvChannel): { src: LiveTvSource; r: StreamRating } => {
+  let best: { src: LiveTvSource; r: StreamRating } | undefined;
+  for (const src of c.sources) {
+    const r = ratingOf(src.key);
+    if (!best || ratingRank(r.rating) < ratingRank(best.r.rating)) best = { src, r };
+  }
+  return best || { src: { key: c.key, providerId: c.providerId, name: c.name }, r: rateStream(undefined) };
+};
 /** "Did not play last time": every stream of it failed (one working source is enough) */
-const isBroken = (c: LiveTvChannel): boolean => c.sources.every((s) => broken[s.key]);
+const isBroken = (c: LiveTvChannel): boolean => bestOf(c).r.rating === 'bad';
+/** The dot on the tile: the best stream's rating, with its line for the tooltip (several streams: which one) */
+const dotHtml = (c: LiveTvChannel): string => {
+  const { src, r } = bestOf(c);
+  if (r.rating === 'none') return '';
+  const which = c.sources.length > 1 ? ` (${src.quality || src.name})` : '';
+  return `<i class="hdot ${r.rating}" title="${esc(r.text + which)}"></i>`;
+};
+/** A try just made, noted here before the server's copy arrives (the server keeps it) */
+function noteTry(key: string, ok: boolean, ms?: number): void {
+  const tries = health[key] || [];
+  const last = tries[tries.length - 1];
+  // the first picture completes the tune's own entry (as the server does), it is not a second try
+  if (ok && ms && last?.ok && Date.now() - last.at < HEALTH_AMEND_MS) last.ms = ms;
+  else health[key] = pushTry(tries, ms ? { at: Date.now(), ok, ms } : { at: Date.now(), ok });
+  if (ok) delete broken[key];
+  else broken[key] = Date.now();
+  savePrefs();
+}
+/** The tile's dot and dimming follow a try just made */
+function refreshTile(c: LiveTvChannel): void {
+  const tile = el.grid.querySelector<HTMLElement>(`.ch[data-key="${CSS.escape(c.key)}"]`);
+  if (!tile) return;
+  const dim = isBroken(c);
+  tile.classList.toggle('dim', dim);
+  tile.title = dim ? bestOf(c).r.text : '';
+  tile.querySelector('.hdot')?.remove();
+  tile.querySelector('.ch-name')?.insertAdjacentHTML('afterbegin', dotHtml(c));
+}
 const channelByKey = (key: string | undefined): LiveTvChannel | undefined => {
   const c = key ? byKey.get(key) : undefined;
   return c && !isHidden(c) ? c : undefined;
 };
-/** The order of the All view: channels that did not play last time last, those without a working logo before them */
-const rankOf = (c: LiveTvChannel): number => (isBroken(c) ? 2 : !c.logo || badLogos[c.key] ? 1 : 0);
+/** The order of the All view: the streams' history first (good, untried, weak, bad), a working logo breaking ties */
+const rankOf = (c: LiveTvChannel): number => ratingRank(bestOf(c).r.rating) * 2 + (!c.logo || badLogos[c.key] ? 1 : 0);
 const anyRefreshRunning = (): boolean => state.providers.some((p) => p.refresh.state === 'running' || p.epg.state === 'running');
 
 // ---------------------------------------------------------------- the player
@@ -208,19 +250,23 @@ const player = new LiveTvPlayer(el.theater, {
   },
   onFavorite: (ch, on) => void setFavorite(ch, on),
   isFavorite: (ch) => isFav(ch),
-  isBroken: (key) => !!broken[key],
+  streamRank: (key) => ratingRank(ratingOf(key).rating),
+  streamRating: (key) => ratingOf(key).rating,
   onHide: (ch) => void setHidden(ch, true),
   onTuned: (ch, key, ok) => {
-    // the server keeps this too; the tile dims (or brightens) right away
-    if (ok) delete broken[key];
-    else broken[key] = Date.now();
-    savePrefs();
-    const tile = el.grid.querySelector<HTMLElement>(`.ch[data-key="${CSS.escape(ch.key)}"]`);
-    if (tile) {
-      const dim = isBroken(ch);
-      tile.classList.toggle('dim', dim);
-      tile.title = dim ? BROKEN_TITLE : '';
-    }
+    // the server keeps this too; the tile's dot (and dimming) answers right away
+    noteTry(key, ok);
+    refreshTile(ch);
+  },
+  onPlayed: (ch, key, ms) => {
+    noteTry(key, true, ms);
+    refreshTile(ch);
+    void api.liveTvHealth({ key, ok: true, ms }).then(applyPrefs).catch(() => undefined);
+  },
+  onStreamFailed: (ch, key) => {
+    noteTry(key, false);
+    refreshTile(ch);
+    void api.liveTvHealth({ key, ok: false }).then(applyPrefs).catch(() => undefined);
   },
   providerName: (ch) => (state.providers.length > 1 ? providerById(ch.providerId)?.name || '' : ''),
   guide: (key) => api.liveTvGuide(key),
@@ -232,7 +278,6 @@ const player = new LiveTvPlayer(el.theater, {
   },
 });
 
-const BROKEN_TITLE = 'Did not play last time';
 
 /** A favorite is kept under the channel's first key; taking it off clears every key of the channel (lists made before the merge) */
 async function setFavorite(c: LiveTvChannel, on: boolean): Promise<void> {
@@ -281,6 +326,7 @@ function applyPrefs(p: LiveTvPrefs): void {
   favorites = new Set(p.favorites);
   hidden = new Set(p.hidden || []);
   broken = p.broken || {};
+  health = p.health || {};
   if (p.lastKey) lastKey = p.lastKey;
   savePrefs();
 }
@@ -488,12 +534,12 @@ function tileHtml(c: LiveTvChannel): string {
   const prov = state.providers.length > 1 ? providerById(c.providerId)?.name : '';
   const sub = [...c.groups, prov, c.sources.length > 1 ? `${c.sources.length} streams` : ''].filter(Boolean).join(' · ');
   const dim = isBroken(c);
-  return `<button type="button" class="ch${player.current?.key === c.key ? ' playing' : ''}${dim ? ' dim' : ''}" data-key="${esc(c.key)}" aria-label="Play ${esc(c.name)}"${dim ? ` title="${BROKEN_TITLE}"` : ''}>
+  return `<button type="button" class="ch${player.current?.key === c.key ? ' playing' : ''}${dim ? ' dim' : ''}" data-key="${esc(c.key)}" aria-label="Play ${esc(c.name)}"${dim ? ` title="${esc(bestOf(c).r.text)}"` : ''}>
     <span class="ch-logo">${c.logo ? `<img src="${esc(c.logo)}" alt="" loading="lazy" draggable="false" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'initials',textContent:this.dataset.i}))" data-i="${esc(initials(c.name))}" />` : `<span class="initials">${esc(initials(c.name))}</span>`}
       ${c.number ? `<span class="ch-num">${c.number}</span>` : ''}${c.drm ? '<span class="ch-drm">DRM</span>' : ''}
       <span class="ch-fav${fav ? ' on' : ''}" role="button" aria-label="${fav ? 'Remove from favorites' : 'Add to favorites'}" data-fav="${esc(c.key)}">${fav ? STAR_ON : STAR}</span>
     </span>
-    <span class="ch-body"><span class="ch-name">${esc(c.name)}</span><span class="ch-sub">${esc(sub)}</span><span class="ch-now" data-now="${esc(c.key)}"></span></span>
+    <span class="ch-body"><span class="ch-name">${dotHtml(c)}${esc(c.name)}</span><span class="ch-sub">${esc(sub)}</span><span class="ch-now" data-now="${esc(c.key)}"></span></span>
   </button>`;
 }
 

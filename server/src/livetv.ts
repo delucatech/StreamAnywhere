@@ -18,7 +18,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import type { LiveTvAccount, LiveTvChannel, LiveTvChannelGuideResponse, LiveTvChannelsResponse, LiveTvGuideNowResponse, LiveTvLeaveRequest, LiveTvPrefs, LiveTvPrefsPatch, LiveTvProvider, LiveTvProviderInput, LiveTvProviderKind, LiveTvState, LiveTvTestRequest, LiveTvTestResponse, LiveTvTuneRequest, LiveTvTuneResponse, LiveTvTuneStatus } from '../../shared/types';
+import type { LiveTvAccount, LiveTvChannel, LiveTvChannelGuideResponse, LiveTvChannelsResponse, LiveTvGuideNowResponse, LiveTvHealthReport, LiveTvLeaveRequest, LiveTvPrefs, LiveTvPrefsPatch, LiveTvTry, LiveTvProvider, LiveTvProviderInput, LiveTvProviderKind, LiveTvState, LiveTvTestRequest, LiveTvTestResponse, LiveTvTuneRequest, LiveTvTuneResponse, LiveTvTuneStatus } from '../../shared/types';
+import { HEALTH_AMEND_MS, pushTry } from '../../shared/livetvHealth';
 import { detectFfmpeg } from './ffmpeg';
 import { decryptJson, encryptJson, setLiveTvCryptoLogger } from './livetvCrypto';
 import { EPG_TTL_MS, epgLoading, epgStore, forgetEpg, loadEpg, nowNext, programmesFor, setEpgDir, type EpgWanted } from './livetvEpg';
@@ -129,15 +130,24 @@ function loadPrefs(): LiveTvPrefs {
     const parsed = JSON.parse(fs.readFileSync(PREFS_FILE, 'utf8')) as Partial<LiveTvPrefs>;
     const broken: Record<string, number> = {};
     if (parsed.broken && typeof parsed.broken === 'object') for (const [k, v] of Object.entries(parsed.broken)) if (Number(v) > 0) broken[k] = Number(v);
+    const health: Record<string, LiveTvTry[]> = {};
+    if (parsed.health && typeof parsed.health === 'object') {
+      for (const [k, v] of Object.entries(parsed.health)) {
+        if (!Array.isArray(v)) continue;
+        const tries = v.filter((t): t is LiveTvTry => !!t && typeof t === 'object' && Number(t.at) > 0 && typeof t.ok === 'boolean').map((t) => (t.ms && Number(t.ms) > 0 ? { at: Number(t.at), ok: t.ok, ms: Number(t.ms) } : { at: Number(t.at), ok: t.ok }));
+        if (tries.length) health[k] = tries;
+      }
+    }
     prefs = {
       favorites: Array.isArray(parsed.favorites) ? parsed.favorites.map(String) : [],
       hidden: Array.isArray(parsed.hidden) ? parsed.hidden.map(String) : [],
       broken,
+      health,
       lastKey: typeof parsed.lastKey === 'string' ? parsed.lastKey : undefined,
       lastAt: Number(parsed.lastAt) || undefined,
     };
   } catch {
-    prefs = { favorites: [], hidden: [], broken: {} };
+    prefs = { favorites: [], hidden: [], broken: {}, health: {} };
   }
   return prefs;
 }
@@ -450,6 +460,7 @@ export function deleteProvider(id: string): void {
   pr.favorites = pr.favorites.filter((k) => !k.startsWith(id + ':'));
   pr.hidden = pr.hidden.filter((k) => !k.startsWith(id + ':'));
   for (const k of Object.keys(pr.broken)) if (k.startsWith(id + ':')) delete pr.broken[k];
+  for (const k of Object.keys(pr.health)) if (k.startsWith(id + ':')) delete pr.health[k];
   if (pr.lastKey?.startsWith(id + ':')) pr.lastKey = undefined;
   if (pr.favorites.length + pr.hidden.length + Object.keys(pr.broken).length !== before || !pr.lastKey) prefsChanged();
   changed(true);
@@ -682,23 +693,62 @@ function sourceOf(key: string): StreamSource | undefined {
  * Whether the channel's last tune worked is kept with the preferences (every device ranks
  * channels that did not play last time after the others; a tune that works clears it).
  */
-function noteTune(key: string, ok: boolean): void {
+/** Streams with a history at most (the oldest-tried forgotten beyond it): the preferences go to every page poll */
+const HEALTH_MAX_STREAMS = 3000;
+
+/** A tune answered (ok or not, after `ms`): the stream's history and the "did not play" mark */
+function noteTune(key: string, ok: boolean, ms: number): void {
   const pr = loadPrefs();
-  if (ok) {
-    if (!(key in pr.broken)) return;
-    delete pr.broken[key];
-  } else pr.broken[key] = Date.now();
+  if (ok) delete pr.broken[key];
+  else pr.broken[key] = Date.now();
+  addTry(pr, key, { at: Date.now(), ok, ms: ok ? Math.max(1, Math.round(ms)) : undefined });
   prefsChanged();
+}
+
+function addTry(pr: LiveTvPrefs, key: string, t: LiveTvTry): void {
+  pr.health[key] = pushTry(pr.health[key], t);
+  const keys = Object.keys(pr.health);
+  if (keys.length > HEALTH_MAX_STREAMS) {
+    const lastAt = (k: string): number => pr.health[k][pr.health[k].length - 1]?.at || 0;
+    for (const k of keys.sort((a, b) => lastAt(a) - lastAt(b)).slice(0, keys.length - HEALTH_MAX_STREAMS)) delete pr.health[k];
+  }
+}
+
+/**
+ * The page reporting how a stream went: the first picture (its `ms` from the tap completes the
+ * tune's own entry when it is recent, since the server only knows how long the tune took), or a
+ * stream that stopped / would not decode after it opened (a failed try, and the "did not play" mark).
+ */
+export function reportHealth(r: LiveTvHealthReport): LiveTvPrefs {
+  const key = String(r?.key || '');
+  if (!findChannel(key)) throw new LiveTvError('Unknown channel', 404);
+  const pr = loadPrefs();
+  const now = Date.now();
+  const tries = pr.health[key] || [];
+  const last = tries[tries.length - 1];
+  const ms = Number(r.ms) > 0 ? Math.min(600_000, Math.round(Number(r.ms))) : undefined;
+  if (r.ok) {
+    if (last && last.ok && now - last.at < HEALTH_AMEND_MS) {
+      if (ms) last.ms = ms;
+    } else addTry(pr, key, ms ? { at: now, ok: true, ms } : { at: now, ok: true });
+    delete pr.broken[key];
+  } else {
+    addTry(pr, key, { at: now, ok: false });
+    pr.broken[key] = now;
+  }
+  prefsChanged();
+  return pr;
 }
 
 /** A viewer id as the page sends it (letters, digits, - and _; at most 64) */
 const cleanViewer = (v: unknown): string | undefined => (typeof v === 'string' && /^[\w-]{1,64}$/.test(v) ? v : undefined);
 
 export async function tune(key: string, viewer?: string): Promise<LiveTvTuneResponse> {
-  tuning.set(key, { phase: 'probing', at: Date.now() });
+  const t0 = Date.now();
+  tuning.set(key, { phase: 'probing', at: t0 });
   try {
     const r = await tuneChannel(key, viewer);
-    noteTune(key, r.state === 'ok');
+    noteTune(key, r.state === 'ok', Date.now() - t0);
     return r;
   } finally {
     tuning.delete(key);
@@ -907,6 +957,15 @@ export function registerLiveTv(app: FastifyInstance): void {
     const viewer = cleanViewer(req.body?.viewer);
     if (key && viewer) leaveRemux(key, viewer);
     return { ok: true };
+  });
+  app.post<{ Body: LiveTvHealthReport }>('/api/livetv/health', async (req, reply) => {
+    try {
+      return reportHealth(req.body || ({} as LiveTvHealthReport));
+    } catch (e) {
+      const status = e instanceof LiveTvError ? e.status : 400;
+      reply.code(status);
+      return { error: (e as Error).message };
+    }
   });
   app.post<{ Body: LiveTvPrefsPatch }>('/api/livetv/prefs', async (req, reply) => {
     try {
