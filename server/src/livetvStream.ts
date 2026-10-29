@@ -286,6 +286,8 @@ interface RemuxSession {
   lastHit: number;
   /** viewer id -> last request: the player says when it leaves, so a zapped-away channel stops at once */
   viewers: Map<string, number>;
+  /** viewers that said they left: their late requests (a window poll in flight) do not bring them back; a new tune does */
+  gone: Set<string>;
   leaveTimer?: NodeJS.Timeout;
   /** track id -> timescale of the init segment, once it exists */
   timescales?: Map<number, number>;
@@ -582,7 +584,7 @@ async function startRemux(key: string, src: RemuxSource, ffmpeg: string, secrets
   fs.mkdirSync(dir, { recursive: true });
   const args = remuxArgs(src, dir);
   const proc = spawn(ffmpeg, args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
-  const s: RemuxSession = { key, input: src.input, dir, proc, startedAt: Date.now(), lastHit: Date.now(), viewers: new Map(), segStarts: new Map(), ready: Promise.resolve(), stderr: [] };
+  const s: RemuxSession = { key, input: src.input, dir, proc, startedAt: Date.now(), lastHit: Date.now(), viewers: new Map(), gone: new Set(), segStarts: new Map(), ready: Promise.resolve(), stderr: [] };
   let logged = 0;
   proc.stderr?.on('data', (d: Buffer) => {
     for (const line of d.toString().split(/\r?\n/)) {
@@ -670,6 +672,9 @@ export function remuxProgress(key: string): { sinceMs: number; segments: number;
 
 /** A request from a viewer: the session stays while any viewer is around */
 function hit(s: RemuxSession, viewer: string | undefined): void {
+  // a viewer that left is not back because one of its requests was still on the way (the
+  // window poll that crossed the leave used to cancel the stop and keep ffmpeg running for good)
+  if (viewer && s.gone.has(viewer)) return;
   s.lastHit = Date.now();
   if (viewer) s.viewers.set(viewer, s.lastHit);
   if (s.leaveTimer) {
@@ -695,6 +700,7 @@ export async function ensureRemux(key: string, src: RemuxSource, secrets: string
     }
     s = await startRemux(key, src, ff.path, secrets);
   }
+  if (viewer) s.gone.delete(viewer);
   hit(s, viewer);
   try {
     await s.ready;
@@ -710,6 +716,7 @@ export function leaveRemux(key: string, viewer: string): void {
   const s = sessions.get(key);
   if (!s) return;
   s.viewers.delete(viewer);
+  s.gone.add(viewer);
   if (s.viewers.size || s.leaveTimer) return;
   s.leaveTimer = setTimeout(() => {
     s.leaveTimer = undefined;

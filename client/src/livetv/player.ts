@@ -412,9 +412,12 @@ export class LiveTvPlayer {
   }
 
   private stopMedia(): void {
-    this.feed.pause();
+    // the stream goes before the pause: pausing reports a state change, which refreshes the
+    // timeline, and with the stream still set that polled the window once more (after the leave
+    // was sent, so the server kept the recorder for a viewer that was gone)
     this.streamUrl = undefined;
     this.win = undefined;
+    this.feed.pause();
     this.windowSec = 0;
     this.seekRow.classList.add('hidden');
     this.big.classList.add('hidden');
