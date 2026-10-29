@@ -1318,3 +1318,20 @@ body.theater-open .overlay {
   pointer-events: auto;
   cursor: pointer;
 }
+/* a line from the player worth the viewer's eye (the sound restarted, went off; why), for a moment */
+.th-toast {
+  position: absolute;
+  left: 50%;
+  bottom: 112px;
+  transform: translateX(-50%);
+  z-index: 3;
+  max-width: min(80%, 640px);
+  padding: 8px 14px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.78);
+  color: #fff;
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: center;
+  pointer-events: none;
+}

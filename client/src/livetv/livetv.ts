@@ -977,6 +977,8 @@ window.addEventListener('keydown', (e) => {
   }
 });
 
+// for the console: the player's state and the renderer's counters while a channel plays
+(window as unknown as { streamAnywhereLiveTv: unknown }).streamAnywhereLiveTv = { player, stats: () => player.stats() };
 setBoot('connect');
 render();
 void sync().finally(() => {

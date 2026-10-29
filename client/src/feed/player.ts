@@ -11,7 +11,7 @@
  * bar, "paused" bookkeeping and a muted flag (volume 0/1).
  */
 import type { MediaPrefix, MediaRecording } from '../media/demuxer';
-import type { ConnectionKind, DownloadProgress, LoadSource, PlayerState, Renderer, RendererEvents } from '../renderers/types';
+import type { ConnectionKind, DownloadProgress, LoadSource, PlayerState, PlayerStats, Renderer, RendererEvents } from '../renderers/types';
 import { VideoElementRenderer } from '../renderers/videoElementRenderer';
 import { WebCodecsRenderer, webCodecsSupported } from '../renderers/webcodecsRenderer';
 
@@ -34,6 +34,8 @@ export interface FeedPlayerEvents {
   onTime(currentTime: number, duration: number): void;
   /** The renderer is loading or buffering (true), or no longer waiting for data (false) */
   onWaiting(waiting: boolean): void;
+  /** Something the viewer should know that is not an error (the sound restarted, went off, is held back): one line */
+  onNotice?(text: string): void;
 }
 
 const TICK_MS = 250;
@@ -64,6 +66,7 @@ export class FeedPlayer {
       onLog: (level, msg) => {
         if (level === 'error') console.warn(`[feed player] ${msg}`);
         else console.debug(`[feed player] ${msg}`);
+        if (level !== 'info' && !this.destroyed) this.events.onNotice?.(msg);
       },
       onFirstFrame: () => {
         if (!this.destroyed) this.events.onFirstFrame();
@@ -96,6 +99,11 @@ export class FeedPlayer {
     return this.renderer.download?.() ?? { loaded: 0, total: 0, fraction: -1 };
   }
   /** The bytes the renderer holds from the start of the file(s), for the media cache */
+  /** The renderer's counters (decoder queues, audio chunks, clock): for the diagnostics overlay and the console */
+  stats(): PlayerStats {
+    return this.renderer.stats();
+  }
+
   recording(): { video?: MediaRecording; audio?: MediaRecording } {
     return this.renderer.recording?.() ?? {};
   }

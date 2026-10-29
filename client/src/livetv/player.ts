@@ -19,6 +19,7 @@
  * programme guide panel (what is on now and next, the day's listing), mute, fullscreen (the
  * theater itself), and the controls hiding while playing.
  */
+import type { PlayerStats } from '../renderers/types';
 import type { LiveTvChannel, LiveTvChannelGuideResponse, LiveTvProgramme, LiveTvTuneResponse, LiveTvTuneStatus, LiveTvWindow } from '../../../shared/types';
 import { api, ApiError, apiUrl } from '../api';
 import { FeedPlayer } from '../feed/player';
@@ -114,6 +115,8 @@ export class LiveTvPlayer {
   private guideTimer = 0;
   private timelineTimer = 0;
   private waitTimer = 0;
+  private toast: HTMLElement;
+  private toastTimer = 0;
   /** While a channel opens: the overlay ticks every second with what the server is doing */
   private progressTimer = 0;
   private openedAt = 0;
@@ -143,6 +146,7 @@ export class LiveTvPlayer {
       <div class="th-stage"><canvas width="16" height="9"></canvas>
         <div class="th-wait hidden"><span class="spinner"></span><span class="th-wait-text">Tuning…</span><small class="th-wait-detail"></small></div>
         <div class="th-msg hidden"></div>
+        <div class="th-toast hidden" role="status"></div>
         <button type="button" class="th-big hidden" aria-label="Play">${ICON.play}</button>
       </div>
       <div class="th-top">
@@ -180,6 +184,7 @@ export class LiveTvPlayer {
     this.waitText = q('.th-wait-text');
     this.waitDetail = q('.th-wait-detail');
     this.msg = q('.th-msg');
+    this.toast = q('.th-toast');
     this.big = q<HTMLButtonElement>('.th-big');
     this.logoEl = q('.th-logo');
     this.nameEl = q('.th-name');
@@ -210,6 +215,7 @@ export class LiveTvPlayer {
         else if (this.feed.paused) this.setState('paused');
       },
       onTime: () => undefined,
+      onNotice: (text) => this.notice(text),
       onWaiting: (waiting) => {
         // a stall shorter than a moment (a hole in a lossy feed, a slow segment) is not worth an overlay
         window.clearTimeout(this.waitTimer);
@@ -282,6 +288,11 @@ export class LiveTvPlayer {
     return this.items[this.index];
   }
   /** How the picture is made: the renderer's name (WebCodecs + Canvas, or the hidden-video fallback) */
+  /** The feed player's counters (for the console: `streamAnywhereLiveTv.stats()`) */
+  stats(): PlayerStats {
+    return this.feed.stats();
+  }
+
   get rendererName(): string {
     return this.feed.rendererName;
   }
@@ -422,6 +433,8 @@ export class LiveTvPlayer {
     this.seekRow.classList.add('hidden');
     this.big.classList.add('hidden');
     this.msg.classList.add('hidden');
+    this.toast.classList.add('hidden');
+    window.clearTimeout(this.toastTimer);
   }
 
   /** The stream ended: a live recording never does unless the recorder stopped (a dead upstream, the idle reaper). */
@@ -515,6 +528,14 @@ export class LiveTvPlayer {
     this.playBtn.innerHTML = playing ? ICON.pause : ICON.play;
     this.playBtn.setAttribute('aria-label', playing ? 'Pause' : 'Play');
     this.refreshTimeline();
+  }
+
+  /** A line from the player worth the viewer's eye (the sound restarted / went off and why): shown for a moment */
+  private notice(text: string): void {
+    this.toast.textContent = text;
+    this.toast.classList.remove('hidden');
+    window.clearTimeout(this.toastTimer);
+    this.toastTimer = window.setTimeout(() => this.toast.classList.add('hidden'), 8000);
   }
 
   private showWait(text: string, detail = ''): void {

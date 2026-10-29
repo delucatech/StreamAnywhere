@@ -578,6 +578,26 @@ the poll retries anyway. The HLS relay
 routes (`/api/livetv/hls/…`, `/api/livetv/seg/…`) stay for an HLS player that wants them; the
 page does not use them.
 
+Sound that stops while the picture goes on (seen in the car: "audio works for about a second, then
+nothing") has a watchdog in the WebCodecs renderer (`audioWatch`, every frame step while playing with
+sound): no chunk placed on the audio timeline for 2 s although there is sound to decode means the
+decoder stopped answering or the timestamps left the clock, and the sound is restarted where the
+picture is (the AudioDecoder reset and configured again, the clock re-based; up to three times in a
+row, then the picture gets a wall clock and the reason is said); an AudioContext whose clock stands
+still although it says it runs (the device handed the speakers to something else) gets the wall
+clock at once, since a frozen master clock would freeze the picture too; a context found suspended
+is resumed. Two things that could cause exactly that silent picture are also fixed: the sink's
+`pause()` / `resume()` now keep the last wish and apply it until the context agrees (a resume issued
+while a suspend was still in flight used to see *running*, do nothing, and leave the context
+suspended for good), and a live stream whose timestamps fall more than 3 s behind the clock (a
+backward jump at an ad break the recorder stitched, or a device decoding slower than the clock
+runs) is followed by re-basing the clock, where before every late frame and every late chunk of
+sound was dropped forever. A context that resumes after the 400 ms the start waited (a slow
+device, not the autoplay policy) hands the clock over then, not at the next tap. Each restart and
+each switch to the wall clock is one line in the player's toast (`FeedPlayerEvents.onNotice`, the
+renderer's warnings and errors) and in the console; `streamAnywhereLiveTv.stats()` in the console
+gives the renderer's counters (audio chunks scheduled / dropped, context state, restarts).
+
 **Browser** (`client/src/livetv/livetv.ts`): search, a provider dropdown (shown with two or more),
 an **All / Favorites** switch (the favorites count on it; the group chips follow the choice), group
 chips with counts (scrollable; a channel in several groups counts in each), tiles with logo

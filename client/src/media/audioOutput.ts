@@ -88,6 +88,16 @@ export class AudioSink implements PlaybackClock {
   lastError = '';
   /** Channel count of the last chunk mixed down to stereo here (0 = none: Web Audio folded it, or it was stereo) */
   downmixedFrom = 0;
+  /** performance.now() of the last chunk placed on the timeline (0 = none yet): the renderer's stall watchdog reads it */
+  lastScheduledAt = 0;
+  /** Whether the context should be running (resume) or suspended (pause): see applyState */
+  private wantRunning = false;
+  private applying?: Promise<void>;
+  /**
+   * start() gave up waiting for the context to resume (autoplay policy, or just a slow device) and
+   * the resume then went through after all: the renderer hands the clock back to the sink.
+   */
+  onLateResume?: () => void;
 
   /**
    * @param sampleRate the track's sample rate. The context is opened at that rate so the whole
@@ -155,12 +165,17 @@ export class AudioSink implements PlaybackClock {
   async start(mediaUs: number, resumeTimeoutMs = 400): Promise<boolean> {
     this.stopScheduled();
     this.baseMediaUs = mediaUs;
+    this.wantRunning = true;
     if (this.ctx.state !== 'running') {
-      const resumed = await Promise.race([
-        this.ctx.resume().then(() => true, () => false),
-        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), resumeTimeoutMs)),
-      ]);
-      if (!resumed || (this.ctx.state as AudioContextState) !== 'running') return false;
+      const resuming = this.ctx.resume().then(() => true, () => false);
+      const resumed = await Promise.race([resuming, new Promise<boolean>((resolve) => setTimeout(() => resolve(false), resumeTimeoutMs))]);
+      if (!resumed || (this.ctx.state as AudioContextState) !== 'running') {
+        // a slow device gets there after the deadline: say so, instead of staying silent until a tap
+        void resuming.then((ok) => {
+          if (ok && !this.started && this.wantRunning && this.ctx.state === 'running') this.onLateResume?.();
+        });
+        return false;
+      }
     }
     this.baseCtxTime = this.ctx.currentTime + 0.03;
     this.started = true;
@@ -196,11 +211,38 @@ export class AudioSink implements PlaybackClock {
   }
 
   async pause(): Promise<void> {
-    if (this.ctx.state === 'running') await this.ctx.suspend();
+    this.wantRunning = false;
+    await this.applyState();
   }
 
   async resume(): Promise<void> {
-    if (this.ctx.state === 'suspended') await this.ctx.resume();
+    this.wantRunning = true;
+    await this.applyState();
+  }
+
+  /**
+   * suspend() and resume() settle later than they are called, and `state` only changes when they
+   * do: a resume() issued while a suspend() was still in flight used to see 'running', do nothing,
+   * and leave the context suspended for good (the clock frozen, the sound gone). The wish is kept
+   * and applied until the context agrees with it, whichever call came last.
+   */
+  private applyState(): Promise<void> {
+    if (this.applying) return this.applying;
+    const run = async () => {
+      for (let i = 0; i < 4; i++) {
+        const state = this.ctx.state as AudioContextState;
+        if (state === 'closed') return;
+        if (this.wantRunning && state === 'suspended') await this.ctx.resume().catch(() => undefined);
+        else if (!this.wantRunning && state === 'running') await this.ctx.suspend().catch(() => undefined);
+        else return;
+      }
+    };
+    this.applying = run().finally(() => {
+      this.applying = undefined;
+      const state = this.ctx.state as AudioContextState;
+      if ((this.wantRunning && state === 'suspended') || (!this.wantRunning && state === 'running')) void this.applyState();
+    });
+    return this.applying;
   }
 
   /** Queue decoded audio. Before start() the data is held; afterwards it is scheduled immediately. */
@@ -270,6 +312,7 @@ export class AudioSink implements PlaybackClock {
     this.nextStartTime = when + durationS;
     this.sources.set(src, { buffer, mediaUs });
     this.scheduledChunks++;
+    this.lastScheduledAt = performance.now();
     if (this.firstScheduledUs < 0 || mediaUs < this.firstScheduledUs) this.firstScheduledUs = mediaUs;
     this.scheduledUntilUs = Math.max(this.scheduledUntilUs, mediaUs + Math.round(buffer.duration * 1e6));
   }
@@ -303,6 +346,7 @@ export class AudioSink implements PlaybackClock {
   }
 
   destroy(): void {
+    this.onLateResume = undefined;
     this.stopAll();
     void this.ctx.close();
   }
