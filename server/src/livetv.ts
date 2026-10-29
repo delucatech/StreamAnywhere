@@ -18,14 +18,14 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import type { LiveTvAccount, LiveTvChannel, LiveTvChannelGuideResponse, LiveTvChannelsResponse, LiveTvGuideNowResponse, LiveTvLeaveRequest, LiveTvPrefs, LiveTvPrefsPatch, LiveTvProvider, LiveTvProviderInput, LiveTvProviderKind, LiveTvState, LiveTvTestRequest, LiveTvTestResponse, LiveTvTuneRequest, LiveTvTuneResponse } from '../../shared/types';
+import type { LiveTvAccount, LiveTvChannel, LiveTvChannelGuideResponse, LiveTvChannelsResponse, LiveTvGuideNowResponse, LiveTvLeaveRequest, LiveTvPrefs, LiveTvPrefsPatch, LiveTvProvider, LiveTvProviderInput, LiveTvProviderKind, LiveTvState, LiveTvTestRequest, LiveTvTestResponse, LiveTvTuneRequest, LiveTvTuneResponse, LiveTvTuneStatus } from '../../shared/types';
 import { detectFfmpeg } from './ffmpeg';
 import { decryptJson, encryptJson, setLiveTvCryptoLogger } from './livetvCrypto';
 import { EPG_TTL_MS, epgLoading, epgStore, forgetEpg, loadEpg, nowNext, programmesFor, setEpgDir, type EpgWanted } from './livetvEpg';
 import { checkLiveUrl, fetchLiveText, redactUrl, safeHost } from './livetvHttp';
 import { cleanChannelName, countGroups, parseM3u, splitGroups, type M3uChannel } from './livetvM3u';
 import { LIVETV_PRESETS, presetById } from './livetvPresets';
-import { classify, DVR_WINDOW_SEC, ensureRemux, leaveRemux, pickVariant, registerLiveTvStreamRoutes, remuxAvailable, remuxStats, setLiveTvStreamLogger, setRemuxRoot, shutdownLiveTvStreams, type RemuxSource, type StreamSource, type Verdict } from './livetvStream';
+import { classify, DVR_WINDOW_SEC, ensureRemux, leaveRemux, pickVariant, registerLiveTvStreamRoutes, remuxAvailable, remuxProgress, remuxStats, setLiveTvStreamLogger, setRemuxRoot, shutdownLiveTvStreams, type RemuxSource, type StreamSource, type Verdict } from './livetvStream';
 import { normalizeXtreamServer, xtreamAccount, xtreamEpgUrl, xtreamLiveChannels, xtreamLiveUrl, xtreamSecrets, XtreamError, type XtreamCreds } from './livetvXtream';
 
 export class LiveTvError extends Error {
@@ -690,9 +690,31 @@ function noteTune(key: string, ok: boolean): void {
 const cleanViewer = (v: unknown): string | undefined => (typeof v === 'string' && /^[\w-]{1,64}$/.test(v) ? v : undefined);
 
 export async function tune(key: string, viewer?: string): Promise<LiveTvTuneResponse> {
-  const r = await tuneChannel(key, viewer);
-  noteTune(key, r.state === 'ok');
-  return r;
+  tuning.set(key, { phase: 'probing', at: Date.now() });
+  try {
+    const r = await tuneChannel(key, viewer);
+    noteTune(key, r.state === 'ok');
+    return r;
+  } finally {
+    tuning.delete(key);
+  }
+}
+
+/** The tunes in flight, by channel: what the server is doing for each (the player polls it) */
+const tuning = new Map<string, { phase: LiveTvTuneStatus['phase']; at: number }>();
+const mark = (key: string, phase: LiveTvTuneStatus['phase']): void => {
+  const t = tuning.get(key);
+  if (t) t.phase = phase;
+};
+
+/** Where opening `key` stands right now, plus how busy the server is (a starved VM explains a slow tune). */
+export function tuneStatus(key: string): LiveTvTuneStatus {
+  const load = Math.round((os.loadavg()[0] / Math.max(1, os.cpus().length)) * 10) / 10;
+  const t = tuning.get(key);
+  if (!t) return { phase: 'idle', load };
+  const r = t.phase === 'starting' || t.phase === 'recording' ? remuxProgress(key) : undefined;
+  if (r) return { phase: 'recording', sinceMs: Date.now() - t.at, segments: r.segments, note: r.note, load };
+  return { phase: t.phase, sinceMs: Date.now() - t.at, load };
 }
 
 async function tuneChannel(key: string, viewer: string | undefined): Promise<LiveTvTuneResponse> {
@@ -719,6 +741,7 @@ async function tuneChannel(key: string, viewer: string | undefined): Promise<Liv
       // what the recorder would read: the variant picked here, checked like any upstream URL
       const input = pickVariant(r.playlist, r.url) || { url: r.url };
       try {
+        mark(key, 'checking');
         await checkLiveUrl(input.url);
         v.hlsInput = input;
       } catch (e) {
@@ -738,6 +761,7 @@ async function tuneChannel(key: string, viewer: string | undefined): Promise<Liv
   if (!(await remuxAvailable())) return { key, state: 'unsupported', detail: 'no ffmpeg', message: 'Live channels need ffmpeg on the server (it turns the stream into what the page can decode); ffmpeg is not installed there.', elapsedMs: Date.now() - t0 };
   const input: RemuxSource = v.kind === 'hls' ? { url: (v.hlsInput || { url: v.url! }).url, headers: v.headers, input: 'hls', program: v.hlsInput?.program } : { url: v.url!, headers: v.headers, input: 'ts' };
   try {
+    mark(key, 'starting');
     const playUrl = (await ensureRemux(key, input, src.secrets || [], viewer)).playUrl;
     const what = v.kind === 'hls' ? `hls${v.hlsInput?.resolution ? ' ' + v.hlsInput.resolution : ''}${v.hlsInput?.bandwidth ? ' ' + Math.round(v.hlsInput.bandwidth / 1000) + ' kbps' : ''}` : 'mpeg-ts';
     log(`tune ${p.name} / ${cleanChannelName(c.name)}: recording ${what} from ${redactUrl(input.url, src.secrets || [])}, ${Date.now() - t0} ms`);
@@ -866,6 +890,11 @@ export function registerLiveTv(app: FastifyInstance): void {
     } catch (e) {
       return fail(reply, e);
     }
+  });
+  // what the server is doing for a channel being opened (the player polls it while its tune runs)
+  app.get<{ Querystring: { key?: string } }>('/api/livetv/tune/status', async (req, reply) => {
+    reply.header('cache-control', 'no-store');
+    return tuneStatus(String(req.query.key || ''));
   });
   // the player left a channel (switched, closed, or the page went away: a beacon): its recorder stops soon
   app.post<{ Body: LiveTvLeaveRequest }>('/api/livetv/leave', async (req) => {

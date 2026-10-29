@@ -555,7 +555,7 @@ first bytes:
   status (403 = geo-blocked or refused from the server, 404 = gone…).
 
 The verdict is kept for 5 min per channel. The player (`client/src/livetv/player.ts`) is a canvas:
-states *Tuning…* → *Loading…* → playing (controls hide after 3 s; LIVE badge; now / next with
+states *tuning* → *loading* → playing (controls hide after 3 s; LIVE badge; now / next with
 progress) or paused, or *unavailable* / *unsupported* with the message, **Try again**, **Next
 channel**, **Hide channel**, **Close**; a fetch / HTTP failure maps to *unavailable*, a decoder
 or codec failure to *unsupported*. Previous / next channel follow the browser's current list
@@ -563,7 +563,18 @@ or codec failure to *unsupported*. Previous / next channel follow the browser's 
 error message), **G** the guide panel, **M** mute, fullscreen (the theater). There are no closed
 captions on the canvas path (nothing draws text tracks; CEA-608 would need its own parser), and
 no `<video>` fallback is wanted: on a browser without WebCodecs the feed's hidden-video-to-canvas
-renderer (`FeedPlayer` mode `video-canvas`) is what runs, as it does for the feed. The HLS relay
+renderer (`FeedPlayer` mode `video-canvas`) is what runs, as it does for the feed.
+
+Nothing waits silently: while a channel opens, the overlay ticks every second with what the server
+is doing and for how long (*Checking the stream with the provider…*, *Starting the recorder…*,
+*Recording started, waiting for the first picture (1 of 2 segments)… 7 s*, *Downloading and decoding
+the first frames…*), from `GET /api/livetv/tune/status?key=` (the phase of the tune in flight, the
+recorder's segment count and last ffmpeg line, and the server's load per CPU: above 1.5 the overlay
+adds *The server is busy; this takes longer than usual*). The page start does the same: the home
+screen's splash and the channel area say *Connecting to the server… N s* / *Loading the channel
+list… N s* (after 10 s: the server is slow, still waiting), the first requests time out (45 s state,
+90 s channels), and a failed start shows the reason with **Try again** (the splash itself is tappable);
+the poll retries anyway. The HLS relay
 routes (`/api/livetv/hls/…`, `/api/livetv/seg/…`) stay for an HLS player that wants them; the
 page does not use them.
 

@@ -1282,3 +1282,39 @@ body.theater-open .overlay {
     transition: none;
   }
 }
+
+/* the opening status: what the server is doing, ticking so a slow start never looks frozen */
+.th-wait small {
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 12px;
+  line-height: 1.4;
+  max-width: 560px;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
+  min-height: 1em;
+}
+
+/* the splash says what the page waits for (ticking seconds), so a slow server never looks like a frozen tile */
+.splash-status {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(50% + 88px);
+  padding: 0 24px;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.5;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+.splash-status small {
+  display: block;
+  margin-top: 6px;
+  font-size: 13px;
+  font-weight: 400;
+  opacity: 0.8;
+}
+.splash.retry {
+  pointer-events: auto;
+  cursor: pointer;
+}

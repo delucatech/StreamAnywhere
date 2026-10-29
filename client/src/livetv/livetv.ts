@@ -27,6 +27,7 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
 };
 const el = {
   splash: $('splash'),
+  splashStatus: $('splashStatus'),
   titleIcon: $('titleIcon'),
   refreshBtn: $<HTMLButtonElement>('refreshBtn'),
   settingsBtn: $<HTMLButtonElement>('settingsBtn'),
@@ -294,6 +295,56 @@ function renderFavButtons(): void {
 let pollTimer = 0;
 let polling = false;
 
+// ---------------------------------------------------------------- the first load, told as it goes
+/**
+ * Where the page's start stands: the splash (and the empty channel area) say what is being
+ * waited for, with the seconds ticking, so a slow server (the small VM is busy at times) never
+ * looks like a frozen tile. `error` is the last failed attempt's reason, shown with "Try again".
+ */
+const boot: { phase: 'connect' | 'channels' | 'done'; at: number; error?: string; timer: number } = { phase: 'connect', at: Date.now(), timer: 0 };
+
+function bootText(): { text: string; detail: string } {
+  const sec = Math.round((Date.now() - boot.at) / 1000);
+  if (boot.error) return { text: `The server did not answer: ${boot.error}`, detail: offline ? 'You are offline.' : 'Tap to try again.' };
+  const text = boot.phase === 'connect' ? (sec < 2 ? 'Connecting to the server…' : `Connecting to the server… ${sec} s`) : `Loading the channel list… ${sec} s`;
+  const detail = sec >= 10 ? 'The server is slow to answer; it may be busy. Still waiting…' : '';
+  return { text, detail };
+}
+
+function renderBoot(): void {
+  const { text, detail } = bootText();
+  el.splashStatus.innerHTML = `${esc(text)}${detail ? `<small>${esc(detail)}</small>` : ''}`;
+  el.splash.classList.toggle('retry', !!boot.error);
+  if (!channels.length) renderEmpty();
+}
+
+/** The splash leaves (the server answered, or gave up); the list area carries on with the status. */
+function leaveSplash(): void {
+  if (el.splash.classList.contains('leaving') || el.splash.classList.contains('hidden')) return;
+  el.splash.classList.add('leaving');
+  window.setTimeout(() => el.splash.classList.add('hidden'), 320);
+}
+
+function setBoot(phase: typeof boot.phase, error?: string): void {
+  boot.phase = phase;
+  boot.error = error;
+  if (phase === 'done') {
+    window.clearInterval(boot.timer);
+    boot.timer = 0;
+    leaveSplash();
+    renderEmpty();
+    return;
+  }
+  if (!boot.timer) boot.timer = window.setInterval(renderBoot, 1000);
+  renderBoot();
+}
+el.splash.addEventListener('click', () => {
+  if (!boot.error) return;
+  boot.at = Date.now();
+  setBoot('connect');
+  void sync();
+});
+
 async function sync(): Promise<void> {
   if (polling) return;
   polling = true;
@@ -307,6 +358,11 @@ async function sync(): Promise<void> {
     }
     const cr = 'unchanged' in r ? r.channelsRev : r.channelsRev;
     if (cr !== channelsRev) {
+      if (boot.phase !== 'done') {
+        // the server is there: the providers are known, the (large) channel list is next
+        setBoot('channels');
+        leaveSplash();
+      }
       const c = await api.liveTvChannels();
       if (!('unchanged' in c)) {
         // an older server build (mid-deploy) answers without `groups`
@@ -316,10 +372,12 @@ async function sync(): Promise<void> {
         render();
       }
     } else if (!('unchanged' in r)) render();
+    if (boot.phase !== 'done') setBoot('done');
     setOffline(false);
   } catch (e) {
     if (e instanceof TypeError) setOffline(true);
     else if (e instanceof ApiError && e.status !== 401) toast(errMsg(e), true);
+    if (boot.phase !== 'done') setBoot(boot.phase, e instanceof TypeError ? (offline ? 'no connection' : 'the request failed (the connection dropped?)') : errMsg(e));
   } finally {
     polling = false;
     schedulePoll();
@@ -440,7 +498,13 @@ function appendMore(): void {
 
 function renderEmpty(): void {
   let html = '';
-  if (!state.providers.length) html = `<p><b>No providers yet.</b><br />Add an M3U playlist, an Xtream Codes account, or one of the free community playlists.</p><button type="button" class="btn primary" id="emptySettings">Open Settings</button>`;
+  if (boot.phase !== 'done') {
+    // the first load: what is being waited for (the seconds tick), or why it failed
+    const { text, detail } = bootText();
+    html = boot.error
+      ? `<p><b>${esc(text)}</b>${offline ? '<br />You are offline.' : ''}</p><button type="button" class="btn primary" id="emptyRetry">Try again</button>`
+      : `<p><span class="spinner"></span> ${esc(text)}${detail ? `<br /><small>${esc(detail)}</small>` : ''}</p>`;
+  } else if (!state.providers.length) html = `<p><b>No providers yet.</b><br />Add an M3U playlist, an Xtream Codes account, or one of the free community playlists.</p><button type="button" class="btn primary" id="emptySettings">Open Settings</button>`;
   else if (!channels.length) {
     const running = state.providers.find((p) => p.refresh.state === 'running');
     const failed = state.providers.filter((p) => p.refresh.state === 'error');
@@ -453,6 +517,11 @@ function renderEmpty(): void {
   el.empty.innerHTML = html;
   el.empty.classList.toggle('hidden', !html);
   el.empty.querySelector('#emptySettings')?.addEventListener('click', () => openSettings());
+  el.empty.querySelector('#emptyRetry')?.addEventListener('click', () => {
+    boot.at = Date.now();
+    setBoot('connect');
+    void sync();
+  });
 }
 
 function renderStatus(): void {
@@ -908,10 +977,11 @@ window.addEventListener('keydown', (e) => {
   }
 });
 
+setBoot('connect');
 render();
 void sync().finally(() => {
   (window as unknown as { streamAnywhereReady: boolean }).streamAnywhereReady = true;
-  el.splash.classList.add('leaving');
-  window.setTimeout(() => el.splash.classList.add('hidden'), 320);
-  if (!state.providers.length && !offline) openSettings();
+  // a failed start keeps the splash with its reason and "Tap to try again" (the poll retries too)
+  if (boot.phase === 'done') leaveSplash();
+  if (boot.phase === 'done' && !state.providers.length && !offline) openSettings();
 });

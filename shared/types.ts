@@ -938,6 +938,27 @@ export interface LiveTvWindow {
   segments: number;
 }
 
+/**
+ * Where opening a channel stands (GET /api/livetv/tune/status?key=): the player polls it while
+ * its tune request runs, so the overlay says what the server is doing instead of just spinning.
+ */
+export interface LiveTvTuneStatus {
+  /**
+   * idle: no tune of this channel runs on the server; probing: the provider's URL is being opened;
+   * checking: the picked quality is being opened; starting: the recorder is being launched;
+   * recording: ffmpeg runs, the first segments are awaited
+   */
+  phase: 'idle' | 'probing' | 'checking' | 'starting' | 'recording';
+  /** ms since the tune started */
+  sinceMs?: number;
+  /** segments the recorder has written so far (two are needed before playback starts) */
+  segments?: number;
+  /** ffmpeg's last line, when it said something (a warning explains a slow start) */
+  note?: string;
+  /** the server's one-minute load per CPU: above ~1.5 it is busy and everything takes longer */
+  load: number;
+}
+
 export type LiveTvStreamKind = 'hls' | 'remux' | 'progressive';
 
 /**

@@ -631,15 +631,41 @@ async function startRemux(key: string, src: RemuxSource, ffmpeg: string, secrets
 function stopRemux(s: RemuxSession, why: string): void {
   sessions.delete(s.key);
   if (s.leaveTimer) clearTimeout(s.leaveTimer);
-  if (!s.exited) {
+  const wipe = (): void => fs.rm(s.dir, { recursive: true, force: true }, () => undefined);
+  if (s.exited) wipe();
+  else {
+    // the recording goes once ffmpeg is gone (wiping it earlier made ffmpeg's last writes fail
+    // and fill the log); a stubborn ffmpeg is killed hard after a moment
+    s.proc.once('exit', wipe);
     try {
       s.proc.kill();
     } catch {
       /* gone */
     }
+    setTimeout(() => {
+      if (!s.exited) {
+        try {
+          s.proc.kill('SIGKILL');
+        } catch {
+          /* gone */
+        }
+      }
+    }, 3000).unref?.();
   }
-  setTimeout(() => fs.rm(s.dir, { recursive: true, force: true }, () => undefined), 1500).unref?.();
   log(`remux ${s.key}: stopped (${why})`);
+}
+
+/** How far the recorder of a channel got (for the tune status the player polls); undefined when none runs */
+export function remuxProgress(key: string): { sinceMs: number; segments: number; note?: string } | undefined {
+  const s = sessions.get(key);
+  if (!s) return undefined;
+  let segments = 0;
+  try {
+    segments = segmentsIn(fs.readFileSync(path.join(s.dir, 'index.m3u8'), 'utf8'));
+  } catch {
+    /* no playlist yet */
+  }
+  return { sinceMs: Date.now() - s.startedAt, segments, note: s.stderr[s.stderr.length - 1] };
 }
 
 /** A request from a viewer: the session stays while any viewer is around */

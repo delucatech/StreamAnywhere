@@ -19,7 +19,7 @@
  * programme guide panel (what is on now and next, the day's listing), mute, fullscreen (the
  * theater itself), and the controls hiding while playing.
  */
-import type { LiveTvChannel, LiveTvChannelGuideResponse, LiveTvProgramme, LiveTvTuneResponse, LiveTvWindow } from '../../../shared/types';
+import type { LiveTvChannel, LiveTvChannelGuideResponse, LiveTvProgramme, LiveTvTuneResponse, LiveTvTuneStatus, LiveTvWindow } from '../../../shared/types';
 import { api, ApiError, apiUrl } from '../api';
 import { FeedPlayer } from '../feed/player';
 
@@ -87,6 +87,7 @@ export class LiveTvPlayer {
   private canvas: HTMLCanvasElement;
   private wait: HTMLElement;
   private waitText: HTMLElement;
+  private waitDetail: HTMLElement;
   private msg: HTMLElement;
   private big: HTMLButtonElement;
   private logoEl: HTMLElement;
@@ -113,6 +114,11 @@ export class LiveTvPlayer {
   private guideTimer = 0;
   private timelineTimer = 0;
   private waitTimer = 0;
+  /** While a channel opens: the overlay ticks every second with what the server is doing */
+  private progressTimer = 0;
+  private openedAt = 0;
+  private polling = false;
+  private status?: LiveTvTuneStatus;
   private windowAt = 0;
   private scrubbing = false;
   /** The current channel's recording stream (`?v=` included); undefined for a media file */
@@ -135,7 +141,7 @@ export class LiveTvPlayer {
     root.setAttribute('aria-label', 'Live TV player');
     root.innerHTML = `
       <div class="th-stage"><canvas width="16" height="9"></canvas>
-        <div class="th-wait hidden"><span class="spinner"></span><span class="th-wait-text">Tuning…</span></div>
+        <div class="th-wait hidden"><span class="spinner"></span><span class="th-wait-text">Tuning…</span><small class="th-wait-detail"></small></div>
         <div class="th-msg hidden"></div>
         <button type="button" class="th-big hidden" aria-label="Play">${ICON.play}</button>
       </div>
@@ -172,6 +178,7 @@ export class LiveTvPlayer {
     this.canvas = q<HTMLCanvasElement>('canvas');
     this.wait = q('.th-wait');
     this.waitText = q('.th-wait-text');
+    this.waitDetail = q('.th-wait-detail');
     this.msg = q('.th-msg');
     this.big = q<HTMLButtonElement>('.th-big');
     this.logoEl = q('.th-logo');
@@ -210,7 +217,7 @@ export class LiveTvPlayer {
           if (this.state === 'playing' || this.state === 'loading') this.wait.classList.add('hidden');
           return;
         }
-        if (this.state === 'loading') return this.showWait('Loading…');
+        if (this.state === 'loading') return this.tickProgress();
         if (this.state === 'playing') this.waitTimer = window.setTimeout(() => this.state === 'playing' && this.showWait('Buffering…'), 1200);
       },
     });
@@ -350,7 +357,7 @@ export class LiveTvPlayer {
     this.refreshFavorite();
     this.hooks.onChannel(ch);
     this.setState('tuning');
-    this.showWait('Tuning…');
+    this.startProgress(ch);
     if (this.root.classList.contains('guide-open')) void this.loadGuide(ch);
     void this.loadNowNext(ch);
     if (ch.drm) return this.showMessage('unsupported', 'This channel is DRM-protected (the playlist names license keys); it cannot play here.', 'DRM');
@@ -368,7 +375,8 @@ export class LiveTvPlayer {
     this.windowSec = t.dvr ? t.windowSec || 0 : 0;
     this.recordedKey = t.kind === 'remux' ? ch.key : undefined;
     this.setState('loading');
-    this.showWait('Loading…');
+    this.status = undefined;
+    this.tickProgress();
     if (t.kind === 'remux') {
       this.streamUrl = apiUrl(t.playUrl);
       void this.loadStream('live', gen);
@@ -439,8 +447,59 @@ export class LiveTvPlayer {
     this.showMessage('unavailable', `This channel is not available right now: ${/HTTP (404|410)/.test(m) ? 'the stream is gone' : m}.`);
   }
 
+  /**
+   * The opening overlay, kept alive: every second it says what is happening and for how long
+   * (the server is asked where the tune stands while the tune request runs), so a slow start on
+   * a busy server reads as progress, never as a frozen page.
+   */
+  private startProgress(ch?: LiveTvChannel): void {
+    this.stopProgress();
+    this.openedAt = Date.now();
+    this.status = undefined;
+    this.tickProgress();
+    this.progressTimer = window.setInterval(() => {
+      this.tickProgress();
+      if (ch && this.state === 'tuning' && !this.polling) {
+        this.polling = true;
+        api.liveTvTuneStatus(ch.key)
+          .then((s) => {
+            if (this.state === 'tuning' && this.current?.key === ch.key) this.status = s;
+          })
+          .catch(() => undefined)
+          .finally(() => (this.polling = false));
+      }
+    }, 1000);
+  }
+
+  private stopProgress(): void {
+    window.clearInterval(this.progressTimer);
+    this.progressTimer = 0;
+  }
+
+  private tickProgress(): void {
+    if (this.state !== 'tuning' && this.state !== 'loading') return this.stopProgress();
+    const sec = Math.round((Date.now() - this.openedAt) / 1000);
+    const s = this.status;
+    let text: string;
+    const notes: string[] = [];
+    if (this.state === 'loading') text = sec < 4 ? 'Opening the recording…' : 'Downloading and decoding the first frames…';
+    else if (!s) text = sec < 3 ? 'Asking the server to open the channel…' : 'Waiting for the server to answer…';
+    else if (s.phase === 'idle') text = 'Waiting for the server to pick up the request…';
+    else if (s.phase === 'probing') text = 'Checking the stream with the provider…';
+    else if (s.phase === 'checking') text = 'Checking the picked quality…';
+    else if (s.phase === 'starting') text = 'Starting the recorder…';
+    else {
+      const n = s.segments || 0;
+      text = n ? `Recording started, waiting for the first picture (${n} of 2 segments)…` : 'Recording started, waiting for the provider to send video…';
+      if (s.note) notes.push(s.note);
+    }
+    if (s && s.load >= 1.5) notes.push(`The server is busy (load ${s.load}); this takes longer than usual.`);
+    this.showWait(`${text} ${sec} s`, notes.join(' · '));
+  }
+
   private setState(s: PlayerState): void {
     this.state = s;
+    if (s !== 'tuning' && s !== 'loading') this.stopProgress();
     this.root.classList.toggle('playing', s === 'playing');
     if (s === 'playing') {
       this.wait.classList.add('hidden');
@@ -455,9 +514,10 @@ export class LiveTvPlayer {
     this.refreshTimeline();
   }
 
-  private showWait(text: string): void {
+  private showWait(text: string, detail = ''): void {
     this.msg.classList.add('hidden');
     this.waitText.textContent = text;
+    this.waitDetail.textContent = detail;
     this.wait.classList.remove('hidden');
   }
 
@@ -486,7 +546,7 @@ export class LiveTvPlayer {
       if (this.streamUrl && w && this.feed.currentTime < w.start + 1) return this.seekTo(w.start + 1);
       void this.feed.play();
       this.setState('loading');
-      this.showWait('Loading…');
+      this.startProgress();
     } else {
       this.feed.pause();
       this.big.classList.remove('hidden');
@@ -515,7 +575,7 @@ export class LiveTvPlayer {
     if (w.live) {
       if (target >= w.edge - LIVE_SNAP_SEC) return this.goLive();
       this.setState('loading');
-      this.showWait('Loading…');
+      this.startProgress();
       void this.loadStream(target);
     } else {
       this.feed.seek(target);
@@ -534,7 +594,7 @@ export class LiveTvPlayer {
     const w = this.timeline();
     if (w && !this.feed.paused && w.edge - this.feed.currentTime < LIVE_SLACK_SEC) return;
     this.setState('loading');
-    this.showWait('Loading…');
+    this.startProgress();
     void this.loadStream('live');
     this.wake();
   }
