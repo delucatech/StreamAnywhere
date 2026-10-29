@@ -79,8 +79,10 @@ export class AudioSink implements PlaybackClock {
   private pending: AudioData[] = [];
   /** Context time at which the last scheduled chunk ends; the next contiguous chunk starts exactly there */
   private nextStartTime = -1;
-  /** Media time (us) up to which audio has been scheduled */
+  /** Media time (us) up to which audio has been scheduled or handed to the decoder (the renderer's pump bounds its feeding with it) */
   scheduledUntilUs = 0;
+  /** Media time (us) up to which sound is really on the timeline (placed by scheduleBuffer): what will play without the decoder's help */
+  playableUntilUs = 0;
   scheduledChunks = 0;
   droppedChunks = 0;
   /** Media time (us) of the earliest chunk that was actually scheduled since the last start()/reset(); -1 = none yet */
@@ -314,7 +316,9 @@ export class AudioSink implements PlaybackClock {
     this.scheduledChunks++;
     this.lastScheduledAt = performance.now();
     if (this.firstScheduledUs < 0 || mediaUs < this.firstScheduledUs) this.firstScheduledUs = mediaUs;
-    this.scheduledUntilUs = Math.max(this.scheduledUntilUs, mediaUs + Math.round(buffer.duration * 1e6));
+    const endUs = mediaUs + Math.round(buffer.duration * 1e6);
+    this.scheduledUntilUs = Math.max(this.scheduledUntilUs, endUs);
+    this.playableUntilUs = Math.max(this.playableUntilUs, endUs);
   }
 
   /** Stop every buffer that is playing or scheduled; chunks still waiting in `pending` are kept. */
@@ -329,6 +333,7 @@ export class AudioSink implements PlaybackClock {
     }
     this.sources.clear();
     this.scheduledUntilUs = 0;
+    this.playableUntilUs = 0;
     this.firstScheduledUs = -1;
     this.nextStartTime = -1;
   }

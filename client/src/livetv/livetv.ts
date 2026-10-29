@@ -127,6 +127,21 @@ let lastKey: string | undefined;
  * working logo ranks after those with one in the All view, from the next render on.
  */
 const BAD_LOGOS_KEY = 'streamanywhere.livetv.badlogos';
+/** Per device: the tallest picture to ask for ('auto' = the provider's best) */
+const QUALITY_KEY = 'streamanywhere.livetv.quality';
+const QUALITIES: { id: string; label: string; maxHeight?: number }[] = [
+  { id: '480', label: 'Up to 480p', maxHeight: 480 },
+  { id: '720', label: 'Up to 720p', maxHeight: 720 },
+  { id: 'auto', label: 'Best available' },
+];
+let quality = '720';
+try {
+  const q = localStorage.getItem(QUALITY_KEY);
+  if (q && QUALITIES.some((x) => x.id === q)) quality = q;
+} catch {
+  /* storage blocked */
+}
+const maxHeightOf = (): number | undefined => QUALITIES.find((x) => x.id === quality)?.maxHeight;
 const BAD_LOGO_TTL = 7 * 86400_000;
 let badLogos: Record<string, number> = {};
 const view = { q: '', provider: 'all', group: 'all', favs: false };
@@ -269,6 +284,7 @@ const player = new LiveTvPlayer(el.theater, {
     void api.liveTvHealth({ key, ok: false }).then(applyPrefs).catch(() => undefined);
   },
   providerName: (ch) => (state.providers.length > 1 ? providerById(ch.providerId)?.name || '' : ''),
+  maxHeight: maxHeightOf,
   guide: (key) => api.liveTvGuide(key),
   nowNext: async (key) => {
     const r = await api.liveTvGuideNow([key]);
@@ -855,6 +871,11 @@ function renderSettings(): void {
       <div class="prov-head"><span class="prov-name">Pause and rewind</span><span class="kind ${state.remux ? 'm3u' : 'xtream'}">${state.remux ? 'ON' : 'NO FFMPEG'}</span></div>
       <div class="prov-status">${playbackNote}</div>
     </div>
+    <div class="prov">
+      <div class="prov-head"><span class="prov-name">Video quality</span><span class="kind m3u">${esc(QUALITIES.find((x) => x.id === quality)?.label || '')}</span></div>
+      <div class="prov-status">The tallest picture to ask the provider for, on this device. A lower one is less work for the car's computer (the sound stopping and restarting is the decoder falling behind) and less data on its connection. Takes effect at the next channel open.</div>
+      <div class="sh-actions">${QUALITIES.map((x) => `<button type="button" class="btn small${x.id === quality ? ' primary' : ''}" data-quality="${x.id}" aria-pressed="${x.id === quality}">${esc(x.label)}</button>`).join('')}</div>
+    </div>
     ${hiddenHtml}
     <p class="sh-section">Providers</p>
     ${rows.join('') || '<p class="sh-note">No providers yet. Add your own playlist or Xtream account below, or one of the community playlists.</p>'}
@@ -873,6 +894,17 @@ el.settingsBody.addEventListener('click', async (e) => {
   if (unhide) {
     const c = byKey.get(unhide.dataset.unhide!);
     if (c) void setHidden(c, false);
+    return;
+  }
+  const qual = t.closest<HTMLElement>('[data-quality]');
+  if (qual) {
+    quality = qual.dataset.quality!;
+    try {
+      localStorage.setItem(QUALITY_KEY, quality);
+    } catch {
+      /* storage blocked */
+    }
+    renderSettings();
     return;
   }
   if (t.closest('[data-unhide-all]')) {

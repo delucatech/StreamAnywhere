@@ -966,6 +966,8 @@ export interface LiveTvTuneRequest {
   key: string;
   /** This player's id (random per page load): its recorder stops when it leaves (POST /api/livetv/leave) */
   viewer?: string;
+  /** The tallest picture this device wants (720 on the car: less decoding, less data); the HLS variant is picked under it */
+  maxHeight?: number;
 }
 export interface LiveTvLeaveRequest {
   key: string;

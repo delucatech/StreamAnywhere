@@ -26,7 +26,7 @@ import { EPG_TTL_MS, epgLoading, epgStore, forgetEpg, loadEpg, nowNext, programm
 import { checkLiveUrl, fetchLiveText, redactUrl, safeHost } from './livetvHttp';
 import { cleanChannelName, countGroups, mergeChannels, parseM3u, splitGroups, type M3uChannel, type MergeEntry } from './livetvM3u';
 import { LIVETV_PRESETS, presetById } from './livetvPresets';
-import { classify, DVR_WINDOW_SEC, ensureRemux, leaveRemux, pickVariant, registerLiveTvStreamRoutes, remuxAvailable, remuxProgress, remuxStats, setLiveTvStreamLogger, setRemuxRoot, shutdownLiveTvStreams, type RemuxSource, type StreamSource, type Verdict } from './livetvStream';
+import { classify, DVR_WINDOW_SEC, ensureRemux, leaveRemux, pickVariant, recorderStarting, registerLiveTvStreamRoutes, remuxAvailable, remuxProgress, remuxStats, setLiveTvStreamLogger, setRemuxRoot, shutdownLiveTvStreams, type RemuxSource, type StreamSource, type Verdict } from './livetvStream';
 import { normalizeXtreamServer, xtreamAccount, xtreamEpgUrl, xtreamLiveChannels, xtreamLiveUrl, xtreamSecrets, XtreamError, type XtreamCreds } from './livetvXtream';
 
 export class LiveTvError extends Error {
@@ -529,18 +529,36 @@ export function refreshProvider(id: string): Promise<void> {
  * time. Runs when the page asks for the state, and on a timer, so the lists (and their guides,
  * loaded after each refresh) are fresh before anyone opens the page.
  */
+/**
+ * Stale lists are refreshed one at a time, and not while a channel is being opened: the user's
+ * eight lists refreshing together (20 s of parsing on the free VM) starved the recorder that was
+ * starting for them, and the channel "did not play".
+ */
 function keepFresh(): void {
+  if (running.size) return;
+  if (tuning.size || recorderStarting()) return deferFresh();
   for (const p of load().providers) {
-    if (!p.enabled || running.size) return;
+    if (!p.enabled || p.refresh.state === 'running') continue;
     const l = listOf(p);
-    if (p.refresh.state === 'running') continue;
     const at = l?.at || 0;
     if (!l || Date.now() - at > STALE_MS) {
       if (p.refresh.state === 'error' && p.refresh.at && Date.now() - p.refresh.at < 15 * 60_000) continue; // not again right away
       log(`${p.name}: channel list ${l ? 'is stale' : 'missing'}, refreshing`);
-      void refreshProvider(p.id).catch(() => undefined);
+      void refreshProvider(p.id)
+        .catch(() => undefined)
+        .finally(deferFresh); // the next stale list after a pause
+      return;
     }
   }
+}
+let freshRetry: NodeJS.Timeout | undefined;
+function deferFresh(): void {
+  if (freshRetry) return;
+  freshRetry = setTimeout(() => {
+    freshRetry = undefined;
+    keepFresh();
+  }, 20_000);
+  freshRetry.unref?.();
 }
 const freshTimer = setInterval(keepFresh, 30 * 60_000);
 freshTimer.unref?.();
@@ -743,11 +761,11 @@ export function reportHealth(r: LiveTvHealthReport): LiveTvPrefs {
 /** A viewer id as the page sends it (letters, digits, - and _; at most 64) */
 const cleanViewer = (v: unknown): string | undefined => (typeof v === 'string' && /^[\w-]{1,64}$/.test(v) ? v : undefined);
 
-export async function tune(key: string, viewer?: string): Promise<LiveTvTuneResponse> {
+export async function tune(key: string, viewer?: string, maxHeight?: number): Promise<LiveTvTuneResponse> {
   const t0 = Date.now();
   tuning.set(key, { phase: 'probing', at: t0 });
   try {
-    const r = await tuneChannel(key, viewer);
+    const r = await tuneChannel(key, viewer, maxHeight);
     noteTune(key, r.state === 'ok', Date.now() - t0);
     return r;
   } finally {
@@ -772,7 +790,7 @@ export function tuneStatus(key: string): LiveTvTuneStatus {
   return { phase: t.phase, sinceMs: Date.now() - t.at, load };
 }
 
-async function tuneChannel(key: string, viewer: string | undefined): Promise<LiveTvTuneResponse> {
+async function tuneChannel(key: string, viewer: string | undefined, maxHeight?: number): Promise<LiveTvTuneResponse> {
   const t0 = Date.now();
   const found = findChannel(key);
   if (!found) throw new LiveTvError('That channel is not in the list any more (the provider changed its playlist?)', 404);
@@ -794,7 +812,7 @@ async function tuneChannel(key: string, viewer: string | undefined): Promise<Liv
     v = { kind: r.kind === 'ts' ? 'remux' : r.kind, url: r.url, headers: r.headers, at: Date.now() };
     if (r.kind === 'hls') {
       // what the recorder would read: the variant picked here, checked like any upstream URL
-      const input = pickVariant(r.playlist, r.url) || { url: r.url };
+      const input = pickVariant(r.playlist, r.url, maxHeight) || { url: r.url };
       try {
         mark(key, 'checking');
         await checkLiveUrl(input.url);
@@ -941,7 +959,8 @@ export function registerLiveTv(app: FastifyInstance): void {
     try {
       const key = String(req.body?.key || '');
       if (!key) throw new LiveTvError('Which channel?');
-      return await tune(key, cleanViewer(req.body?.viewer));
+      const maxHeight = Number(req.body?.maxHeight) || undefined;
+      return await tune(key, cleanViewer(req.body?.viewer), maxHeight && maxHeight >= 240 ? Math.round(maxHeight) : undefined);
     } catch (e) {
       return fail(reply, e);
     }

@@ -17,13 +17,22 @@ import { emptyStats, FpsCounter, type DownloadProgress, type LoadSource, type Pl
 
 const TARGET_DECODED_FRAMES = 12; // frames kept decoded ahead of the playhead
 const MAX_DECODE_QUEUE = 8; // chunks in flight inside the decoder
-const AUDIO_AHEAD_US = 2_500_000; // schedule audio this far ahead
+/**
+ * Sound is decoded and placed on the timeline this far ahead of the clock: a decoder that answers
+ * late by a few seconds (the car's, busy with the picture) still lands its chunks in the future.
+ * 2.5 s used to be the lead, and the car dropped hundreds of chunks that came back too late.
+ */
+const AUDIO_AHEAD_US = 6_000_000;
+/** The sound on the timeline about to run out while chunks are still with the decoder: wait for it (buffering) instead of dropping what comes late */
+const AUDIO_LOW_US = 150_000;
+/** Resume from an audio wait once this much sound is on the timeline again */
+const AUDIO_RESUME_US = 1_500_000;
 const MAX_QUEUED_VIDEO_SAMPLES = 600; // network backpressure thresholds (samples)
 const MAX_QUEUED_AUDIO_SAMPLES = 1500;
 const MIN_START_FRAMES = 3;
 /** A live stream whose timestamps leave the clock by this much (either way) is followed, not waited for or dropped */
 const LIVE_JUMP_US = 3_000_000;
-/** No sound placed on the timeline for this long while playing with sound to decode = a stall the watchdog undoes */
+/** The sound timeline run dry for this long with chunks still at the decoder = a stall the watchdog undoes (a restart) */
 const AUDIO_STALL_MS = 2000;
 /** The AudioContext's clock not moving for this long while it says it is running = the output device is gone */
 const AUDIO_FROZEN_MS = 2000;
@@ -88,6 +97,8 @@ export class WebCodecsRenderer implements Renderer {
   private audioRecoveries = 0;
   private audioRecoveryStreak = 0;
   private lastRecoveryAt = 0;
+  /** Since when the sound timeline has been dry (nothing left to play) with chunks still at the decoder; 0 = it is not */
+  private audioDrySince = 0;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -374,14 +385,15 @@ export class WebCodecsRenderer implements Renderer {
   private audioWatch(nowPerf: number): void {
     const a = this.audio;
     const ad = this.audioDecoder;
-    if (!a || !ad || !this.audioEnabled || this._audioBlocked || !this.clockRunning || !this.wantPlay || this._state !== 'playing' || ad.state !== 'configured') {
+    if (!a || !ad || !this.audioEnabled || this._audioBlocked || !this.clockRunning || !this.wantPlay || (this._state !== 'playing' && this._state !== 'buffering') || ad.state !== 'configured') {
       this.ctxFrozenSince = 0;
+      this.audioDrySince = 0;
       return;
     }
     // suspended behind our back (the page was hidden, the device interrupted it): asked to run again
-    if (a.contextState === 'suspended') void a.resume();
+    if (this._state === 'playing' && a.contextState === 'suspended') void a.resume();
     const ct = a.ctx.currentTime;
-    if (a.contextState === 'running' && ct === this.lastCtxTime) {
+    if (this._state === 'playing' && a.contextState === 'running' && ct === this.lastCtxTime) {
       if (!this.ctxFrozenSince) this.ctxFrozenSince = nowPerf;
       else if (nowPerf - this.ctxFrozenSince > AUDIO_FROZEN_MS) {
         this.disableAudio('the audio output stopped answering (did the device hand the speakers to something else?)');
@@ -390,14 +402,22 @@ export class WebCodecsRenderer implements Renderer {
     } else this.ctxFrozenSince = 0;
     this.lastCtxTime = ct;
 
-    const since = Math.max(a.lastScheduledAt, this.lastRecoveryAt);
-    if (!since) return; // nothing placed yet: the start is handled elsewhere
-    const idleMs = nowPerf - since;
+    // a stall is the timeline run dry (nothing left to play) while chunks are still with the
+    // decoder; a decoder merely quiet while seconds of sound are still queued is left alone (a
+    // restart drops what it holds: that is a gap, not a cure)
+    const dry = a.playableUntilUs < this.clock.currentMediaUs() && this.audioPending();
+    if (!dry) {
+      this.audioDrySince = 0;
+      if (a.lastScheduledAt > this.lastRecoveryAt) this.audioRecoveryStreak = 0;
+      return;
+    }
+    if (!this.audioDrySince) this.audioDrySince = nowPerf;
+    const idleMs = nowPerf - this.audioDrySince;
     if (idleMs < AUDIO_STALL_MS) return;
-    if (!this.audioSamples.length && !ad.decodeQueueSize) return; // nothing to decode: the network, not the sound path (the picture will buffer too)
+    this.audioDrySince = nowPerf;
     if (a.lastScheduledAt > this.lastRecoveryAt) this.audioRecoveryStreak = 0;
     const at = this.lastRenderedUs;
-    const what = `decoder queue ${ad.decodeQueueSize}, ${this.audioSamples.length} chunks waiting, ${a.droppedChunks} dropped, context ${a.contextState}, clock ${(this.clock.currentMediaUs() / 1e6).toFixed(1)} s, picture ${(at / 1e6).toFixed(1)} s`;
+    const what = `decoder queue ${ad.decodeQueueSize}, ${this.audioSamples.length} chunks waiting, ${a.droppedChunks} dropped, context ${a.contextState}, clock ${(this.clock.currentMediaUs() / 1e6).toFixed(1)} s, picture ${(at / 1e6).toFixed(1)} s; video ${this.fps.value().toFixed(0)} fps, ${this.st.droppedFrames} frames dropped, decode queue ${this.videoDecoder?.decodeQueueSize ?? 0}, ${this.audioWaits} sound waits`;
     if (this.audioRecoveryStreak >= AUDIO_RECOVERY_LIMIT) {
       this.disableAudio(`the sound could not be restarted (${what})`);
       return;
@@ -473,11 +493,12 @@ export class WebCodecsRenderer implements Renderer {
     const at = this.audioTrack;
     if (ad && at && this.audio && ad.state === 'configured') {
       const horizon = (this.clockRunning ? this.clock.currentMediaUs() : this.pendingSeekUs ?? this.lastRenderedUs) + AUDIO_AHEAD_US;
-      while (this.audioSamples.length && ad.decodeQueueSize < 16 && this.audio.scheduledUntilUs < horizon) {
+      while (this.audioSamples.length && ad.decodeQueueSize < 32 && this.audio.scheduledUntilUs < horizon) {
         const s = this.audioSamples.shift()!;
         const ts = this.toUs(s.cts, at);
         try {
           ad.decode(new EncodedAudioChunk({ type: 'key', timestamp: ts, duration: Math.round((s.duration * 1e6) / at.timescale), data: s.data! }));
+          this.lastAudioSubmitAt = performance.now();
         } catch (e) {
           this.disableAudio(`audio decode() threw: ${(e as Error).message}`);
           break;
@@ -619,6 +640,7 @@ export class WebCodecsRenderer implements Renderer {
     if (this.audio) {
       this.st.extra['Audio context'] = `${this.audio.contextState}, ${this.audio.ctx.sampleRate} Hz`;
       this.st.extra['Audio chunks'] = `${this.audio.scheduledChunks} scheduled, ${this.audio.droppedChunks} dropped${this.audio.lastError ? ', err: ' + this.audio.lastError : ''}`;
+      this.st.extra['Audio ahead'] = `${Math.max(0, (this.audio.playableUntilUs - (this.clockRunning ? this.clock.currentMediaUs() : this.lastRenderedUs)) / 1e6).toFixed(1)} s on the timeline`;
       this.st.extra['Audio starts at'] = this.audio.firstScheduledUs < 0 ? 'not yet' : `${(this.audio.firstScheduledUs / 1e6).toFixed(3)}s`;
     }
     this.st.extra['Queued samples'] = `${this.videoSamples.length} video / ${this.audioSamples.length} audio`;
@@ -678,6 +700,9 @@ export class WebCodecsRenderer implements Renderer {
     this.audioRecoveries = 0;
     this.audioRecoveryStreak = 0;
     this.lastRecoveryAt = 0;
+    this.audioDrySince = 0;
+    this.audioWaits = 0;
+    this.lastAudioSubmitAt = 0;
     this.fps.reset();
     this.videoTrack = undefined;
     this.audioTrack = undefined;
@@ -807,7 +832,7 @@ export class WebCodecsRenderer implements Renderer {
       chosen.close();
       this.pendingSeekUs = undefined;
       this.pump();
-      if (this._state === 'buffering' && this.wantPlay) {
+      if (this._state === 'buffering' && this.wantPlay && this.audioReady(now)) {
         void this.clock.resume().then(() => this.setState('playing'));
       }
     } else if (!this.frames.length) {
@@ -824,10 +849,43 @@ export class WebCodecsRenderer implements Renderer {
         void this.clock.pause();
       }
     }
-    if (this._state === 'buffering' && this.wantPlay && this.frames.length >= MIN_START_FRAMES) {
+    if (this._state === 'playing' && this.wantPlay && this.audioStarved(now)) {
+      // the sound decoder is behind (the device is busy with the picture): wait for it, as for
+      // frames, instead of letting its late chunks fall behind the clock and be dropped
+      this.st.extra['Audio waits'] = String(++this.audioWaits);
+      this.events.onLog('info', `sound ran dry at ${(now / 1e6).toFixed(1)} s (decoder queue ${this.audioDecoder?.decodeQueueSize}, ${this.audioSamples.length} chunks waiting); waiting for the decoder`);
+      this.setState('buffering');
+      void this.clock.pause();
+      this.pump();
+    }
+    if (this._state === 'buffering' && this.wantPlay && this.frames.length >= MIN_START_FRAMES && this.audioReady(now)) {
       void this.clock.resume().then(() => this.setState('playing'));
     }
     this.audioWatch(performance.now());
+  }
+
+  private audioWaits = 0;
+  /** performance.now() of the last chunk handed to the sound decoder: sound is still expected for a while after it */
+  private lastAudioSubmitAt = 0;
+  /** Sound still to come: chunks queued, with the decoder, or handed to it a moment ago (its answer can lag by seconds) */
+  private audioPending(): boolean {
+    return this.audioSamples.length > 0 || (this.audioDecoder?.decodeQueueSize || 0) > 0 || performance.now() - this.lastAudioSubmitAt < 8000;
+  }
+  /** The sound drives the clock and what is on its timeline is about to run out, with more still to come from the decoder */
+  private audioStarved(nowUs: number): boolean {
+    const a = this.audio;
+    const ad = this.audioDecoder;
+    if (!a || !ad || !this.audioEnabled || this._audioBlocked || this.clock !== a) return false;
+    if (a.playableUntilUs >= nowUs + AUDIO_LOW_US) return false;
+    return this.audioPending();
+  }
+  /** Enough sound on the timeline to resume (always, without sound as the clock) */
+  private audioReady(nowUs: number): boolean {
+    const a = this.audio;
+    if (!a || !this.audioEnabled || this._audioBlocked || this.clock !== a) return true;
+    if (a.playableUntilUs >= nowUs + AUDIO_RESUME_US) return true;
+    // nothing more coming for the sound (the demuxer is quiet): do not wait on it
+    return !this.audioPending();
   }
 
   private paint(frame: VideoFrame): void {

@@ -210,9 +210,9 @@ export const api = {
   liveTvRefreshProvider: (id: string): Promise<LiveTvState> => post(`/api/livetv/providers/${id}/refresh`, {}),
   /** A connection test of a form being filled in, or of a saved provider (its id): up to a minute for a big playlist */
   liveTvTest: (req: LiveTvTestRequest): Promise<LiveTvTestResponse> => post('/api/livetv/providers/test', req, 90_000),
-  liveTvTune: (key: string, viewer?: string): Promise<LiveTvTuneResponse> => post('/api/livetv/tune', { key, viewer }, 60_000),
+  liveTvTune: (key: string, viewer?: string, maxHeight?: number): Promise<LiveTvTuneResponse> => post('/api/livetv/tune', { key, viewer, maxHeight }, 75_000),
   liveTvTuneStatus: (key: string): Promise<LiveTvTuneStatus> => getJson(`/api/livetv/tune/status?key=${encodeURIComponent(key)}`),
-  liveTvWindow: (key: string, viewer: string): Promise<LiveTvWindow> => getJson(`/api/livetv/live/${encodeURIComponent(key)}/window?v=${encodeURIComponent(viewer)}`),
+  liveTvWindow: (key: string, viewer: string): Promise<LiveTvWindow> => getJson(`/api/livetv/live/${encodeURIComponent(key)}/window?v=${encodeURIComponent(viewer)}`, 10_000),
   liveTvLeave: (key: string, viewer: string): Promise<{ ok: boolean }> => post('/api/livetv/leave', { key, viewer }, 10_000),
   /** How a stream went (the first picture and how long it took, or a failure after it opened): its history on the server */
   liveTvHealth: (report: LiveTvHealthReport): Promise<LiveTvPrefs> => post('/api/livetv/health', report, 10_000),

@@ -196,7 +196,7 @@ const VARIANT_MAX_BPS = 12_000_000;
  * When the variant's audio is a separate rendition (#EXT-X-MEDIA with a URI), ffmpeg needs the
  * master and the program index to pick the pair; else the media playlist itself.
  */
-export function pickVariant(master: string, baseUrl: string): HlsInput | undefined {
+export function pickVariant(master: string, baseUrl: string, maxHeight?: number): HlsInput | undefined {
   const lines = master.split(/\r?\n/).map((l) => l.trim());
   const audioGroupsWithUri = new Set<string>();
   for (const l of lines) {
@@ -232,7 +232,8 @@ export function pickVariant(master: string, baseUrl: string): HlsInput | undefin
   if (!variants.length) return undefined;
   const withVideo = variants.filter((v) => v.video);
   const pool = withVideo.length ? withVideo : variants;
-  const fits = (v: V): boolean => (!v.height || v.height <= VARIANT_MAX_HEIGHT) && (!v.bandwidth || v.bandwidth <= VARIANT_MAX_BPS);
+  const maxH = maxHeight && maxHeight > 0 ? Math.min(VARIANT_MAX_HEIGHT, maxHeight) : VARIANT_MAX_HEIGHT;
+  const fits = (v: V): boolean => (!v.height || v.height <= maxH) && (!v.bandwidth || v.bandwidth <= VARIANT_MAX_BPS);
   const prefer = pool.filter((v) => v.avc && fits(v));
   const fallback = pool.filter((v) => fits(v));
   let pick: V;
@@ -280,6 +281,8 @@ const SEGMENT_SEC = 3;
 interface RemuxSession {
   key: string;
   input: RemuxSource['input'];
+  /** The upstream being recorded (the variant): a tune asking for another one restarts the recorder when nobody else watches */
+  url: string;
   dir: string;
   proc: ChildProcess;
   startedAt: number;
@@ -293,7 +296,6 @@ interface RemuxSession {
   timescales?: Map<number, number>;
   /** segment file name -> its start (seconds of the recording), for the window and seeks */
   segStarts: Map<string, number>;
-  ready: Promise<void>;
   exited?: { code: number | null; signal: string | null };
   stderr: string[];
 }
@@ -304,7 +306,13 @@ const sessions = new Map<string, RemuxSession>();
  * timer a minute, hence minutes rather than seconds.
  */
 const REMUX_IDLE_MS = 3 * 60_000;
-const REMUX_READY_MS = 30_000;
+/**
+ * How long one tune waits for the recording's first segment. On the free VM under load (the
+ * channel lists refreshing, a headless browser) ffmpeg took over 30 s to a first segment for
+ * channels that play fine; a tune that gives up leaves the recorder running (waitReady), so the
+ * next open of the channel continues the same start instead of beginning again.
+ */
+const REMUX_READY_MS = 60_000;
 /** The last viewer left: stop after this (a reload or a quick retune hits again before then) */
 const LEAVE_GRACE_MS = 8_000;
 /**
@@ -578,13 +586,42 @@ async function* liveBytes(s: RemuxSession, from: number | 'live', viewer: string
   }
 }
 
+/**
+ * Resolves once the recording has a segment (the live stream route starts from it); rejects when
+ * ffmpeg exits, the session is replaced, or `timeoutMs` pass. A timeout does not stop the
+ * recorder: it is still downloading, and the next tune of the channel waits on the same one.
+ */
+function waitReady(s: RemuxSession, timeoutMs: number): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const t0 = Date.now();
+    const tick = (): void => {
+      if (sessions.get(s.key) !== s) return reject(new Error('the recorder was stopped'));
+      if (s.exited) return reject(new Error(s.stderr[s.stderr.length - 1] || `ffmpeg stopped (${s.exited.code ?? s.exited.signal})`));
+      try {
+        if (segmentsIn(fs.readFileSync(path.join(s.dir, 'index.m3u8'), 'utf8')) >= 1) return resolve();
+      } catch {
+        /* not yet */
+      }
+      if (Date.now() - t0 > timeoutMs) {
+        const last = s.stderr[s.stderr.length - 1];
+        return reject(new Error(`no video from the provider in ${Math.round((Date.now() - s.startedAt) / 1000)} s${last ? ' (' + last + ')' : ''}; the recorder keeps trying for a few minutes, so opening the channel again may work`));
+      }
+      setTimeout(tick, 300);
+    };
+    tick();
+  });
+}
+
+/** A recorder started less than a moment ago and still running: heavy work (list refreshes) waits for it */
+export const recorderStarting = (): boolean => [...sessions.values()].some((s) => !s.exited && Date.now() - s.startedAt < 90_000);
+
 async function startRemux(key: string, src: RemuxSource, ffmpeg: string, secrets: string[]): Promise<RemuxSession> {
   const dir = path.join(remuxRoot(), safeDirName(key));
   fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(dir, { recursive: true });
   const args = remuxArgs(src, dir);
   const proc = spawn(ffmpeg, args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
-  const s: RemuxSession = { key, input: src.input, dir, proc, startedAt: Date.now(), lastHit: Date.now(), viewers: new Map(), gone: new Set(), segStarts: new Map(), ready: Promise.resolve(), stderr: [] };
+  const s: RemuxSession = { key, input: src.input, url: src.url, dir, proc, startedAt: Date.now(), lastHit: Date.now(), viewers: new Map(), gone: new Set(), segStarts: new Map(), stderr: [] };
   let logged = 0;
   proc.stderr?.on('data', (d: Buffer) => {
     for (const line of d.toString().split(/\r?\n/)) {
@@ -606,24 +643,6 @@ async function startRemux(key: string, src: RemuxSource, ffmpeg: string, secrets
   proc.on('error', (e) => {
     s.exited = { code: -1, signal: null };
     s.stderr.push(e.message);
-  });
-  s.ready = new Promise<void>((resolve, reject) => {
-    const t0 = Date.now();
-    const tick = (): void => {
-      if (s.exited) return reject(new Error(s.stderr[s.stderr.length - 1] || `ffmpeg stopped (${s.exited.code ?? s.exited.signal})`));
-      try {
-        const pl = fs.readFileSync(path.join(dir, 'index.m3u8'), 'utf8');
-        if (segmentsIn(pl) >= 2) return resolve();
-      } catch {
-        /* not yet */
-      }
-      if (Date.now() - t0 > REMUX_READY_MS) {
-        proc.kill();
-        return reject(new Error(`no video from the provider in ${REMUX_READY_MS / 1000} s${s.stderr.length ? ' (' + s.stderr[s.stderr.length - 1] + ')' : ''}`));
-      }
-      setTimeout(tick, 300);
-    };
-    tick();
   });
   sessions.set(key, s);
   log(`remux ${key}: ffmpeg started for ${safeHost(src.url)} (${src.input}${src.program !== undefined ? ` program ${src.program}` : ''})`);
@@ -688,8 +707,9 @@ export async function ensureRemux(key: string, src: RemuxSource, secrets: string
   const ff = await detectFfmpeg();
   if (!ff.available || !ff.path) throw new Error('This channel is a raw MPEG-TS stream, which needs ffmpeg on the server to play in a browser; ffmpeg is not installed there.');
   let s = sessions.get(key);
-  if (s && (s.exited || s.input !== src.input)) {
-    stopRemux(s, s.exited ? 'restarting after an exit' : 'the source changed');
+  const otherViewers = s ? [...s.viewers.keys()].filter((v) => v !== viewer).length : 0;
+  if (s && (s.exited || s.input !== src.input || (s.url !== src.url && !otherViewers))) {
+    stopRemux(s, s.exited ? 'restarting after an exit' : s.input !== src.input ? 'the source changed' : 'another quality was asked for');
     s = undefined;
   }
   if (!s) {
@@ -703,9 +723,10 @@ export async function ensureRemux(key: string, src: RemuxSource, secrets: string
   if (viewer) s.gone.delete(viewer);
   hit(s, viewer);
   try {
-    await s.ready;
+    await waitReady(s, REMUX_READY_MS);
   } catch (e) {
-    stopRemux(s, 'failed to start');
+    if (s.exited || sessions.get(key) !== s) stopRemux(s, 'failed to start');
+    else log(`remux ${key}: no segment after ${Math.round((Date.now() - s.startedAt) / 1000)} s; left running for the next tune (the idle reaper stops it otherwise)`);
     throw e;
   }
   return { playUrl: `/api/livetv/live/${encodeURIComponent(key)}/stream.mp4${viewer ? `?v=${encodeURIComponent(viewer)}` : ''}` };

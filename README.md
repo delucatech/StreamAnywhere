@@ -598,6 +598,47 @@ captions on the canvas path (nothing draws text tracks; CEA-608 would need its o
 no `<video>` fallback is wanted: on a browser without WebCodecs the feed's hidden-video-to-canvas
 renderer (`FeedPlayer` mode `video-canvas`) is what runs, as it does for the feed.
 
+*A slow start is continued, not thrown away.* On the free VM under load (the channel lists
+refreshing, a headless browser) ffmpeg took over 30 s to its first segment for channels that play
+fine, so the tune gave up ("no video from the provider in 30 s") and the user had to open the
+channel again. A tune now waits 60 s for the first segment (one is enough: the live stream route
+starts from it), and a tune that gives up leaves the recorder running (`waitReady` in
+`livetvStream.ts`): the next open of the channel, by the user or by the player's move to the next
+stream and back, waits on the same recorder, which by then usually has its segment; the idle reaper
+stops one nobody comes back for. Stale channel lists are refreshed one at a time with 20 s between
+them, and not while a channel is being opened (`keepFresh`): the eight lists parsing together was
+the load that starved the recorder.
+
+*A dropped connection continues where it stopped.* The car's connection comes and goes. When the
+live stream breaks off at the network (a fetch failure, the proxy's 502 / 503 / 504, the endless
+recording ending), the player keeps its position and goes *reconnecting*: the overlay counts
+("Connection lost (…). Reconnecting… 12 s · attempt 4 · it continues where it stopped"), the
+recording's window is asked for every 2 s for the first 15 tries, then every 5 s, for up to ten
+minutes, at once when the browser says it is back online or the viewer taps play. The server keeps
+the recording for minutes without a viewer, so when the window answers the stream is loaded again
+from the kept position (or live when that fell out of the window) with a toast saying how far
+behind live it is; a 404 means the recording is gone (the server restarted, the reaper took it) and
+the channel is tuned again from live. A stream that ends within 20 s of its first picture three
+times in a row is the channel's fault and moves on to the next stream instead. None of this counts
+as a failed try in the stream's history.
+
+*The sound decoder falling behind.* From the car: "Sound stopped for 2.1 s (decoder queue 15, 119
+chunks waiting, 364 dropped …); restarting it", over and over. The car's AudioDecoder answered
+seconds late (its computer busy with a 1080p picture), the chunks came back behind the clock and
+were dropped, and the watchdog restarted a decoder that was merely slow. Three changes: sound is
+now decoded and placed 6 s ahead of the clock instead of 2.5 (a late answer still lands in the
+future; up to 32 chunks with the decoder); when the sound timeline is about to run dry while chunks
+are still with the decoder, playback *buffers* (the clock pauses, as it does for missing frames)
+until 1.5 s of sound is back, instead of dropping what comes late (`audioStarved` / `audioReady`,
+counted as *Audio waits*); and the watchdog restarts the decoder only when the timeline has really
+run dry for 2 s with chunks waiting, never while seconds of sound are still queued (a restart drops
+what the decoder holds). The watchdog's line now also names the picture's side (fps, frames
+dropped, decode queue, sound waits), since a starved sound decoder usually means a starved video
+decoder. And **Settings › Video quality** (per device, `streamanywhere.livetv.quality`, default *up
+to 720p*) sends `maxHeight` with the tune: `pickVariant` picks the best HLS variant under it (less
+decoding for the car's computer, less data on its connection); a tune asking for another variant
+restarts the recorder when nobody else is watching it.
+
 Nothing waits silently: while a channel opens, the overlay ticks every second with what the server
 is doing and for how long (*Checking the stream with the provider…*, *Starting the recorder…*,
 *Recording started, waiting for the first picture (1 of 2 segments)… 7 s*, *Downloading and decoding

@@ -24,7 +24,19 @@ import type { LiveTvChannel, LiveTvChannelGuideResponse, LiveTvProgramme, LiveTv
 import { api, ApiError, apiUrl } from '../api';
 import { FeedPlayer } from '../feed/player';
 
-export type PlayerState = 'idle' | 'tuning' | 'loading' | 'playing' | 'paused' | 'unavailable' | 'unsupported';
+export type PlayerState = 'idle' | 'tuning' | 'loading' | 'playing' | 'paused' | 'reconnecting' | 'unavailable' | 'unsupported';
+
+/** Reconnecting after the connection dropped: quick tries first, then every few seconds, for this long at most */
+const RECONNECT_FAST_MS = 2000;
+const RECONNECT_SLOW_MS = 5000;
+const RECONNECT_FAST_TRIES = 15;
+const RECONNECT_GIVE_UP_MS = 10 * 60_000;
+/** A stream that ends this soon after its first picture, three times in a row, is given up on (not reconnected to) */
+const QUICK_END_MS = 20_000;
+/** Waiting for data with not one byte arriving for this long = the connection is gone, whatever the socket says */
+const NO_DATA_MS = 12_000;
+/** The player's own connection (or the server's proxy) failed, not the channel: reconnect, do not move on */
+const isConnectionError = (m: string): boolean => /fetch\(\) failed|failed to fetch|network|no answer from the server|HTTP (502|503|504)|no body stream|connection/i.test(m);
 
 export interface PlayerHooks {
   onClose(): void;
@@ -46,6 +58,8 @@ export interface PlayerHooks {
   nowNext(key: string): Promise<{ now?: LiveTvProgramme; next?: LiveTvProgramme }>;
   /** The provider's name for the subtitle (several providers) */
   providerName(ch: LiveTvChannel): string;
+  /** The tallest picture this device wants (Settings > Video quality), undefined = the provider's best */
+  maxHeight(): number | undefined;
 }
 
 const elementFullscreenAllowed = (): boolean => !!document.fullscreenEnabled || !!(document as unknown as { webkitFullscreenEnabled?: boolean }).webkitFullscreenEnabled;
@@ -136,8 +150,15 @@ export class LiveTvPlayer {
   /** What the recording reaches back to, as the server last said */
   private win?: LiveTvWindow;
   private windowSec = 0;
-  /** The stream ended once already for this channel: the next end is reported, not retried */
-  private retried = false;
+  /** Reconnecting after the connection dropped (the position to continue from, since when, the tries, the ticking overlay) */
+  private reconnect?: { key: string; pos: number | 'live'; since: number; tries: number; reason: string; ticker: number; retry: number };
+  /** When the current stream's first picture came, and how many times in a row a stream ended soon after it */
+  private playingSince = 0;
+  private quickEnds = 0;
+  /** The feed is waiting for data (buffering), and the bytes it had when last looked at / since when they stopped growing */
+  private waiting = false;
+  private lastLoaded = 0;
+  private lastLoadedAt = 0;
   /** The channel's streams in the order they are tried (the ones that did not play last time last), and which one is on */
   private sources: LiveTvSource[] = [];
   private sourceIdx = 0;
@@ -220,6 +241,7 @@ export class LiveTvPlayer {
     this.feed = new FeedPlayer(this.canvas, this.stage, {
       onFirstFrame: () => {
         if (this.state === 'loading') this.setState('playing');
+        this.playingSince = Date.now();
         const ch = this.current;
         const src = this.sources[this.sourceIdx];
         if (ch && src && this.streamUrl && !this.reported) {
@@ -230,13 +252,14 @@ export class LiveTvPlayer {
       onEnded: () => this.onStreamEnded(),
       onError: (err) => this.onPlayerError(err),
       onPlayingChange: (playing) => {
-        if (this.state === 'tuning' || this.state === 'unavailable' || this.state === 'unsupported' || this.state === 'idle') return;
+        if (this.state === 'tuning' || this.state === 'reconnecting' || this.state === 'unavailable' || this.state === 'unsupported' || this.state === 'idle') return;
         if (playing) this.setState('playing');
         else if (this.feed.paused) this.setState('paused');
       },
       onTime: () => undefined,
       onNotice: (text) => this.notice(text),
       onWaiting: (waiting) => {
+        this.waiting = waiting;
         // a stall shorter than a moment (a hole in a lossy feed, a slow segment) is not worth an overlay
         window.clearTimeout(this.waitTimer);
         if (!waiting) {
@@ -293,6 +316,12 @@ export class LiveTvPlayer {
     document.addEventListener('keydown', (e) => this.onKey(e));
     document.addEventListener('fullscreenchange', () => this.wake());
     // the page goes away (closed, navigated, the car's browser killed): a beacon frees the recorder
+    // the connection is back (the browser says): try at once instead of waiting for the next tick
+    window.addEventListener('online', () => {
+      if (!this.reconnect) return;
+      window.clearTimeout(this.reconnect.retry);
+      void this.tryReconnect();
+    });
     window.addEventListener('pagehide', () => {
       if (!this.recordedKey) return;
       const body = new Blob([JSON.stringify({ key: this.recordedKey, viewer: this.viewer })], { type: 'application/json' });
@@ -382,7 +411,7 @@ export class LiveTvPlayer {
     const gen = ++this.generation;
     const sameChannel = this.index === index && this.current === ch && this.sources.length > 0;
     this.index = index;
-    this.retried = false;
+    this.quickEnds = 0;
     if (!sameChannel || sourceIdx === 0) {
       const all = ch.sources.length ? ch.sources : [{ key: ch.key, providerId: ch.providerId, name: ch.name }];
       // the streams most likely to play first (their history), DRM ones last, the list's order between equals
@@ -412,7 +441,7 @@ export class LiveTvPlayer {
     if (src.drm) return this.showMessage('unsupported', 'This channel is DRM-protected (the playlist names license keys); it cannot play here.', 'DRM');
     let t: LiveTvTuneResponse;
     try {
-      t = await api.liveTvTune(src.key, this.viewer);
+      t = await api.liveTvTune(src.key, this.viewer, this.hooks.maxHeight());
     } catch (e) {
       if (gen !== this.generation) return;
       const m = e instanceof ApiError ? e.message : (e as Error).message;
@@ -464,6 +493,7 @@ export class LiveTvPlayer {
   }
 
   private stopMedia(): void {
+    this.endReconnect();
     // the stream goes before the pause: pausing reports a state change, which refreshes the
     // timeline, and with the stream still set that polled the window once more (after the leave
     // was sent, so the server kept the recorder for a viewer that was gone)
@@ -511,18 +541,85 @@ export class LiveTvPlayer {
       this.big.classList.remove('hidden');
       return;
     }
-    if (!this.retried) {
-      // once: the server may just have restarted the recorder (the upstream hiccupped)
-      this.retried = true;
-      void this.play(this.index, this.sourceIdx);
-      return;
+    // the endless recording ended: the connection dropped, the server restarted, or the recorder
+    // stopped (a dead upstream, the idle reaper). A stream that keeps ending right after it
+    // started is the channel's fault; anything else is reconnected to where it left off
+    this.quickEnds = Date.now() - this.playingSince < QUICK_END_MS ? this.quickEnds + 1 : 0;
+    if (this.quickEnds >= 3) return this.failSource('The stream keeps stopping right after it starts.', undefined, true);
+    this.lostConnection('the stream stopped');
+  }
+
+  /**
+   * The stream broke off (the car's connection dropped, the server's proxy answered 50x, the
+   * recording ended): the position is kept and the recording is asked for again from there, every
+   * few seconds, for up to ten minutes, with the overlay counting. The server keeps the recording
+   * for minutes without a viewer, so a short outage continues where it stopped; a recorder that
+   * is gone (404) means a tune from scratch, live.
+   */
+  private lostConnection(reason: string): void {
+    const ch = this.current;
+    const src = this.sources[this.sourceIdx];
+    if (this.reconnect || !this.streamUrl || !ch || !src) return;
+    const pos = this.feed.currentTime > 0 ? this.feed.currentTime : 'live';
+    this.reconnect = { key: src.key, pos, since: Date.now(), tries: 0, reason, ticker: 0, retry: 0 };
+    this.setState('reconnecting');
+    this.tickReconnect();
+    this.reconnect.ticker = window.setInterval(() => this.tickReconnect(), 1000);
+    void this.tryReconnect();
+  }
+
+  private tickReconnect(): void {
+    const r = this.reconnect;
+    if (!r) return;
+    const sec = Math.round((Date.now() - r.since) / 1000);
+    const notes = [r.tries ? `attempt ${r.tries}` : '', navigator.onLine ? '' : 'the browser says it is offline', typeof r.pos === 'number' ? 'it continues where it stopped' : ''].filter(Boolean);
+    this.showWait(`Connection lost (${r.reason}). Reconnecting… ${sec} s`, notes.join(' · '));
+  }
+
+  private endReconnect(): void {
+    const r = this.reconnect;
+    if (!r) return;
+    window.clearInterval(r.ticker);
+    window.clearTimeout(r.retry);
+    this.reconnect = undefined;
+  }
+
+  private async tryReconnect(): Promise<void> {
+    const r = this.reconnect;
+    if (!r) return;
+    r.tries++;
+    if (Date.now() - r.since > RECONNECT_GIVE_UP_MS) {
+      this.endReconnect();
+      return this.showMessage('unavailable', 'The connection did not come back in ten minutes.', r.reason);
     }
-    this.failSource('The stream stopped sending video.', undefined, true);
+    const gen = this.generation;
+    try {
+      const w = await api.liveTvWindow(r.key, this.viewer);
+      if (gen !== this.generation || this.reconnect !== r) return;
+      this.endReconnect();
+      const pos = typeof r.pos === 'number' && r.pos >= w.start && r.pos <= w.end ? r.pos : 'live';
+      this.notice(pos === 'live' ? 'Connection back: continuing live.' : `Connection back: continuing where it stopped, ${fmtDur(Math.max(0, (w.edge || w.end) - pos))} behind live.`);
+      this.setState('loading');
+      this.startProgress();
+      void this.loadStream(pos);
+    } catch (e) {
+      if (gen !== this.generation || this.reconnect !== r) return;
+      if (e instanceof ApiError && e.status === 404) {
+        // the server is there but the recording is gone (it restarted, or stopped the idle recorder): from the top, live
+        this.endReconnect();
+        void this.play(this.index, this.sourceIdx); // its first step clears the stage, the toast with it: said after
+        this.notice('Connection back; the recording had stopped meanwhile, so the channel is opened again.');
+        return;
+      }
+      r.retry = window.setTimeout(() => void this.tryReconnect(), r.tries < RECONNECT_FAST_TRIES ? RECONNECT_FAST_MS : RECONNECT_SLOW_MS);
+    }
   }
 
   private onPlayerError(err: Error): void {
-    if (!this.isOpen || this.state === 'unavailable' || this.state === 'unsupported') return;
+    if (!this.isOpen || this.state === 'unavailable' || this.state === 'unsupported' || this.state === 'reconnecting') return;
     const m = err.message || 'playback failed';
+    // a live recording that broke off at the network (not a stream the browser cannot play): reconnect, do not move on
+    if (this.streamUrl && isConnectionError(m) && !/decode|codec|mp4box/i.test(m)) return this.lostConnection(m.replace(/^fetch\(\) failed \(likely CORS or network\): /, ''));
     if (/hev1|hvc1/i.test(m)) return this.showMessage('unsupported', 'This channel is H.265 (HEVC), which this browser cannot decode; most channels are H.264.', m);
     if (/VideoDecoder|AudioDecoder|codec|No video track|WebCodecs|decode\(\)|mp4box/i.test(m)) return this.failSource(`This browser cannot decode this stream: ${m}`, undefined, true);
     this.failSource(`This channel is not available right now: ${/HTTP (404|410)/.test(m) ? 'the stream is gone' : m}.`, undefined, true);
@@ -590,7 +687,7 @@ export class LiveTvPlayer {
       this.liveEl.classList.remove('off');
       this.wake();
     } else this.liveEl.classList.add('off');
-    const playing = s === 'playing' || s === 'loading';
+    const playing = s === 'playing' || s === 'loading' || s === 'reconnecting';
     this.playBtn.innerHTML = playing ? ICON.pause : ICON.play;
     this.playBtn.setAttribute('aria-label', playing ? 'Pause' : 'Play');
     this.refreshTimeline();
@@ -630,6 +727,12 @@ export class LiveTvPlayer {
   private togglePlay(): void {
     if (this.state === 'unavailable' || this.state === 'unsupported') return void this.play(this.index);
     if (this.state === 'tuning') return;
+    if (this.state === 'reconnecting') {
+      // a tap while reconnecting: try now
+      window.clearTimeout(this.reconnect?.retry);
+      void this.tryReconnect();
+      return;
+    }
     if (this.feed.paused) {
       // resume where it was paused; paused longer than the recording reaches back: from the oldest point kept
       const w = this.timeline();
@@ -697,8 +800,20 @@ export class LiveTvPlayer {
 
   /** The seek bar (once the recording reaches back MIN_WINDOW_SEC) and the LIVE / "behind" badge follow the player. */
   private refreshTimeline(): void {
-    if (!this.isOpen || this.state === 'idle' || this.state === 'tuning') return;
+    if (!this.isOpen || this.state === 'idle' || this.state === 'tuning' || this.state === 'reconnecting') return;
     const c = this.current;
+    if (this.streamUrl && this.state === 'playing') {
+      // a connection that went half-open delivers nothing and never errors (the car's LTE, a
+      // proxy keeping the socket): no byte in NO_DATA_MS while waiting for data = lost
+      const loaded = this.feed.download().loaded;
+      if (loaded !== this.lastLoaded || !this.waiting) {
+        this.lastLoaded = loaded;
+        this.lastLoadedAt = Date.now();
+      } else if (Date.now() - this.lastLoadedAt > NO_DATA_MS) {
+        this.lastLoadedAt = Date.now();
+        return this.lostConnection(`no data for ${Math.round(NO_DATA_MS / 1000)} s`);
+      }
+    }
     if (this.streamUrl && c && Date.now() - this.windowAt > WINDOW_POLL_MS) {
       this.windowAt = Date.now();
       const gen = this.generation;
