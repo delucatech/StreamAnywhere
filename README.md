@@ -492,6 +492,24 @@ page opens); the refresh button at the top and **Refresh channels** in Settings 
 preferences; `?rev=N` answers `unchanged`) and `GET /api/livetv/channels` (`?rev=N` likewise) feed
 the page, which polls them.
 
+*One tile per channel, its streams as backups.* The community lists overlap: the user's eight
+iptv-org lists (a country and seven categories) name the same channels over and over, mostly with
+the very same stream, sometimes with another ("CNN" and "CNN HD"), so the channel browser showed
+one channel three or four times. `GET /api/livetv/channels` folds them (`mergeChannels` in
+`livetvM3u.ts`, pure and tested): entries with the same stream URL, the same guide id in full, or
+the same name (`channelNameKey`: lower-case, quality words dropped, punctuation gone but for "+")
+within one country (the guide id's `.us`) or, without a guide id, within one provider are one
+channel. Affiliates with different names ("CBS KUTV", "CBS KIRO-TV") and same-named channels of
+different countries stay apart. The merged channel carries `sources` (one per distinct URL, in list
+order, DRM streams last; each with its provider, the list's own name and the quality tag) and
+`keys` (every entry's key, so favorites, hidden and "did not play" lists match whichever of them
+they were made with); the tile says *N streams*. The player tries the sources in order, the ones
+that did not play last time last: a tune the server refuses, a stream that will not decode or that
+stops sending video moves to the next with a toast (*Stream 1 did not play (…). Trying stream 2 of
+3…*) and the opening overlay says which stream is on; the last one's failure is the message shown.
+Favorites are kept under the channel's first key (taking one off clears every key), hiding hides
+every key, and Settings' hidden list shows one row per channel.
+
 *Guide* (`server/src/livetvEpg.ts`). XMLTV files run to hundreds of MB uncompressed, so a guide is
 parsed as it streams in (gunzipped on the fly) and only the programmes of the provider's own
 channels from 4 h ago to 40 h ahead are kept, in memory and in `LIVETV_DIR/epg/<id>.epg.json`;

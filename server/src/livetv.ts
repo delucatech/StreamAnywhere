@@ -23,7 +23,7 @@ import { detectFfmpeg } from './ffmpeg';
 import { decryptJson, encryptJson, setLiveTvCryptoLogger } from './livetvCrypto';
 import { EPG_TTL_MS, epgLoading, epgStore, forgetEpg, loadEpg, nowNext, programmesFor, setEpgDir, type EpgWanted } from './livetvEpg';
 import { checkLiveUrl, fetchLiveText, redactUrl, safeHost } from './livetvHttp';
-import { cleanChannelName, countGroups, parseM3u, splitGroups, type M3uChannel } from './livetvM3u';
+import { cleanChannelName, countGroups, mergeChannels, parseM3u, splitGroups, type M3uChannel, type MergeEntry } from './livetvM3u';
 import { LIVETV_PRESETS, presetById } from './livetvPresets';
 import { classify, DVR_WINDOW_SEC, ensureRemux, leaveRemux, pickVariant, registerLiveTvStreamRoutes, remuxAvailable, remuxProgress, remuxStats, setLiveTvStreamLogger, setRemuxRoot, shutdownLiveTvStreams, type RemuxSource, type StreamSource, type Verdict } from './livetvStream';
 import { normalizeXtreamServer, xtreamAccount, xtreamEpgUrl, xtreamLiveChannels, xtreamLiveUrl, xtreamSecrets, XtreamError, type XtreamCreds } from './livetvXtream';
@@ -253,23 +253,28 @@ const splitKey = (key: string): { providerId: string; channelId: string } | unde
   return i > 0 ? { providerId: key.slice(0, i), channelId: key.slice(i + 1) } : undefined;
 };
 
+/**
+ * Every enabled provider's channels, the same channel from several lists (or at several
+ * qualities) folded into one with its streams as sources (mergeChannels): the user's eight
+ * iptv-org lists (a country and seven categories) name the same channels over and over.
+ */
 export function liveTvChannels(): LiveTvChannelsResponse {
   const f = load();
-  const channels: LiveTvChannel[] = [];
+  const entries: MergeEntry[] = [];
   for (const p of f.providers) {
     if (!p.enabled) continue;
     const l = listOf(p);
     if (!l) continue;
     for (const c of l.channels) {
-      const groups = splitGroups(c.group);
-      const ch: LiveTvChannel = { key: keyOf(p.id, c.id), providerId: p.id, name: cleanChannelName(c.name) || c.name, group: groups[0] || '', groups };
-      if (c.logo) ch.logo = c.logo;
-      if (c.epgId) ch.epgId = c.epgId;
-      if (c.number) ch.number = c.number;
-      if (c.drm) ch.drm = true;
-      channels.push(ch);
+      const e: MergeEntry = { key: keyOf(p.id, c.id), providerId: p.id, name: cleanChannelName(c.name) || c.name, rawName: c.name, url: c.url, groups: splitGroups(c.group) };
+      if (c.logo) e.logo = c.logo;
+      if (c.epgId) e.epgId = c.epgId;
+      if (c.number) e.number = c.number;
+      if (c.drm) e.drm = true;
+      entries.push(e);
     }
   }
+  const channels: LiveTvChannel[] = mergeChannels(entries);
   return { channelsRev: f.channelsRev, channels };
 }
 

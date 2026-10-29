@@ -69,6 +69,135 @@ export function cleanChannelName(name: string): string {
     .trim();
 }
 
+/**
+ * A name as an identity: lower-case, quality words dropped ("CNN HD" = "CNN"), punctuation gone
+ * but for "+" ("News 12+" is not "News 12", "Canal+" not "Canal"). Empty when nothing but quality words is left.
+ */
+export function channelNameKey(name: string): string {
+  return cleanChannelName(name)
+    .toLowerCase()
+    .replace(/\b(hd|sd|fhd|uhd|4k|hevc|h\.?265)\b/g, ' ')
+    .replace(/[^a-z0-9+]+/g, '');
+}
+
+/** "(1080p)" / "(720p)" from a raw playlist name */
+export function qualityOf(name: string): string | undefined {
+  const m = /\((\d{3,4}p)\)/i.exec(name);
+  return m ? m[1].toLowerCase() : undefined;
+}
+
+/** What the merge needs of one playlist entry of one provider */
+export interface MergeEntry {
+  key: string;
+  providerId: string;
+  /** The cleaned name (what the tile shows) */
+  name: string;
+  /** The list's own name, with its quality tag */
+  rawName: string;
+  epgId?: string;
+  url: string;
+  groups: string[];
+  logo?: string;
+  number?: number;
+  drm?: boolean;
+}
+
+export interface MergedChannel {
+  key: string;
+  providerId: string;
+  name: string;
+  group: string;
+  groups: string[];
+  logo?: string;
+  epgId?: string;
+  number?: number;
+  drm?: boolean;
+  sources: { key: string; providerId: string; name: string; quality?: string; drm?: boolean }[];
+  keys: string[];
+}
+
+/**
+ * Entries that are the same channel become one, in the order the first of them came: the same
+ * stream URL (a country list and a category list naming the same entry), the same guide id in
+ * full ("CNN.us@SD" twice; "CNN.us@HD" is another stream of it only through the name), or the
+ * same name within one country (the guide id's "…​.us") or, without a guide id, within one
+ * provider ("CNN" and "CNN HD"; never "CBS KUTV" and "CBS KIRO-TV", whose names differ). The
+ * streams of a merged channel are its sources (one per URL, the ones without DRM first); every
+ * entry's key is kept in `keys` so favorites and hidden lists made of any of them still match.
+ */
+export function mergeChannels(entries: MergeEntry[]): MergedChannel[] {
+  const parent = entries.map((_, i) => i);
+  const find = (i: number): number => {
+    while (parent[i] !== i) {
+      parent[i] = parent[parent[i]];
+      i = parent[i];
+    }
+    return i;
+  };
+  const union = (a: number, b: number): void => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent[Math.max(ra, rb)] = Math.min(ra, rb);
+  };
+  const firstBy = new Map<string, number>();
+  const link = (ident: string, i: number): void => {
+    const first = firstBy.get(ident);
+    if (first === undefined) firstBy.set(ident, i);
+    else union(first, i);
+  };
+  entries.forEach((e, i) => {
+    link(`url:${e.url}`, i);
+    const id = (e.epgId || '').trim().toLowerCase();
+    if (id) link(`id:${id}`, i);
+    const nameKey = channelNameKey(e.rawName);
+    if (nameKey) {
+      const country = /\.([a-z]{2})$/i.exec(id.split('@')[0] || '');
+      link(`name:${nameKey}|${country ? country[1] : `p:${e.providerId}`}`, i);
+    }
+  });
+  const groups = new Map<number, MergeEntry[]>();
+  entries.forEach((e, i) => {
+    const r = find(i);
+    const g = groups.get(r);
+    if (g) g.push(e);
+    else groups.set(r, [e]);
+  });
+  const out: MergedChannel[] = [];
+  for (const g of groups.values()) {
+    const first = g[0];
+    const seenUrl = new Set<string>();
+    const sources: MergedChannel['sources'] = [];
+    const gset = new Set<string>();
+    const groupList: string[] = [];
+    let logo: string | undefined;
+    for (const e of g) {
+      if (!seenUrl.has(e.url)) {
+        seenUrl.add(e.url);
+        const src: MergedChannel['sources'][number] = { key: e.key, providerId: e.providerId, name: e.name };
+        const q = qualityOf(e.rawName);
+        if (q) src.quality = q;
+        if (e.drm) src.drm = true;
+        sources.push(src);
+      }
+      for (const x of e.groups) if (!gset.has(x)) {
+        gset.add(x);
+        groupList.push(x);
+      }
+      if (!logo && e.logo) logo = e.logo;
+    }
+    // a stream without DRM before one with it (the player tries them in order); otherwise as listed
+    sources.sort((a, b) => Number(!!a.drm) - Number(!!b.drm));
+    const primary = sources[0];
+    const ch: MergedChannel = { key: primary.key, providerId: primary.providerId, name: first.name, group: groupList[0] || '', groups: groupList, sources, keys: g.map((e) => e.key) };
+    if (logo) ch.logo = logo;
+    if (first.epgId) ch.epgId = first.epgId;
+    if (first.number) ch.number = first.number;
+    if (sources.every((s) => s.drm)) ch.drm = true;
+    out.push(ch);
+  }
+  return out;
+}
+
 export function parseM3u(text: string): M3uPlaylist {
   const lines = text.split(/\r?\n/);
   const channels: M3uChannel[] = [];

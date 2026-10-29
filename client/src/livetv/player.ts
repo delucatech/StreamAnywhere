@@ -20,7 +20,7 @@
  * theater itself), and the controls hiding while playing.
  */
 import type { PlayerStats } from '../renderers/types';
-import type { LiveTvChannel, LiveTvChannelGuideResponse, LiveTvProgramme, LiveTvTuneResponse, LiveTvTuneStatus, LiveTvWindow } from '../../../shared/types';
+import type { LiveTvChannel, LiveTvChannelGuideResponse, LiveTvProgramme, LiveTvSource, LiveTvTuneResponse, LiveTvTuneStatus, LiveTvWindow } from '../../../shared/types';
 import { api, ApiError, apiUrl } from '../api';
 import { FeedPlayer } from '../feed/player';
 
@@ -30,11 +30,13 @@ export interface PlayerHooks {
   onClose(): void;
   onChannel(ch: LiveTvChannel): void;
   onFavorite(ch: LiveTvChannel, on: boolean): void;
-  isFavorite(key: string): boolean;
+  isFavorite(ch: LiveTvChannel): boolean;
+  /** This stream (one of the channel's sources) did not play last time: tried after the others */
+  isBroken(key: string): boolean;
   /** The viewer hid this channel (the hide button, the H key, or from the error message) */
   onHide(ch: LiveTvChannel): void;
-  /** The server answered a tune: did the channel open (the page ranks channels that did not) */
-  onTuned(ch: LiveTvChannel, ok: boolean): void;
+  /** The server answered a tune of one of the channel's streams: did it open (the page ranks channels that did not) */
+  onTuned(ch: LiveTvChannel, key: string, ok: boolean): void;
   guide(key: string): Promise<LiveTvChannelGuideResponse>;
   nowNext(key: string): Promise<{ now?: LiveTvProgramme; next?: LiveTvProgramme }>;
   /** The provider's name for the subtitle (several providers) */
@@ -131,6 +133,11 @@ export class LiveTvPlayer {
   private windowSec = 0;
   /** The stream ended once already for this channel: the next end is reported, not retried */
   private retried = false;
+  /** The channel's streams in the order they are tried (the ones that did not play last time last), and which one is on */
+  private sources: LiveTvSource[] = [];
+  private sourceIdx = 0;
+  /** Why the stream before was given up, for the opening overlay of the next */
+  private tuneWaitNote = '';
   /** This player, to the server: the recorder of a channel it leaves stops at once */
   private readonly viewer = Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
   /** The channel whose recorder runs for this player (told when leaving it) */
@@ -333,7 +340,7 @@ export class LiveTvPlayer {
 
   refreshFavorite(): void {
     const c = this.current;
-    const on = !!c && this.hooks.isFavorite(c.key);
+    const on = !!c && this.hooks.isFavorite(c);
     this.favBtn.innerHTML = on ? ICON.starOn : ICON.star;
     this.favBtn.classList.toggle('on', on);
   }
@@ -351,17 +358,30 @@ export class LiveTvPlayer {
     void this.play((this.index + d + this.items.length) % this.items.length);
   }
 
-  private async play(index: number): Promise<void> {
+  /**
+   * Opens `items[index]`: its first stream, or (`sourceIdx`) the next one when the one before
+   * did not play. A channel merged from several lists has several; the streams that did not play
+   * last time go last.
+   */
+  private async play(index: number, sourceIdx = 0): Promise<void> {
     const ch = this.items[index];
     if (!ch) return;
     const gen = ++this.generation;
+    const sameChannel = this.index === index && this.current === ch && this.sources.length > 0;
     this.index = index;
     this.retried = false;
-    if (this.recordedKey !== ch.key) this.leaveRecorded();
+    if (!sameChannel || sourceIdx === 0) {
+      const all = ch.sources.length ? ch.sources : [{ key: ch.key, providerId: ch.providerId, name: ch.name }];
+      this.sources = [...all.filter((s) => !s.drm && !this.hooks.isBroken(s.key)), ...all.filter((s) => !s.drm && this.hooks.isBroken(s.key)), ...all.filter((s) => s.drm)];
+    }
+    this.sourceIdx = Math.min(sourceIdx, this.sources.length - 1);
+    if (this.sourceIdx === 0) this.tuneWaitNote = '';
+    const src = this.sources[this.sourceIdx];
+    if (this.recordedKey !== src.key) this.leaveRecorded();
     this.stopMedia();
     this.logoEl.innerHTML = ch.logo ? `<img src="${esc(ch.logo)}" alt="" draggable="false" />` : '';
     this.nameEl.textContent = (ch.number ? `${ch.number} · ` : '') + ch.name;
-    this.subEl.textContent = [...ch.groups, this.hooks.providerName(ch)].filter(Boolean).join(' · ');
+    this.subEl.textContent = this.subtitle(ch, src);
     this.nowEl.textContent = '';
     this.nextEl.textContent = '';
     this.barEl.classList.add('hidden');
@@ -371,20 +391,23 @@ export class LiveTvPlayer {
     this.startProgress(ch);
     if (this.root.classList.contains('guide-open')) void this.loadGuide(ch);
     void this.loadNowNext(ch);
-    if (ch.drm) return this.showMessage('unsupported', 'This channel is DRM-protected (the playlist names license keys); it cannot play here.', 'DRM');
+    if (src.drm) return this.showMessage('unsupported', 'This channel is DRM-protected (the playlist names license keys); it cannot play here.', 'DRM');
     let t: LiveTvTuneResponse;
     try {
-      t = await api.liveTvTune(ch.key, this.viewer);
+      t = await api.liveTvTune(src.key, this.viewer);
     } catch (e) {
       if (gen !== this.generation) return;
       const m = e instanceof ApiError ? e.message : (e as Error).message;
-      return this.showMessage('unavailable', `The server could not open this channel: ${m}`);
+      return this.failSource(`The server could not open this channel: ${m}`);
     }
     if (gen !== this.generation) return;
-    this.hooks.onTuned(ch, t.state === 'ok' && !!t.playUrl);
-    if (t.state !== 'ok' || !t.playUrl) return this.showMessage(t.state === 'unsupported' ? 'unsupported' : 'unavailable', t.message || 'This channel is not available right now.', t.detail);
+    this.hooks.onTuned(ch, src.key, t.state === 'ok' && !!t.playUrl);
+    if (t.state !== 'ok' || !t.playUrl) {
+      if (t.state === 'unsupported') return this.showMessage('unsupported', t.message || 'This stream cannot play here.', t.detail);
+      return this.failSource(t.message || 'This channel is not available right now.', t.detail);
+    }
     this.windowSec = t.dvr ? t.windowSec || 0 : 0;
-    this.recordedKey = t.kind === 'remux' ? ch.key : undefined;
+    this.recordedKey = t.kind === 'remux' ? src.key : undefined;
     this.setState('loading');
     this.status = undefined;
     this.tickProgress();
@@ -437,6 +460,25 @@ export class LiveTvPlayer {
     window.clearTimeout(this.toastTimer);
   }
 
+  /** "News · IPTV-org – United States · stream 2 of 3 (1080p)" */
+  private subtitle(ch: LiveTvChannel, src: LiveTvSource): string {
+    const prov = this.hooks.providerName({ ...ch, providerId: src.providerId });
+    const which = this.sources.length > 1 ? `stream ${this.sourceIdx + 1} of ${this.sources.length}${src.quality ? ` (${src.quality})` : ''}` : src.quality || '';
+    return [...ch.groups, prov, which].filter(Boolean).join(' · ');
+  }
+
+  /**
+   * This stream did not play: the channel's next stream is tried (the same channel from another
+   * list, or at another quality), with the overlay saying so; the last one's failure is the message.
+   */
+  private failSource(text: string, detail?: string): void {
+    const next = this.sourceIdx + 1;
+    if (next >= this.sources.length || this.sources[next].drm) return this.showMessage('unavailable', text, detail);
+    this.tuneWaitNote = `Stream ${this.sourceIdx + 1} did not play (${text.replace(/\.$/, '')}).`;
+    void this.play(this.index, next); // its first step clears the stage, the toast with it: said after
+    this.notice(`${this.tuneWaitNote} Trying stream ${next + 1} of ${this.sources.length}…`);
+  }
+
   /** The stream ended: a live recording never does unless the recorder stopped (a dead upstream, the idle reaper). */
   private onStreamEnded(): void {
     if (!this.isOpen || this.state === 'idle') return;
@@ -449,18 +491,18 @@ export class LiveTvPlayer {
     if (!this.retried) {
       // once: the server may just have restarted the recorder (the upstream hiccupped)
       this.retried = true;
-      void this.play(this.index);
+      void this.play(this.index, this.sourceIdx);
       return;
     }
-    this.showMessage('unavailable', 'The stream stopped sending video.');
+    this.failSource('The stream stopped sending video.');
   }
 
   private onPlayerError(err: Error): void {
     if (!this.isOpen || this.state === 'unavailable' || this.state === 'unsupported') return;
     const m = err.message || 'playback failed';
     if (/hev1|hvc1/i.test(m)) return this.showMessage('unsupported', 'This channel is H.265 (HEVC), which this browser cannot decode; most channels are H.264.', m);
-    if (/VideoDecoder|AudioDecoder|codec|No video track|WebCodecs|decode\(\)|mp4box/i.test(m)) return this.showMessage('unsupported', `This browser cannot decode this stream: ${m}`);
-    this.showMessage('unavailable', `This channel is not available right now: ${/HTTP (404|410)/.test(m) ? 'the stream is gone' : m}.`);
+    if (/VideoDecoder|AudioDecoder|codec|No video track|WebCodecs|decode\(\)|mp4box/i.test(m)) return this.failSource(`This browser cannot decode this stream: ${m}`);
+    this.failSource(`This channel is not available right now: ${/HTTP (404|410)/.test(m) ? 'the stream is gone' : m}.`);
   }
 
   /**
@@ -477,7 +519,7 @@ export class LiveTvPlayer {
       this.tickProgress();
       if (ch && this.state === 'tuning' && !this.polling) {
         this.polling = true;
-        api.liveTvTuneStatus(ch.key)
+        api.liveTvTuneStatus(this.sources[this.sourceIdx]?.key || ch.key)
           .then((s) => {
             if (this.state === 'tuning' && this.current?.key === ch.key) this.status = s;
           })
@@ -510,6 +552,7 @@ export class LiveTvPlayer {
       if (s.note) notes.push(s.note);
     }
     if (s && s.load >= 1.5) notes.push(`The server is busy (load ${s.load}); this takes longer than usual.`);
+    if (this.sources.length > 1) notes.unshift(`${this.tuneWaitNote ? `${this.tuneWaitNote} ` : ''}Stream ${this.sourceIdx + 1} of ${this.sources.length}.`);
     this.showWait(`${text} ${sec} s`, notes.join(' · '));
   }
 
@@ -636,7 +679,7 @@ export class LiveTvPlayer {
     if (this.streamUrl && c && Date.now() - this.windowAt > WINDOW_POLL_MS) {
       this.windowAt = Date.now();
       const gen = this.generation;
-      void api.liveTvWindow(c.key, this.viewer).then((w) => {
+      void api.liveTvWindow(this.recordedKey || c.key, this.viewer).then((w) => {
         if (gen === this.generation) this.win = w;
       }).catch(() => undefined);
     }
@@ -671,7 +714,7 @@ export class LiveTvPlayer {
   private toggleFavorite(): void {
     const c = this.current;
     if (!c) return;
-    this.hooks.onFavorite(c, !this.hooks.isFavorite(c.key));
+    this.hooks.onFavorite(c, !this.hooks.isFavorite(c));
     this.refreshFavorite();
   }
 

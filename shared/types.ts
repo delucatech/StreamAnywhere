@@ -835,11 +835,34 @@ export interface LiveTvProviderInput {
   preset?: string;
 }
 
+/** One stream of a channel: the same channel comes from several lists, or at several qualities */
+export interface LiveTvSource {
+  /** "<providerId>:<channelId>": what tuning refers to */
+  key: string;
+  providerId: string;
+  /** The list's own name for it ("CNN HD") */
+  name: string;
+  /** "1080p" / "720p" when the list says */
+  quality?: string;
+  drm?: boolean;
+}
+
 export interface LiveTvChannel {
-  /** "<providerId>:<channelId>": what favorites, the guide and tuning refer to */
+  /** "<providerId>:<channelId>" of the first source: what favorites, the guide and tuning refer to */
   key: string;
   providerId: string;
   name: string;
+  /**
+   * Every stream this tile stands for, the first one first: the same channel listed by several
+   * providers (the iptv-org country and category lists overlap) or at several qualities ("CNN",
+   * "CNN HD"). The player tries the next when one fails. One entry when nothing merged.
+   */
+  sources: LiveTvSource[];
+  /**
+   * Every key that refers to this channel: the sources' keys and the same stream listed again by
+   * another provider. Favorites, hidden and "did not play" match any of them.
+   */
+  keys: string[];
   /** The first group / category the provider names ("News", "Sports", a country...) */
   group: string;
   /**

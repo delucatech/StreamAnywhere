@@ -35,7 +35,7 @@ import type { FeedResponse } from '../../../shared/types';
 import { openUpstream } from '../http';
 import { daemonStatus, detectYtDlp, shutdownYtDlp, ytdlpInfo } from '../ytdlp';
 import type { ResolveResponse } from '../../../shared/types';
-import { parseAttrs, parseM3u, cleanChannelName, countGroups, splitGroups } from '../livetvM3u';
+import { parseAttrs, parseM3u, cleanChannelName, channelNameKey, countGroups, mergeChannels, qualityOf, splitGroups } from '../livetvM3u';
 import { XmltvScanner, nowNext, parseXmltvTime, resolveGuideId } from '../livetvEpg';
 import { decryptJson, decryptText, encryptJson, encryptText, useEphemeralLiveTvKey } from '../livetvCrypto';
 import { redactUrl } from '../livetvHttp';
@@ -87,6 +87,27 @@ not-a-url
   check('attrs parser handles unquoted values', parseAttrs('tvg-id=abc group-title="A B"')['group-title'] === 'A B' && parseAttrs('tvg-id=abc')['tvg-id'] === 'abc');
   check('semicolon-joined categories split into groups', JSON.stringify(splitGroups('Animation;Kids ; ;Kids')) === '["Animation","Kids"]' && splitGroups('').length === 0 && splitGroups('News').length === 1, splitGroups('Animation;Kids ; ;Kids'));
   check('group count sees each joined category once', countGroups([{ group: 'Animation;Kids' }, { group: 'Kids' }, { group: 'News' }, { group: '' }]) === 3);
+  check('name key drops quality words and punctuation', channelNameKey('CNN HD (720p) [Geo-blocked]') === 'cnn' && channelNameKey('CBS KIRO-TV (1080p)') === 'cbskirotv' && channelNameKey('News 12+ NY') !== channelNameKey('News 12 NY') && channelNameKey('HD') === '' && qualityOf('CNN (1080p)') === '1080p' && qualityOf('CNN') === undefined);
+  {
+    const e = (key: string, providerId: string, rawName: string, url: string, epgId?: string, groups: string[] = ['News'], drm?: boolean) => ({ key, providerId, name: cleanChannelName(rawName), rawName, url, epgId, groups, drm });
+    const merged = mergeChannels([
+      e('us:1', 'us', 'CNN (720p)', 'https://a/cnn.m3u8', 'CNN.us@SD'),
+      e('us:2', 'us', 'CNN HD (720p) [Geo-blocked]', 'https://b/cnnhd.m3u8', 'CNN.us@HD', ['News', 'General']),
+      e('us:3', 'us', 'CBS KUTV (1080p)', 'https://c/kutv.m3u8', 'CBS.us@KUTV', ['General']),
+      e('us:4', 'us', 'CBS KIRO-TV (1080p)', 'https://c/kiro.m3u8', 'CBS.us@KIROTV', ['General']),
+      e('news:1', 'news', 'CNN (720p)', 'https://a/cnn.m3u8', 'CNN.us@SD'),
+      e('news:5', 'news', 'Canal 5 (720p)', 'https://d/c5.m3u8', 'Canal5.mx'),
+      e('news:6', 'news', 'Canal 5', 'https://e/c5.m3u8', 'Canal5.uy'),
+      e('x:7', 'x', 'Canal 5', 'https://f/c5.m3u8'),
+      e('x:8', 'x', 'Canal 5 HD', 'https://f/c5hd.m3u8', undefined, ['Movies'], true),
+    ]);
+    const cnn = merged.find((c) => c.key === 'us:1');
+    check('the same stream from two lists and the HD variant fold into one channel', merged.length === 6 && !!cnn && cnn.sources.length === 2 && cnn.sources[1].key === 'us:2' && cnn.sources[1].quality === '720p' && JSON.stringify(cnn.keys) === '["us:1","us:2","news:1"]', merged.map((c) => `${c.key}:${c.sources.length}/${c.keys.length}`));
+    check('the merged channel keeps the first name and the union of groups', cnn?.name === 'CNN' && JSON.stringify(cnn?.groups) === '["News","General"]');
+    check('affiliates with different names and same-named channels of different countries stay apart', merged.some((c) => c.key === 'us:3' && c.sources.length === 1) && merged.some((c) => c.key === 'us:4') && merged.some((c) => c.key === 'news:5' && c.sources.length === 1) && merged.some((c) => c.key === 'news:6'));
+    const c5 = merged.find((c) => c.key === 'x:7');
+    check('without a guide id, the same name merges within one provider; DRM streams come last and mark the channel only when every stream has it', !!c5 && c5.sources.length === 2 && c5.sources[1].key === 'x:8' && c5.sources[1].drm === true && !c5.drm);
+  }
 
   console.log('\n== 1d. Live TV: XMLTV guide');
   const now = Date.parse('2026-10-28T12:00:00Z');

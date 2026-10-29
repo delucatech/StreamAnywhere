@@ -182,9 +182,18 @@ const savePrefs = (): void => {
 };
 
 const providerById = (id: string): LiveTvProvider | undefined => state.providers.find((p) => p.id === id);
-const channelByKey = (key: string | undefined): LiveTvChannel | undefined => (key && !hidden.has(key) ? channels.find((c) => c.key === key) : undefined);
+/** Any of a channel's keys (its sources, the same stream listed by another provider) -> the channel */
+let byKey = new Map<string, LiveTvChannel>();
+const isFav = (c: LiveTvChannel): boolean => c.keys.some((k) => favorites.has(k));
+const isHidden = (c: LiveTvChannel): boolean => c.keys.some((k) => hidden.has(k));
+/** "Did not play last time": every stream of it failed (one working source is enough) */
+const isBroken = (c: LiveTvChannel): boolean => c.sources.every((s) => broken[s.key]);
+const channelByKey = (key: string | undefined): LiveTvChannel | undefined => {
+  const c = key ? byKey.get(key) : undefined;
+  return c && !isHidden(c) ? c : undefined;
+};
 /** The order of the All view: channels that did not play last time last, those without a working logo before them */
-const rankOf = (c: LiveTvChannel): number => (broken[c.key] ? 2 : !c.logo || badLogos[c.key] ? 1 : 0);
+const rankOf = (c: LiveTvChannel): number => (isBroken(c) ? 2 : !c.logo || badLogos[c.key] ? 1 : 0);
 const anyRefreshRunning = (): boolean => state.providers.some((p) => p.refresh.state === 'running' || p.epg.state === 'running');
 
 // ---------------------------------------------------------------- the player
@@ -197,18 +206,20 @@ const player = new LiveTvPlayer(el.theater, {
     renderContinue();
     for (const b of el.grid.querySelectorAll<HTMLElement>('.ch')) b.classList.toggle('playing', b.dataset.key === ch.key);
   },
-  onFavorite: (ch, on) => void setFavorite(ch.key, on),
-  isFavorite: (key) => favorites.has(key),
-  onHide: (ch) => void setHidden(ch.key, true),
-  onTuned: (ch, ok) => {
+  onFavorite: (ch, on) => void setFavorite(ch, on),
+  isFavorite: (ch) => isFav(ch),
+  isBroken: (key) => !!broken[key],
+  onHide: (ch) => void setHidden(ch, true),
+  onTuned: (ch, key, ok) => {
     // the server keeps this too; the tile dims (or brightens) right away
-    if (ok) delete broken[ch.key];
-    else broken[ch.key] = Date.now();
+    if (ok) delete broken[key];
+    else broken[key] = Date.now();
     savePrefs();
     const tile = el.grid.querySelector<HTMLElement>(`.ch[data-key="${CSS.escape(ch.key)}"]`);
     if (tile) {
-      tile.classList.toggle('dim', !ok);
-      tile.title = ok ? '' : BROKEN_TITLE;
+      const dim = isBroken(ch);
+      tile.classList.toggle('dim', dim);
+      tile.title = dim ? BROKEN_TITLE : '';
     }
   },
   providerName: (ch) => (state.providers.length > 1 ? providerById(ch.providerId)?.name || '' : ''),
@@ -223,17 +234,20 @@ const player = new LiveTvPlayer(el.theater, {
 
 const BROKEN_TITLE = 'Did not play last time';
 
-async function setFavorite(key: string, on: boolean): Promise<void> {
+/** A favorite is kept under the channel's first key; taking it off clears every key of the channel (lists made before the merge) */
+async function setFavorite(c: LiveTvChannel, on: boolean): Promise<void> {
+  const keys = on ? [c.key] : c.keys.filter((k) => favorites.has(k));
   if (on) {
-    favorites.add(key);
-    hidden.delete(key);
-  } else favorites.delete(key);
+    favorites.add(c.key);
+    for (const k of c.keys) hidden.delete(k);
+  } else for (const k of keys) favorites.delete(k);
   savePrefs();
   renderFavButtons();
   if (view.favs) render();
   try {
-    const p = await api.liveTvPrefs({ favorite: { key, on } });
-    favorites = new Set(p.favorites);
+    let p: LiveTvPrefs | undefined;
+    for (const key of keys) p = await api.liveTvPrefs({ favorite: { key, on } });
+    if (p) favorites = new Set(p.favorites);
     savePrefs();
     renderFavButtons();
   } catch (e) {
@@ -241,19 +255,23 @@ async function setFavorite(key: string, on: boolean): Promise<void> {
   }
 }
 
-/** Hides a channel from the browser (or shows it again); the server keeps the list for every device. */
-async function setHidden(key: string, on: boolean): Promise<void> {
-  if (on) {
-    hidden.add(key);
-    favorites.delete(key);
-  } else hidden.delete(key);
+/** Hides a channel from the browser (every key of it, or shows it again); the server keeps the list for every device. */
+async function setHidden(c: LiveTvChannel, on: boolean): Promise<void> {
+  const keys = on ? c.keys : c.keys.filter((k) => hidden.has(k));
+  for (const k of keys) {
+    if (on) {
+      hidden.add(k);
+      favorites.delete(k);
+    } else hidden.delete(k);
+  }
   savePrefs();
   render();
   if (!el.settingsOverlay.classList.contains('hidden')) renderSettings();
   if (on) toast('Channel hidden: Settings lists the hidden channels');
   try {
-    const p = await api.liveTvPrefs({ hidden: { key, on } });
-    applyPrefs(p);
+    let p: LiveTvPrefs | undefined;
+    for (const key of keys) p = await api.liveTvPrefs({ hidden: { key, on } });
+    if (p) applyPrefs(p);
   } catch (e) {
     toast(errMsg(e), true);
   }
@@ -281,7 +299,8 @@ function renderViewSeg(): void {
 function renderFavButtons(): void {
   renderViewSeg();
   for (const b of el.grid.querySelectorAll<HTMLElement>('.ch')) {
-    const on = favorites.has(b.dataset.key || '');
+    const c = byKey.get(b.dataset.key || '');
+    const on = !!c && isFav(c);
     const fav = b.querySelector<HTMLElement>('.ch-fav');
     if (fav) {
       fav.classList.toggle('on', on);
@@ -365,8 +384,15 @@ async function sync(): Promise<void> {
       }
       const c = await api.liveTvChannels();
       if (!('unchanged' in c)) {
-        // an older server build (mid-deploy) answers without `groups`
-        channels = c.channels.map((ch) => (Array.isArray(ch.groups) ? ch : { ...ch, groups: ch.group ? [ch.group] : [] }));
+        // an older server build (mid-deploy) answers without `groups`, `sources` or `keys`
+        channels = c.channels.map((ch) => ({
+          ...ch,
+          groups: Array.isArray(ch.groups) ? ch.groups : ch.group ? [ch.group] : [],
+          sources: Array.isArray(ch.sources) && ch.sources.length ? ch.sources : [{ key: ch.key, providerId: ch.providerId, name: ch.name }],
+          keys: Array.isArray(ch.keys) && ch.keys.length ? ch.keys : [ch.key],
+        }));
+        byKey = new Map();
+        for (const ch of channels) for (const k of ch.keys) byKey.set(k, ch);
         channelsRev = c.channelsRev;
         player.setItems(visible);
         render();
@@ -419,9 +445,9 @@ function filtered(): LiveTvChannel[] {
   const q = view.q.trim().toLowerCase();
   const words = q ? q.split(/\s+/) : [];
   const list = channels.filter((c) => {
-    if (hidden.has(c.key)) return false;
-    if (view.provider !== 'all' && c.providerId !== view.provider) return false;
-    if (view.favs && !favorites.has(c.key)) return false;
+    if (isHidden(c)) return false;
+    if (view.provider !== 'all' && !c.sources.some((s) => s.providerId === view.provider)) return false;
+    if (view.favs && !isFav(c)) return false;
     if (view.group !== 'all' && !c.groups.includes(view.group)) return false;
     if (words.length) {
       const hay = `${c.name} ${c.groups.join(' ')} ${c.number || ''}`.toLowerCase();
@@ -442,9 +468,9 @@ function renderChips(): void {
   const q = view.q.trim().toLowerCase();
   let total = 0;
   for (const c of channels) {
-    if (hidden.has(c.key)) continue;
-    if (view.provider !== 'all' && c.providerId !== view.provider) continue;
-    if (view.favs && !favorites.has(c.key)) continue;
+    if (isHidden(c)) continue;
+    if (view.provider !== 'all' && !c.sources.some((s) => s.providerId === view.provider)) continue;
+    if (view.favs && !isFav(c)) continue;
     if (q && !`${c.name} ${c.groups.join(' ')}`.toLowerCase().includes(q)) continue;
     total++;
     if (!c.groups.length) counts.set('', (counts.get('') || 0) + 1);
@@ -458,10 +484,10 @@ function renderChips(): void {
 }
 
 function tileHtml(c: LiveTvChannel): string {
-  const fav = favorites.has(c.key);
+  const fav = isFav(c);
   const prov = state.providers.length > 1 ? providerById(c.providerId)?.name : '';
-  const sub = [...c.groups, prov].filter(Boolean).join(' · ');
-  const dim = !!broken[c.key];
+  const sub = [...c.groups, prov, c.sources.length > 1 ? `${c.sources.length} streams` : ''].filter(Boolean).join(' · ');
+  const dim = isBroken(c);
   return `<button type="button" class="ch${player.current?.key === c.key ? ' playing' : ''}${dim ? ' dim' : ''}" data-key="${esc(c.key)}" aria-label="Play ${esc(c.name)}"${dim ? ` title="${BROKEN_TITLE}"` : ''}>
     <span class="ch-logo">${c.logo ? `<img src="${esc(c.logo)}" alt="" loading="lazy" draggable="false" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'initials',textContent:this.dataset.i}))" data-i="${esc(initials(c.name))}" />` : `<span class="initials">${esc(initials(c.name))}</span>`}
       ${c.number ? `<span class="ch-num">${c.number}</span>` : ''}${c.drm ? '<span class="ch-drm">DRM</span>' : ''}
@@ -662,8 +688,8 @@ el.grid.addEventListener('click', (e) => {
   const fav = t.closest<HTMLElement>('[data-fav]');
   if (fav) {
     e.stopPropagation();
-    const key = fav.dataset.fav!;
-    void setFavorite(key, !favorites.has(key));
+    const c = byKey.get(fav.dataset.fav!);
+    if (c) void setFavorite(c, !isFav(c));
     return;
   }
   const tile = t.closest<HTMLElement>('.ch');
@@ -764,13 +790,12 @@ function renderSettings(): void {
   const playbackNote = state.remux
     ? `Channels are recorded by the server (the last 30 minutes) and drawn on a canvas by ${esc(player.rendererName)}, no video element: pause as long as you like, drag the bar or use ← → to go back, LIVE jumps to now.`
     : 'This server has no ffmpeg, which turns live streams into what the page can decode: live channels cannot play here until it is installed.';
-  const hiddenRows = [...hidden]
-    .map((key) => ({ key, c: channels.find((x) => x.key === key) }))
-    .filter((x): x is { key: string; c: LiveTvChannel } => !!x.c)
-    .sort((a, b) => a.c.name.localeCompare(b.c.name))
+  // one row per channel, whichever of its keys the hidden list names
+  const hiddenRows = [...new Set([...hidden].map((key) => byKey.get(key)).filter((c): c is LiveTvChannel => !!c))]
+    .sort((a, b) => a.name.localeCompare(b.name))
     .map(
-      ({ key, c }) => `<div class="preset"><div class="preset-text"><div class="preset-name">${esc(c.name)}</div><div class="preset-desc">${esc([...c.groups, state.providers.length > 1 ? providerById(c.providerId)?.name || '' : ''].filter(Boolean).join(' · '))}</div></div>
-        <button type="button" class="btn small" data-unhide="${esc(key)}">Show</button></div>`,
+      (c) => `<div class="preset"><div class="preset-text"><div class="preset-name">${esc(c.name)}</div><div class="preset-desc">${esc([...c.groups, state.providers.length > 1 ? providerById(c.providerId)?.name || '' : ''].filter(Boolean).join(' · '))}</div></div>
+        <button type="button" class="btn small" data-unhide="${esc(c.key)}">Show</button></div>`,
     );
   const hiddenHtml = hiddenRows.length
     ? `<p class="sh-section">Hidden channels <small class="muted">${n(hiddenRows.length)}</small></p>
@@ -799,7 +824,11 @@ el.settingsBody.addEventListener('click', async (e) => {
   const add = t.closest<HTMLElement>('[data-add]');
   if (add) return openForm(add.dataset.add as 'm3u' | 'xtream');
   const unhide = t.closest<HTMLElement>('[data-unhide]');
-  if (unhide) return void setHidden(unhide.dataset.unhide!, false);
+  if (unhide) {
+    const c = byKey.get(unhide.dataset.unhide!);
+    if (c) void setHidden(c, false);
+    return;
+  }
   if (t.closest('[data-unhide-all]')) {
     hidden.clear();
     savePrefs();
