@@ -23,6 +23,14 @@ import { LiveTvPlayer } from './player';
 (window as unknown as { streamAnywhereStarted: boolean }).streamAnywhereStarted = true;
 rememberApp('livetv');
 
+// Shown from the service worker's cache while the network was slow, and a newer page has arrived
+// since (a deploy): reloaded, unless a channel is being watched (then the next open gets it).
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', (e: MessageEvent) => {
+    if ((e.data as { type?: string } | null)?.type === 'page-updated' && !player.isOpen) location.reload();
+  });
+}
+
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const e = document.getElementById(id);
   if (!e) throw new Error(`missing #${id}`);

@@ -33,8 +33,9 @@ export function describeServer(h: HealthResponse | undefined): string | undefine
   if (!s) return undefined;
   const busy = s.busy.length ? `busy: ${s.busy.join(', ')}` : '';
   if (s.pressure) {
-    const mem = s.swapMb > 0 ? `${s.memoryMb} MB of memory free, ${s.swapMb} MB in swap` : `${s.memoryMb} MB of memory free`;
-    return `The server is short of memory (${mem})${busy ? `, ${busy}` : ''}: everything takes longer.`;
+    // the server's own reason ("timers running 3.2 s late", "84 MB of memory left, 1207 MB in swap")
+    const why = s.reason || (s.swapMb > 0 ? `${s.memoryMb} MB of memory free, ${s.swapMb} MB in swap` : `${s.memoryMb} MB of memory free`);
+    return `The server is under pressure (${why})${busy ? `, ${busy}` : ''}: everything takes longer.`;
   }
   if (busy) return `The server is ${busy}.`;
   return undefined;
