@@ -2,18 +2,32 @@
  * Where ffmpeg is: FFMPEG_PATH, else `ffmpeg` on the PATH (apt / apk / choco installs), else the
  * binary of the ffmpeg-static package (a dependency of the server; its install step downloads the
  * build for this platform). yt-dlp needs it to merge YouTube's separate video and audio files.
+ *
+ * The distro build comes first and stays first: the static build crashed (SIGSEGV) recording live
+ * HLS channels on the VM (2026-10-28 and again 2026-11-04). On 2026-11-04 the server had picked it
+ * because `ffmpeg -version` had not answered within 10 s right after a deploy (the disk was
+ * saturated), and the verdict was cached for the life of the process. So: a binary that exists is
+ * never demoted for being slow to answer (the machine is starved, the binary is fine), only for
+ * failing to run; a verdict that fell back to the static build or found nothing is asked again a
+ * minute later.
  */
 import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 export interface FfmpegInfo {
   available: boolean;
   path?: string;
   version?: string;
   error?: string;
+  /** The version check did not answer in time: the version is unknown, the binary kept */
+  slow?: boolean;
 }
 
-function version(cmd: string): Promise<string | undefined> {
+const VERSION_TIMEOUT_MS = 30_000;
+
+/** The version string, 'timeout' when the binary did not answer in time, undefined when it does not run */
+function version(cmd: string, timeoutMs = VERSION_TIMEOUT_MS): Promise<string | 'timeout' | undefined> {
   return new Promise((resolve) => {
     let child;
     try {
@@ -23,7 +37,11 @@ function version(cmd: string): Promise<string | undefined> {
       return;
     }
     let out = '';
-    const timer = setTimeout(() => child!.kill(), 10_000);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child!.kill();
+    }, timeoutMs);
     child.stdout.on('data', (d) => (out += d));
     child.on('error', () => {
       clearTimeout(timer);
@@ -32,40 +50,105 @@ function version(cmd: string): Promise<string | undefined> {
     child.on('close', (code) => {
       clearTimeout(timer);
       const m = /ffmpeg version (\S+)/.exec(out);
-      resolve(code === 0 && m ? m[1] : undefined);
+      if (code === 0 && m) resolve(m[1]);
+      else resolve(timedOut ? 'timeout' : undefined);
     });
   });
 }
 
-function candidates(): string[] {
-  const list: string[] = [];
-  if (process.env.FFMPEG_PATH) list.push(process.env.FFMPEG_PATH);
-  list.push('ffmpeg');
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const p = require('ffmpeg-static') as string | null;
-    if (p && fs.existsSync(p)) list.push(p);
-  } catch {
-    /* package not installed */
+/** Where `ffmpeg` on the PATH is, if any directory of the PATH holds an executable one */
+export function ffmpegOnPath(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const names = process.platform === 'win32' ? ['ffmpeg.exe', 'ffmpeg.cmd', 'ffmpeg.bat', 'ffmpeg'] : ['ffmpeg'];
+  for (const dir of (env.PATH || env.Path || '').split(path.delimiter)) {
+    if (!dir) continue;
+    for (const n of names) {
+      const p = path.join(dir, n);
+      try {
+        fs.accessSync(p, fs.constants.X_OK);
+        if (fs.statSync(p).isFile()) return p;
+      } catch {
+        /* not here */
+      }
+    }
   }
+  return undefined;
+}
+
+export interface FfmpegCandidate {
+  cmd: string;
+  /** A file known to be there (a bare `ffmpeg` without a PATH hit is not) */
+  exists: boolean;
+  /** The ffmpeg-static package's binary: the last resort */
+  bundled?: boolean;
+}
+
+/** The candidates in order of preference */
+export function ffmpegCandidates(env: NodeJS.ProcessEnv = process.env, bundled: string | null = bundledFfmpeg()): FfmpegCandidate[] {
+  const list: FfmpegCandidate[] = [];
+  if (env.FFMPEG_PATH) list.push({ cmd: env.FFMPEG_PATH, exists: fs.existsSync(env.FFMPEG_PATH) });
+  const onPath = ffmpegOnPath(env);
+  if (onPath) list.push({ cmd: onPath, exists: true });
+  else list.push({ cmd: 'ffmpeg', exists: false });
+  if (bundled && fs.existsSync(bundled)) list.push({ cmd: bundled, exists: true, bundled: true });
   return list;
 }
 
+function bundledFfmpeg(): string | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    return require('ffmpeg-static') as string | null;
+  } catch {
+    return null; /* package not installed */
+  }
+}
+
+/**
+ * The verdict over a list of candidates and their version answers (exported for the checks):
+ * the first that answers wins; one that exists but is slow to answer wins too unless it is the
+ * bundled build (which only ever stands in when nothing else is there).
+ */
+export async function pickFfmpeg(list: FfmpegCandidate[], ask: (cmd: string) => Promise<string | 'timeout' | undefined>, timeoutSec = VERSION_TIMEOUT_MS / 1000): Promise<FfmpegInfo> {
+  const errors: string[] = [];
+  for (const c of list) {
+    const v = await ask(c.cmd);
+    if (v === 'timeout') {
+      if (c.exists && !c.bundled) return { available: true, path: c.cmd, slow: true };
+      errors.push(`${c.cmd}: no answer in ${timeoutSec} s`);
+    } else if (v) return { available: true, path: c.cmd, version: v };
+    else errors.push(`${c.cmd}: not runnable`);
+  }
+  return { available: false, error: errors.join('; ') || 'no ffmpeg' };
+}
+
+/** How long a verdict that fell back to the bundled binary (or found none) is kept before asking again */
+const RETRY_MS = 60_000;
+
 let cached: Promise<FfmpegInfo> | undefined;
+let cachedAt = 0;
+
+/** A verdict is final when it names a runnable, non-bundled binary with a version; any other gets a second look */
+const settled = (i: FfmpegInfo): boolean => i.available && !i.slow && !/ffmpeg-static/.test(i.path || '');
 
 export function detectFfmpeg(): Promise<FfmpegInfo> {
-  if (!cached) {
-    cached = (async () => {
-      const errors: string[] = [];
-      for (const c of candidates()) {
-        const v = await version(c);
-        if (v) return { available: true, path: c, version: v };
-        errors.push(`${c}: not runnable`);
-      }
-      return { available: false, error: errors.join('; ') || 'no ffmpeg' };
+  if (!cached || Date.now() - cachedAt > RETRY_MS) {
+    const prev = cached;
+    cachedAt = Date.now();
+    const next = (async () => {
+      const info = await pickFfmpeg(ffmpegCandidates(), (cmd) => version(cmd));
+      if (settled(info)) cachedAt = Number.POSITIVE_INFINITY;
+      return info;
     })();
+    if (!prev) cached = next;
+    // a second look runs behind the kept verdict and replaces it once it is in
+    else void next.then((info) => void (cached = Promise.resolve(info)), () => undefined);
   }
-  return cached;
+  return cached!;
+}
+
+/** For the checks: forget the verdict */
+export function resetFfmpegDetection(): void {
+  cached = undefined;
+  cachedAt = 0;
 }
 
 // ---------------------------------------------------------------- what is in a file, and making an MP4 of it

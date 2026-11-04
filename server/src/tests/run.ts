@@ -29,7 +29,7 @@ import { lastFeedDir, rememberBatch, resetLastBatches, staleBatch } from '../las
 import { invalidateJobs, jobsDir, resetJobs, sharedJob } from '../jobs';
 import { buildOptions, downloadSourceOf, saveName } from '../downloader';
 import { canonicalize, cleanHint, fileExtOf, normalizeUrl } from '../library';
-import { parseFfmpegInfo, planConversion } from '../ffmpeg';
+import { ffmpegCandidates, parseFfmpegInfo, pickFfmpeg, planConversion } from '../ffmpeg';
 import type { FeedItem } from '../../../shared/types';
 import type { FeedResponse } from '../../../shared/types';
 import { openUpstream } from '../http';
@@ -634,6 +634,31 @@ async function downloaderChecks(): Promise<void> {
   check('a youtube channel link is not a video', /not a YouTube video/.test(notVideo), notVideo);
   const entry = (url: string, mediaType?: string) => ({ url, mediaType } as Parameters<typeof fileExtOf>[0]);
   check('plain file container: from the content type, else the extension, else mp4', fileExtOf(entry('https://x/a.mkv')) === 'mkv' && fileExtOf(entry('https://x/clip', 'video/x-matroska')) === 'mkv' && fileExtOf(entry('https://x/a.webm?x=1')) === 'webm' && fileExtOf(entry('https://x/a.mp4')) === 'mp4' && fileExtOf(entry('https://x/stream')) === 'mp4');
+
+  console.log('\n== 2d0. Which ffmpeg: a slow distro build is kept, the bundled static build is the last resort');
+  {
+    const distro = { cmd: '/usr/bin/ffmpeg', exists: true };
+    const bundled = { cmd: '/app/node_modules/ffmpeg-static/ffmpeg', exists: true, bundled: true };
+    const bare = { cmd: 'ffmpeg', exists: false };
+    const answers = (m: Record<string, string | 'timeout' | undefined>) => async (cmd: string) => m[cmd];
+    let r = await pickFfmpeg([distro, bundled], answers({ '/usr/bin/ffmpeg': '5.1.9', '/app/node_modules/ffmpeg-static/ffmpeg': '6.0-static' }));
+    check('the distro build answers: it is the one', r.path === distro.cmd && r.version === '5.1.9' && !r.slow, JSON.stringify(r));
+    // 2026-11-04: `ffmpeg -version` took over 10 s right after a deploy and the static build (which
+    // crashes on live HLS) was picked for the life of the process
+    r = await pickFfmpeg([distro, bundled], answers({ '/usr/bin/ffmpeg': 'timeout', '/app/node_modules/ffmpeg-static/ffmpeg': '6.0-static' }));
+    check('the distro build is slow to answer: still the one (slow, no version)', r.path === distro.cmd && r.slow === true && r.version === undefined, JSON.stringify(r));
+    r = await pickFfmpeg([bare, bundled], answers({ ffmpeg: 'timeout', '/app/node_modules/ffmpeg-static/ffmpeg': '6.0-static' }));
+    check('a bare `ffmpeg` with no PATH hit is not kept for being slow: the bundled build', r.path === bundled.cmd && r.version === '6.0-static', JSON.stringify(r));
+    r = await pickFfmpeg([distro, bundled], answers({ '/usr/bin/ffmpeg': undefined, '/app/node_modules/ffmpeg-static/ffmpeg': '6.0-static' }));
+    check('the distro build does not run: the bundled build', r.path === bundled.cmd, JSON.stringify(r));
+    r = await pickFfmpeg([distro, bundled], answers({ '/usr/bin/ffmpeg': undefined, '/app/node_modules/ffmpeg-static/ffmpeg': 'timeout' }), 30);
+    check('a bundled build that is slow to answer is not kept either', !r.available && /no answer in 30 s/.test(r.error || ''), JSON.stringify(r));
+    r = await pickFfmpeg([bare], answers({ ffmpeg: undefined }));
+    check('nothing runs: unavailable, with the reason', !r.available && /ffmpeg: not runnable/.test(r.error || ''), JSON.stringify(r));
+    const env = { PATH: ['/nowhere', path.join(os.tmpdir(), 'no-such-dir-' + process.pid)].join(path.delimiter), FFMPEG_PATH: '/opt/ff/ffmpeg' } as NodeJS.ProcessEnv;
+    const list = ffmpegCandidates(env, null);
+    check('FFMPEG_PATH first, then a bare `ffmpeg` (no PATH hit), no bundled build when there is none', list.length === 2 && list[0].cmd === '/opt/ff/ffmpeg' && list[0].exists === false && list[1].cmd === 'ffmpeg' && list[1].exists === false, JSON.stringify(list));
+  }
 
   console.log('\n== 2d. Download to library: what ffmpeg says about a file, and what to do with it');
   const mkv = parseFfmpegInfo(`Input #0, matroska,webm, from 'x.mkv':

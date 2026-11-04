@@ -126,7 +126,13 @@ if ! ffmpeg_runs ffmpeg; then
   echo "installing Debian's ffmpeg (the server prefers it to the bundled static binary)"
   apt-get install -y -qq ffmpeg >/dev/null || echo "WARN: ffmpeg install failed (Live TV channels cannot play; the Video Downloader cannot merge video and audio)"
 fi
-if ffmpeg_runs ffmpeg; then echo "ffmpeg: $(ffmpeg -version 2>/dev/null | head -1) (PATH)"
+FFMPEG_BIN=""
+if ffmpeg_runs ffmpeg; then
+  FFMPEG_BIN=$(command -v ffmpeg)
+  echo "ffmpeg: $(ffmpeg -version 2>/dev/null | head -1) ($FFMPEG_BIN, pinned as FFMPEG_PATH)"
+  # The bundled static build is never the one to run here (SIGSEGV on live HLS, 2026-11-04: picked
+  # because the PATH check timed out under load): with the distro build there, it goes.
+  rm -f "$APP_DIR/node_modules/ffmpeg-static/ffmpeg"
 elif ffmpeg_runs "$APP_DIR/node_modules/ffmpeg-static/ffmpeg"; then echo "ffmpeg: $("$APP_DIR/node_modules/ffmpeg-static/ffmpeg" -version 2>/dev/null | head -1) (bundled)"
 else echo "ffmpeg: MISSING"; fi
 npm run build 2>&1 | tail -5
@@ -160,6 +166,7 @@ BROWSER_PATH=/usr/bin/chromium
 TIKTOK_PROFILE_DIR=/var/lib/streamanywhere/tiktok-profile
 YTDLP_PATH=$YTDLP_BIN
 YTDLP_PYTHON=$YTDLP_PY
+${FFMPEG_BIN:+FFMPEG_PATH=$FFMPEG_BIN}
 LOG_LEVEL=info
 EOF
 chmod 640 /etc/streamanywhere.env; chown root:"$APP_USER" /etc/streamanywhere.env
