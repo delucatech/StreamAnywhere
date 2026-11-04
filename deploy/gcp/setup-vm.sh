@@ -64,12 +64,17 @@ fi
 for c in git node chromium caddy; do command -v "$c" >/dev/null || { echo "$c is missing and apt could not install it"; exit 1; }; done
 echo "node $(node -v), $(chromium --version 2>/dev/null | head -1), caddy $(caddy version | cut -d' ' -f1)"
 
-echo "== 2a. no Ops Agent"
+echo "== 2a. Ops Agent off"
 # Google's monitoring agent (otelopscol + fluent-bit) used ~80 MB of the 1 GB and a share of the
-# CPU; the owner chose to drop it on 2026-10-12. Removed here too in case a policy reinstalls it.
+# CPU; the owner chose to drop it on 2026-10-12. The project's OS policy "goog-ops-agent-policy"
+# (VM Manager) reinstalls the package whenever it is missing: seen 2026-11-04, the removal here
+# was followed 6 minutes later by an `apt-get install google-cloud-ops-agent` that saturated the
+# small disk for 10 minutes. So the package is left installed (the policy is then satisfied) and
+# only its services are disabled; a reinstall keeps them disabled (deb-systemd-helper respects an
+# admin's disable). To be rid of it for good, delete that policy in the console (VM Manager > OS
+# policies) or set the instance metadata enable-osconfig=FALSE.
 if dpkg -s google-cloud-ops-agent >/dev/null 2>&1; then
-  systemctl disable --now google-cloud-ops-agent google-cloud-ops-agent-fluent-bit google-cloud-ops-agent-opentelemetry-collector >/dev/null 2>&1 || true
-  apt-get remove -y -qq google-cloud-ops-agent >/dev/null 2>&1 && echo "ops agent removed" || echo "WARN: ops agent removal failed"
+  systemctl disable --now google-cloud-ops-agent google-cloud-ops-agent-fluent-bit google-cloud-ops-agent-opentelemetry-collector >/dev/null 2>&1 && echo "ops agent services disabled (package kept so the OS policy does not reinstall it)" || echo "WARN: ops agent could not be disabled"
 fi
 
 echo "== 2b. yt-dlp (YouTube search / formats)"
