@@ -41,7 +41,7 @@ import { isParkedError } from '../reservoir';
 import { XmltvScanner, nowNext, parseXmltvTime, resolveGuideId } from '../livetvEpg';
 import { decryptJson, decryptText, encryptJson, encryptText, useEphemeralLiveTvKey } from '../livetvCrypto';
 import { redactUrl } from '../livetvHttp';
-import { initTimescales, mintToken, pickVariant, playlistSegments, readToken, remuxArgs, rewritePlaylist, segmentStartSec } from '../livetvStream';
+import { initTimescales, initVideoCodec, mintToken, pickVariant, playlistSegments, readToken, remuxArgs, rewritePlaylist, segmentStartSec } from '../livetvStream';
 import { normalizeXtreamServer, xtreamLiveUrl } from '../livetvXtream';
 import { LIVETV_PRESETS } from '../livetvPresets';
 import { pushTry, rateStream, ratingRank } from '../../../shared/livetvHealth';
@@ -95,6 +95,31 @@ not-a-url
     await parseM3uAsync(m3u.repeat(400), 100);
     clearInterval(t);
     check('parseM3uAsync lets the event loop run between chunks', ticks > 5, { ticks });
+  }
+  {
+    // the codec of a recording from its init segment, and the variant pick by the browser's codecs
+    const sizeBox = (type: string, payload: Buffer): Buffer => {
+      const b = Buffer.alloc(8);
+      b.writeUInt32BE(8 + payload.length, 0);
+      b.write(type, 4, 'latin1');
+      return Buffer.concat([b, payload]);
+    };
+    const entry = sizeBox('hev1', Buffer.alloc(78));
+    const stsd = sizeBox('stsd', Buffer.concat([Buffer.from([0, 0, 0, 0, 0, 0, 0, 1]), entry]));
+    const init = sizeBox('moov', sizeBox('trak', sizeBox('mdia', sizeBox('minf', sizeBox('stbl', stsd)))));
+    check('init segment codec: hev1 -> hevc, avc1 -> h264, none -> undefined', initVideoCodec(init) === 'hevc' && initVideoCodec(sizeBox('moov', sizeBox('trak', sizeBox('mdia', sizeBox('minf', sizeBox('stbl', sizeBox('stsd', Buffer.concat([Buffer.from([0, 0, 0, 0, 0, 0, 0, 1]), sizeBox('avc1', Buffer.alloc(78))])))))))) === 'h264' && initVideoCodec(sizeBox('moov', Buffer.alloc(0))) === undefined);
+    const master = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720,CODECS="hvc1.2.4.L120.90,mp4a.40.2"
+hevc720.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720,CODECS="avc1.64001f,mp4a.40.2"
+avc720.m3u8
+`;
+    const forH264 = pickVariant(master, 'https://x.example/m.m3u8', undefined, ['h264']);
+    const forBoth = pickVariant(master, 'https://x.example/m.m3u8', undefined, ['h264', 'hevc']);
+    const noWord = pickVariant(master, 'https://x.example/m.m3u8');
+    check('variant pick: H.264 for a browser without HEVC, the heavier HEVC one when it decodes both, H.264 by default', forH264?.codec === 'h264' && forH264.url.endsWith('avc720.m3u8') && forBoth?.codec === 'hevc' && noWord?.codec === 'h264', { forH264, forBoth, noWord });
+    const onlyHevc = pickVariant(master.split('\n').slice(0, 3).join('\n') + '\n', 'https://x.example/m.m3u8', undefined, ['h264']);
+    check('variant pick: only HEVC variants -> picked anyway, its codec named (the tune answers "unsupported")', onlyHevc?.codec === 'hevc', onlyHevc);
   }
   {
     const p = serverPressure();

@@ -20,9 +20,10 @@
  * theater itself), and the controls hiding while playing.
  */
 import type { PlayerStats } from '../renderers/types';
-import type { LiveTvChannel, LiveTvChannelGuideResponse, LiveTvProgramme, LiveTvRating, LiveTvSource, LiveTvTuneResponse, LiveTvTuneStatus, LiveTvWindow } from '../../../shared/types';
+import type { LiveTvChannel, LiveTvChannelGuideResponse, LiveTvCodec, LiveTvProgramme, LiveTvRating, LiveTvSource, LiveTvTuneResponse, LiveTvTuneStatus, LiveTvWindow } from '../../../shared/types';
 import { api, ApiError, apiUrl } from '../api';
 import { FeedPlayer } from '../feed/player';
+import { codecLabel, codecOfString, decodes, knownDecoders } from './codecs';
 
 export type PlayerState = 'idle' | 'tuning' | 'loading' | 'playing' | 'paused' | 'reconnecting' | 'unavailable' | 'unsupported';
 
@@ -46,10 +47,12 @@ export interface PlayerHooks {
   /** The order a channel's streams are tried in (lower first): their history (shared/livetvHealth.ts) */
   streamRank(key: string): number;
   streamRating(key: string): LiveTvRating;
-  /** The first picture of this stream came, `ms` after the tap (its history on the server) */
-  onPlayed(ch: LiveTvChannel, key: string, ms: number): void;
-  /** This stream failed after it had opened (stopped sending video, would not decode) */
-  onStreamFailed(ch: LiveTvChannel, key: string): void;
+  /** The first picture of this stream came, `ms` after the tap (its history on the server); `codec` when known */
+  onPlayed(ch: LiveTvChannel, key: string, ms: number, codec?: LiveTvCodec): void;
+  /** This stream failed after it had opened (stopped sending video, would not decode); `codec` when the failure named it */
+  onStreamFailed(ch: LiveTvChannel, key: string, codec?: LiveTvCodec): void;
+  /** The stream's video codec as known from earlier plays (the server keeps it for every device) */
+  streamCodec(key: string): LiveTvCodec | undefined;
   /** The viewer hid this channel (the hide button, the H key, or from the error message) */
   onHide(ch: LiveTvChannel): void;
   /** The server answered a tune of one of the channel's streams: did it open (the page ranks channels that did not) */
@@ -248,7 +251,7 @@ export class LiveTvPlayer {
         const src = this.sources[this.sourceIdx];
         if (ch && src && this.streamUrl && !this.reported) {
           this.reported = true;
-          this.hooks.onPlayed(ch, src.key, Date.now() - this.openedAt);
+          this.hooks.onPlayed(ch, src.key, Date.now() - this.openedAt, this.codec);
         }
       },
       onEnded: () => this.onStreamEnded(),
@@ -417,9 +420,10 @@ export class LiveTvPlayer {
     if (!sameChannel) this.decodeRetries = 0;
     if (!sameChannel || sourceIdx === 0) {
       const all = ch.sources.length ? ch.sources : [{ key: ch.key, providerId: ch.providerId, name: ch.name }];
-      // the streams most likely to play first (their history), DRM ones last, the list's order between equals
+      // the streams most likely to play first (their history), the ones in a codec this browser
+      // lacks after those, DRM ones last, the list's order between equals
       this.sources = all
-        .map((s, i) => ({ s, i, rank: (s.drm ? 100 : 0) + this.hooks.streamRank(s.key) }))
+        .map((s, i) => ({ s, i, rank: (s.drm ? 100 : 0) + (decodes(this.hooks.streamCodec(s.key)) ? 0 : 50) + this.hooks.streamRank(s.key) }))
         .sort((a, b) => a.rank - b.rank || a.i - b.i)
         .map((x) => x.s);
     }
@@ -442,20 +446,29 @@ export class LiveTvPlayer {
     if (this.root.classList.contains('guide-open')) void this.loadGuide(ch);
     void this.loadNowNext(ch);
     if (src.drm) return this.showMessage('unsupported', 'This channel is DRM-protected (the playlist names license keys); it cannot play here.', 'DRM');
+    const knownCodec = this.hooks.streamCodec(src.key);
+    if (!decodes(knownCodec)) return this.failSource(this.codecText(knownCodec!), 'codec');
+    this.codec = knownCodec;
     let t: LiveTvTuneResponse;
     try {
-      t = await api.liveTvTune(src.key, this.viewer, this.hooks.maxHeight());
+      const dec = knownDecoders();
+      t = await api.liveTvTune(src.key, this.viewer, this.hooks.maxHeight(), dec ? [...dec] : undefined);
     } catch (e) {
       if (gen !== this.generation) return;
       const m = e instanceof ApiError ? e.message : (e as Error).message;
       return this.failSource(`The server could not open this channel: ${m}`);
     }
     if (gen !== this.generation) return;
+    if (t.codec) this.codec = t.codec;
     this.hooks.onTuned(ch, src.key, t.state === 'ok' && !!t.playUrl);
     if (t.state !== 'ok' || !t.playUrl) {
+      // a codec this browser lacks: the channel's next stream may be in another; the message only when none is
+      if (t.state === 'unsupported' && t.detail === 'codec' && t.codec) return this.failSource(this.codecText(t.codec), 'codec');
       if (t.state === 'unsupported') return this.showMessage('unsupported', t.message || 'This stream cannot play here.', t.detail);
       return this.failSource(t.message || 'This channel is not available right now.', t.detail);
     }
+    if (!decodes(t.codec)) return this.failSource(this.codecText(t.codec!), 'codec');
+    this.subEl.textContent = this.subtitle(ch, src);
     this.windowSec = t.dvr ? t.windowSec || 0 : 0;
     this.recordedKey = t.kind === 'remux' ? src.key : undefined;
     this.setState('loading');
@@ -511,13 +524,22 @@ export class LiveTvPlayer {
     window.clearTimeout(this.toastTimer);
   }
 
-  /** "News · IPTV-org – United States · stream 2 of 3 (1080p)" */
+  /** "News · IPTV-org – United States · stream 2 of 3 (1080p) · H.264" */
   private subtitle(ch: LiveTvChannel, src: LiveTvSource): string {
     const prov = this.hooks.providerName({ ...ch, providerId: src.providerId });
     const rating = this.hooks.streamRating(src.key);
     const which = this.sources.length > 1 ? `stream ${this.sourceIdx + 1} of ${this.sources.length}${src.quality ? ` (${src.quality})` : ''}` : src.quality || '';
     const note = rating === 'weak' ? 'has been shaky' : rating === 'bad' ? 'did not play last time' : '';
-    return [...ch.groups, prov, which, note].filter(Boolean).join(' · ');
+    const codec = this.codec || this.hooks.streamCodec(src.key);
+    return [...ch.groups, prov, which, note, codec ? codecLabel(codec) : ''].filter(Boolean).join(' · ');
+  }
+
+  /** The video codec of the stream being played, as the server or the decoder named it */
+  private codec: LiveTvCodec | undefined;
+
+  /** "This stream is H.265 (HEVC), which this browser cannot decode." */
+  private codecText(codec: LiveTvCodec): string {
+    return `This stream is ${codecLabel(codec)}, which this browser cannot decode. Most channels are H.264.`;
   }
 
   /**
@@ -527,9 +549,9 @@ export class LiveTvPlayer {
   private failSource(text: string, detail?: string, afterOpen = false): void {
     const ch = this.current;
     const src = this.sources[this.sourceIdx];
-    if (afterOpen && ch && src) this.hooks.onStreamFailed(ch, src.key);
+    if (afterOpen && ch && src) this.hooks.onStreamFailed(ch, src.key, detail === 'codec' ? this.codec : undefined);
     const next = this.sourceIdx + 1;
-    if (next >= this.sources.length || this.sources[next].drm) return this.showMessage('unavailable', text, detail);
+    if (next >= this.sources.length || this.sources[next].drm) return this.showMessage(detail === 'codec' ? 'unsupported' : 'unavailable', text, detail);
     this.tuneWaitNote = `Stream ${this.sourceIdx + 1} did not play (${text.replace(/\.$/, '')}).`;
     void this.play(this.index, next); // its first step clears the stage, the toast with it: said after
     this.notice(`${this.tuneWaitNote} Trying stream ${next + 1} of ${this.sources.length}…`);
@@ -623,7 +645,14 @@ export class LiveTvPlayer {
     const m = err.message || 'playback failed';
     // a live recording that broke off at the network (not a stream the browser cannot play): reconnect, do not move on
     if (this.streamUrl && isConnectionError(m) && !/decode|codec|mp4box/i.test(m)) return this.lostConnection(m.replace(/^fetch\(\) failed \(likely CORS or network\): /, ''));
-    if (/hev1|hvc1/i.test(m)) return this.showMessage('unsupported', 'This channel is H.265 (HEVC), which this browser cannot decode; most channels are H.264.', m);
+    // the decoder refused the codec outright (an H.265 stream on a browser without HEVC): the
+    // stream's codec is remembered for every device, and the channel's next stream is tried
+    const refused = /does not support/i.test(m) ? codecOfString(m) : undefined;
+    if (refused || /hev1|hvc1/i.test(m)) {
+      const codec = refused || 'hevc';
+      this.codec = codec;
+      return this.failSource(this.codecText(codec), 'codec', true);
+    }
     if (/VideoDecoder|AudioDecoder|codec|No video track|WebCodecs|decode\(\)|mp4box/i.test(m)) {
       // A decoder that choked mid-stream (a broken segment, a key frame it refused): the same
       // stream once more from live, before the viewer is told anything.

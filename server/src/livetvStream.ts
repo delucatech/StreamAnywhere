@@ -26,7 +26,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { IncomingMessage } from 'node:http';
 import { Readable } from 'node:stream';
-import type { LiveTvStreamKind } from '../../shared/types';
+import type { LiveTvCodec, LiveTvStreamKind } from '../../shared/types';
 import { detectFfmpeg } from './ffmpeg';
 import { decryptText, encryptText } from './livetvCrypto';
 import { LIVETV_USER_AGENT, openLive, redactUrl, safeHost } from './livetvHttp';
@@ -184,6 +184,8 @@ export interface HlsInput {
   program?: number;
   bandwidth?: number;
   resolution?: string;
+  /** The variant's video codec when its CODECS attribute names one */
+  codec?: LiveTvCodec;
 }
 
 const VARIANT_MAX_HEIGHT = 1080;
@@ -196,7 +198,7 @@ const VARIANT_MAX_BPS = 12_000_000;
  * When the variant's audio is a separate rendition (#EXT-X-MEDIA with a URI), ffmpeg needs the
  * master and the program index to pick the pair; else the media playlist itself.
  */
-export function pickVariant(master: string, baseUrl: string, maxHeight?: number): HlsInput | undefined {
+export function pickVariant(master: string, baseUrl: string, maxHeight?: number, decodes?: LiveTvCodec[]): HlsInput | undefined {
   const lines = master.split(/\r?\n/).map((l) => l.trim());
   const audioGroupsWithUri = new Set<string>();
   for (const l of lines) {
@@ -204,7 +206,7 @@ export function pickVariant(master: string, baseUrl: string, maxHeight?: number)
     const a = attrsOf(l.slice(13));
     if ((a.TYPE || '').toUpperCase() === 'AUDIO' && a.URI && a['GROUP-ID']) audioGroupsWithUri.add(a['GROUP-ID']);
   }
-  type V = { index: number; uri: string; bandwidth: number; height: number; avc: boolean; video: boolean; audioGroup?: string };
+  type V = { index: number; uri: string; bandwidth: number; height: number; avc: boolean; video: boolean; audioGroup?: string; codec?: LiveTvCodec };
   const variants: V[] = [];
   for (let i = 0; i < lines.length; i++) {
     if (!lines[i].startsWith('#EXT-X-STREAM-INF:')) continue;
@@ -218,15 +220,18 @@ export function pickVariant(master: string, baseUrl: string, maxHeight?: number)
     if (!uri) continue;
     const codecs = (a.CODECS || '').toLowerCase();
     const res = /^(\d+)x(\d+)$/.exec(a.RESOLUTION || '');
+    const codec = codecOfCodecs(codecs);
     variants.push({
       index: variants.length,
       uri,
       bandwidth: Number(a.BANDWIDTH || a['AVERAGE-BANDWIDTH']) || 0,
       height: res ? Number(res[2]) : 0,
-      avc: !codecs || /avc1|avc3/.test(codecs),
+      // what the browser decodes when it said (H.264 by default: not every browser decodes HEVC); unnamed = assumed fine
+      avc: !codec || (decodes ? decodes.includes(codec) : codec === 'h264'),
       // codecs naming only audio (mp4a / ac-3 / ec-3) = an audio-only variant
       video: !codecs || /avc1|avc3|hvc1|hev1|av01|vp09|dvh1|dvhe/.test(codecs) || !!res,
       audioGroup: a.AUDIO,
+      codec,
     });
   }
   if (!variants.length) return undefined;
@@ -251,6 +256,7 @@ export function pickVariant(master: string, baseUrl: string, maxHeight?: number)
   const out: HlsInput = separateAudio ? { url: baseUrl, program: pick.index } : { url: abs(pick.uri) };
   if (pick.bandwidth) out.bandwidth = pick.bandwidth;
   if (pick.height) out.resolution = `${pick.height}p`;
+  if (pick.codec) out.codec = pick.codec;
   return out;
 }
 
@@ -292,6 +298,8 @@ interface RemuxSession {
   /** viewers that said they left: their late requests (a window poll in flight) do not bring them back; a new tune does */
   gone: Set<string>;
   leaveTimer?: NodeJS.Timeout;
+  /** The video codec of the recording (its init segment), once it exists */
+  codec?: LiveTvCodec;
   /** track id -> timescale of the init segment, once it exists */
   timescales?: Map<number, number>;
   /** segment file name -> its start (seconds of the recording), for the window and seeks */
@@ -394,6 +402,54 @@ function* boxes(buf: Buffer, start = 0, end = buf.length): Generator<{ type: str
     if (size < hdr) break;
     yield { type, start: p, size, payload: p + hdr };
     p += size;
+  }
+}
+
+/** A sample-entry fourcc of an MP4 (stsd) or an HLS CODECS value -> the codec it names */
+export function codecOfTag(tag: string): LiveTvCodec | undefined {
+  const t = tag.toLowerCase();
+  if (/^(avc1|avc3)/.test(t)) return 'h264';
+  if (/^(hvc1|hev1|dvh1|dvhe)/.test(t)) return 'hevc';
+  if (/^av01/.test(t)) return 'av1';
+  if (/^vp09/.test(t)) return 'vp9';
+  if (/^mp2v/.test(t)) return 'mpeg2';
+  if (/^mp4v/.test(t)) return 'mpeg4';
+  return undefined;
+}
+
+/** The video codec named in an HLS CODECS attribute ("avc1.64001f,mp4a.40.2"), if any video codec is */
+export function codecOfCodecs(codecs: string | undefined): LiveTvCodec | undefined {
+  for (const part of String(codecs || '').split(',')) {
+    const c = codecOfTag(part.trim());
+    if (c) return c;
+  }
+  return undefined;
+}
+
+/**
+ * The video codec of a recording from its init segment: the first video sample entry of the
+ * moov's stsd boxes (avc1 / hvc1 / hev1 / av01 / vp09 / mp4v / mp2v).
+ */
+export function initVideoCodec(init: Buffer): LiveTvCodec | undefined {
+  const walk = (start: number, end: number): LiveTvCodec | undefined => {
+    for (const b of boxes(init, start, end)) {
+      if (b.type === 'stsd') {
+        // version/flags (4) + entry count (4), then the entries (boxes)
+        for (const e of boxes(init, b.payload + 8, b.start + b.size)) {
+          const c = codecOfTag(e.type);
+          if (c) return c;
+        }
+      } else if (['moov', 'trak', 'mdia', 'minf', 'stbl'].includes(b.type)) {
+        const c = walk(b.payload, b.start + b.size);
+        if (c) return c;
+      }
+    }
+    return undefined;
+  };
+  try {
+    return walk(0, init.length);
+  } catch {
+    return undefined;
   }
 }
 
@@ -677,7 +733,7 @@ function stopRemux(s: RemuxSession, why: string): void {
 }
 
 /** How far the recorder of a channel got (for the tune status the player polls); undefined when none runs */
-export function remuxProgress(key: string): { sinceMs: number; segments: number; note?: string } | undefined {
+export function remuxProgress(key: string): { sinceMs: number; segments: number; note?: string; codec?: LiveTvCodec } | undefined {
   const s = sessions.get(key);
   if (!s) return undefined;
   let segments = 0;
@@ -686,7 +742,18 @@ export function remuxProgress(key: string): { sinceMs: number; segments: number;
   } catch {
     /* no playlist yet */
   }
-  return { sinceMs: Date.now() - s.startedAt, segments, note: s.stderr[s.stderr.length - 1] };
+  return { sinceMs: Date.now() - s.startedAt, segments, note: s.stderr[s.stderr.length - 1], codec: recordingCodec(s) };
+}
+
+/** The recording's video codec from its init segment (read once it exists; kept on the session) */
+function recordingCodec(s: RemuxSession): LiveTvCodec | undefined {
+  if (s.codec) return s.codec;
+  try {
+    s.codec = initVideoCodec(fs.readFileSync(path.join(s.dir, 'init.mp4')));
+  } catch {
+    /* no init segment yet */
+  }
+  return s.codec;
 }
 
 /** A request from a viewer: the session stays while any viewer is around */
@@ -703,7 +770,7 @@ function hit(s: RemuxSession, viewer: string | undefined): void {
 }
 
 /** The remux of a channel, started if not running; resolves once two segments exist. */
-export async function ensureRemux(key: string, src: RemuxSource, secrets: string[], viewer?: string): Promise<{ playUrl: string }> {
+export async function ensureRemux(key: string, src: RemuxSource, secrets: string[], viewer?: string): Promise<{ playUrl: string; codec?: LiveTvCodec }> {
   const ff = await detectFfmpeg();
   if (!ff.available || !ff.path) throw new Error('This channel is a raw MPEG-TS stream, which needs ffmpeg on the server to play in a browser; ffmpeg is not installed there.');
   let s = sessions.get(key);
@@ -729,7 +796,7 @@ export async function ensureRemux(key: string, src: RemuxSource, secrets: string
     else log(`remux ${key}: no segment after ${Math.round((Date.now() - s.startedAt) / 1000)} s; left running for the next tune (the idle reaper stops it otherwise)`);
     throw e;
   }
-  return { playUrl: `/api/livetv/live/${encodeURIComponent(key)}/stream.mp4${viewer ? `?v=${encodeURIComponent(viewer)}` : ''}` };
+  return { playUrl: `/api/livetv/live/${encodeURIComponent(key)}/stream.mp4${viewer ? `?v=${encodeURIComponent(viewer)}` : ''}`, codec: recordingCodec(s) };
 }
 
 /** The player left the channel (another channel, the player closed, the page gone): stop soon unless someone else watches. */

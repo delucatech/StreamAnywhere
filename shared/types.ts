@@ -939,6 +939,15 @@ export interface LiveTvTry {
   ms?: number;
 }
 
+/**
+ * The video codec of a stream, once known: from the HLS variant's CODECS, the recording's init
+ * segment, or the page's decoder. Not every browser decodes every one (H.265 needs hardware
+ * support in Chrome; the car's browser has none): the tile says, the player skips what it cannot.
+ */
+export type LiveTvCodec = 'h264' | 'hevc' | 'av1' | 'vp9' | 'mpeg2' | 'mpeg4' | 'other';
+export const LIVETV_CODECS: LiveTvCodec[] = ['h264', 'hevc', 'av1', 'vp9', 'mpeg2', 'mpeg4', 'other'];
+export const LIVETV_CODEC_LABEL: Record<LiveTvCodec, string> = { h264: 'H.264', hevc: 'H.265 (HEVC)', av1: 'AV1', vp9: 'VP9', mpeg2: 'MPEG-2', mpeg4: 'MPEG-4', other: 'unknown codec' };
+
 /** What the tries say about a stream (shared/livetvHealth.ts): the dot on the tile */
 export type LiveTvRating = 'good' | 'weak' | 'bad' | 'none';
 
@@ -947,6 +956,8 @@ export interface LiveTvHealthReport {
   key: string;
   ok: boolean;
   ms?: number;
+  /** The stream's video codec as the page's demuxer saw it (kept on the server for every device's tiles) */
+  codec?: LiveTvCodec;
 }
 
 export interface LiveTvPrefs {
@@ -957,6 +968,8 @@ export interface LiveTvPrefs {
   broken: Record<string, number>;
   /** Stream key -> its last tries, oldest first (shared/livetvHealth.ts rates them) */
   health: Record<string, LiveTvTry[]>;
+  /** Stream key -> its video codec, once any tune or device found out (the tile's badge; missing on an older server) */
+  codecs?: Record<string, LiveTvCodec>;
   lastKey?: string;
   lastAt?: number;
 }
@@ -996,6 +1009,12 @@ export interface LiveTvTuneRequest {
   viewer?: string;
   /** The tallest picture this device wants (720 on the car: less decoding, less data); the HLS variant is picked under it */
   maxHeight?: number;
+  /**
+   * The video codecs this browser decodes (VideoDecoder.isConfigSupported). The server picks an
+   * HLS variant among them when it can, and answers "unsupported" at once for a stream it knows
+   * to be in another codec, so the player moves on to the channel's next stream without a try.
+   */
+  codecs?: LiveTvCodec[];
 }
 export interface LiveTvLeaveRequest {
   key: string;
@@ -1053,6 +1072,8 @@ export interface LiveTvTuneResponse {
    */
   dvr?: boolean;
   windowSec?: number;
+  /** The stream's video codec when the server knows it (the variant's CODECS, the recording's init segment, an earlier play) */
+  codec?: LiveTvCodec;
   elapsedMs: number;
 }
 

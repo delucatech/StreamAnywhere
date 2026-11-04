@@ -12,8 +12,9 @@
  *    for the channels on screen only.
  *  - Settings (the gear): add / edit / delete / enable / test / refresh providers; presets.
  */
-import type { LiveTvChannel, LiveTvPrefs, LiveTvPreset, LiveTvProgramme, LiveTvProvider, LiveTvProviderInput, LiveTvSource, LiveTvState, LiveTvTry } from '../../../shared/types';
+import type { LiveTvChannel, LiveTvCodec, LiveTvPrefs, LiveTvPreset, LiveTvProgramme, LiveTvProvider, LiveTvProviderInput, LiveTvSource, LiveTvState, LiveTvTry } from '../../../shared/types';
 import { HEALTH_AMEND_MS, pushTry, rateStream, ratingRank, type StreamRating } from '../../../shared/livetvHealth';
+import { codecBadge, codecLabel, decodes, detectDecoders, knownDecoders } from './codecs';
 import { api, ApiError } from '../api';
 import { rememberApp } from '../platforms';
 import { watchServer, type ServerWord } from '../serverStatus';
@@ -122,6 +123,8 @@ let hidden = new Set<string>();
 let broken: Record<string, number> = {};
 /** Stream key -> its last tries (the server's; a try just made is added here first so the dot answers at once) */
 let health: Record<string, LiveTvTry[]> = {};
+/** Stream key -> its video codec, once known (the server's, shared by every device): the badge on the tile */
+let codecs: Record<string, LiveTvCodec> = {};
 let lastKey: string | undefined;
 /**
  * Logos that failed to load in this browser (key -> when), kept a week: a channel without a
@@ -160,6 +163,7 @@ try {
     hidden = new Set(p.hidden || []);
     broken = p.broken || {};
     health = p.health || {};
+    codecs = p.codecs || {};
     lastKey = p.lastKey;
   }
   const v = JSON.parse(localStorage.getItem(VIEW_KEY) || 'null') as Partial<typeof view> | null;
@@ -195,7 +199,7 @@ const saveView = (): void => {
 };
 const savePrefs = (): void => {
   try {
-    localStorage.setItem(PREFS_KEY, JSON.stringify({ favorites: [...favorites], hidden: [...hidden], broken, health, lastKey } as LiveTvPrefs));
+    localStorage.setItem(PREFS_KEY, JSON.stringify({ favorites: [...favorites], hidden: [...hidden], broken, health, codecs, lastKey } as LiveTvPrefs));
   } catch {
     /* ignore */
   }
@@ -218,6 +222,16 @@ const bestOf = (c: LiveTvChannel): { src: LiveTvSource; r: StreamRating } => {
 };
 /** "Did not play last time": every stream of it failed (one working source is enough) */
 const isBroken = (c: LiveTvChannel): boolean => bestOf(c).r.rating === 'bad';
+/** The channel's codec as far as known: its best stream's, else any stream's */
+const codecOf = (c: LiveTvChannel): LiveTvCodec | undefined => codecs[bestOf(c).src.key] || c.sources.map((s) => codecs[s.key]).find(Boolean);
+/** Every stream of the channel is in a codec this browser lacks (none unknown, none decodable): it will not play here */
+const undecodable = (c: LiveTvChannel): boolean => c.sources.length > 0 && c.sources.every((s) => codecs[s.key] && !decodes(codecs[s.key]));
+/** A codec just found out (by this device): the tile's badge answers before the server's copy arrives */
+function noteCodec(key: string, codec: LiveTvCodec | undefined): void {
+  if (!codec || codecs[key] === codec) return;
+  codecs[key] = codec;
+  savePrefs();
+}
 /** The dot on the tile: the best stream's rating, with its line for the tooltip (several streams: which one) */
 const dotHtml = (c: LiveTvChannel): string => {
   const { src, r } = bestOf(c);
@@ -274,16 +288,19 @@ const player = new LiveTvPlayer(el.theater, {
     noteTry(key, ok);
     refreshTile(ch);
   },
-  onPlayed: (ch, key, ms) => {
+  onPlayed: (ch, key, ms, codec) => {
     noteTry(key, true, ms);
+    noteCodec(key, codec);
     refreshTile(ch);
-    void api.liveTvHealth({ key, ok: true, ms }).then(applyPrefs).catch(() => undefined);
+    void api.liveTvHealth({ key, ok: true, ms, codec }).then(applyPrefs).catch(() => undefined);
   },
-  onStreamFailed: (ch, key) => {
+  onStreamFailed: (ch, key, codec) => {
     noteTry(key, false);
+    noteCodec(key, codec);
     refreshTile(ch);
-    void api.liveTvHealth({ key, ok: false }).then(applyPrefs).catch(() => undefined);
+    void api.liveTvHealth({ key, ok: false, codec }).then(applyPrefs).catch(() => undefined);
   },
+  streamCodec: (key) => codecs[key],
   providerName: (ch) => (state.providers.length > 1 ? providerById(ch.providerId)?.name || '' : ''),
   maxHeight: maxHeightOf,
   guide: (key) => api.liveTvGuide(key),
@@ -344,6 +361,8 @@ function applyPrefs(p: LiveTvPrefs): void {
   hidden = new Set(p.hidden || []);
   broken = p.broken || {};
   health = p.health || {};
+  // an older server sends none: what this device found out is kept
+  if (p.codecs) codecs = { ...codecs, ...p.codecs };
   if (p.lastKey) lastKey = p.lastKey;
   savePrefs();
 }
@@ -585,11 +604,16 @@ function renderChips(): void {
 function tileHtml(c: LiveTvChannel): string {
   const fav = isFav(c);
   const prov = state.providers.length > 1 ? providerById(c.providerId)?.name : '';
-  const sub = [...c.groups, prov, c.sources.length > 1 ? `${c.sources.length} streams` : ''].filter(Boolean).join(' · ');
-  const dim = isBroken(c);
-  return `<button type="button" class="ch${player.current?.key === c.key ? ' playing' : ''}${dim ? ' dim' : ''}" data-key="${esc(c.key)}" aria-label="Play ${esc(c.name)}"${dim ? ` title="${esc(bestOf(c).r.text)}"` : ''}>
+  const codec = codecOf(c);
+  const sub = [...c.groups, prov, c.sources.length > 1 ? `${c.sources.length} streams` : '', codec ? codecBadge(codec) : ''].filter(Boolean).join(' · ');
+  // the codec badge on the picture: for codecs other than H.264 (the common one), red when this browser lacks it
+  const noPlay = undecodable(c);
+  const badge = codec && (codec !== 'h264' || noPlay) ? `<span class="ch-codec${decodes(codec) ? '' : ' bad'}" title="${esc(decodes(codec) ? codecLabel(codec) : `${codecLabel(codec)}: this browser cannot decode it`)}">${esc(codecBadge(codec))}</span>` : '';
+  const dim = isBroken(c) || noPlay;
+  const why = noPlay && codec ? `${codecLabel(codec)}: this browser cannot decode it` : bestOf(c).r.text;
+  return `<button type="button" class="ch${player.current?.key === c.key ? ' playing' : ''}${dim ? ' dim' : ''}" data-key="${esc(c.key)}" aria-label="Play ${esc(c.name)}"${dim ? ` title="${esc(why)}"` : ''}>
     <span class="ch-logo">${c.logo ? `<img src="${esc(c.logo)}" alt="" loading="lazy" draggable="false" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'initials',textContent:this.dataset.i}))" data-i="${esc(initials(c.name))}" />` : `<span class="initials">${esc(initials(c.name))}</span>`}
-      ${c.number ? `<span class="ch-num">${c.number}</span>` : ''}${c.drm ? '<span class="ch-drm">DRM</span>' : ''}
+      ${c.number ? `<span class="ch-num">${c.number}</span>` : ''}${c.drm ? '<span class="ch-drm">DRM</span>' : badge}
       <span class="ch-fav${fav ? ' on' : ''}" role="button" aria-label="${fav ? 'Remove from favorites' : 'Add to favorites'}" data-fav="${esc(c.key)}">${fav ? STAR_ON : STAR}</span>
     </span>
     <span class="ch-body"><span class="ch-name">${dotHtml(c)}${esc(c.name)}</span><span class="ch-sub">${esc(sub)}</span><span class="ch-now" data-now="${esc(c.key)}"></span></span>
@@ -1121,6 +1145,13 @@ window.addEventListener('keydown', (e) => {
 (window as unknown as { streamAnywhereLiveTv: unknown }).streamAnywhereLiveTv = { player, stats: () => player.stats() };
 setBoot('connect');
 render();
+// what this browser decodes (H.265 is the question): the tiles' badges and the player's choice of stream follow it
+{
+  const before = JSON.stringify([...(knownDecoders() || [])].sort());
+  void detectDecoders().then((d) => {
+    if (JSON.stringify([...d].sort()) !== before && channels.length) render();
+  });
+}
 void sync().finally(() => {
   (window as unknown as { streamAnywhereReady: boolean }).streamAnywhereReady = true;
   // a failed start keeps the splash with its reason and "Tap to try again" (the poll retries too)

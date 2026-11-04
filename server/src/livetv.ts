@@ -18,7 +18,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import type { LiveTvAccount, LiveTvChannel, LiveTvChannelGuideResponse, LiveTvChannelsResponse, LiveTvGuideNowResponse, LiveTvHealthReport, LiveTvLeaveRequest, LiveTvPrefs, LiveTvPrefsPatch, LiveTvTry, LiveTvProvider, LiveTvProviderInput, LiveTvProviderKind, LiveTvState, LiveTvTestRequest, LiveTvTestResponse, LiveTvTuneRequest, LiveTvTuneResponse, LiveTvTuneStatus } from '../../shared/types';
+import type { LiveTvAccount, LiveTvChannel, LiveTvChannelGuideResponse, LiveTvChannelsResponse, LiveTvCodec, LiveTvGuideNowResponse, LiveTvHealthReport, LiveTvLeaveRequest, LiveTvPrefs, LiveTvPrefsPatch, LiveTvTry, LiveTvProvider, LiveTvProviderInput, LiveTvProviderKind, LiveTvState, LiveTvTestRequest, LiveTvTestResponse, LiveTvTuneRequest, LiveTvTuneResponse, LiveTvTuneStatus } from '../../shared/types';
+import { LIVETV_CODECS, LIVETV_CODEC_LABEL } from '../../shared/types';
 import { HEALTH_AMEND_MS, pushTry } from '../../shared/livetvHealth';
 import { detectFfmpeg } from './ffmpeg';
 import { decryptJson, encryptJson, setLiveTvCryptoLogger } from './livetvCrypto';
@@ -143,19 +144,42 @@ function loadPrefs(): LiveTvPrefs {
         if (tries.length) health[k] = tries;
       }
     }
+    const codecs: Record<string, LiveTvCodec> = {};
+    if (parsed.codecs && typeof parsed.codecs === 'object') for (const [k, v] of Object.entries(parsed.codecs)) if (isCodec(v)) codecs[k] = v;
     prefs = {
       favorites: Array.isArray(parsed.favorites) ? parsed.favorites.map(String) : [],
       hidden: Array.isArray(parsed.hidden) ? parsed.hidden.map(String) : [],
       broken,
       health,
+      codecs,
       lastKey: typeof parsed.lastKey === 'string' ? parsed.lastKey : undefined,
       lastAt: Number(parsed.lastAt) || undefined,
     };
   } catch {
-    prefs = { favorites: [], hidden: [], broken: {}, health: {} };
+    prefs = { favorites: [], hidden: [], broken: {}, health: {}, codecs: {} };
   }
   return prefs;
 }
+
+const isCodec = (v: unknown): v is LiveTvCodec => typeof v === 'string' && (LIVETV_CODECS as string[]).includes(v);
+/** The browser's list of codecs as the page sends it (unknown names dropped; undefined when it sent none) */
+const cleanCodecs = (v: unknown): LiveTvCodec[] | undefined => (Array.isArray(v) ? v.filter(isCodec) : undefined);
+
+/** A stream's video codec became known (the variant's CODECS, the recording's init segment, a page's decoder): kept for every device's tiles */
+function noteCodec(key: string, codec: LiveTvCodec | undefined): void {
+  if (!codec) return;
+  const pr = loadPrefs();
+  pr.codecs = pr.codecs || {};
+  if (pr.codecs[key] === codec) return;
+  pr.codecs[key] = codec;
+  // at most as many as the health map keeps: the oldest-looking entries (no health) go first
+  const keys = Object.keys(pr.codecs);
+  if (keys.length > HEALTH_MAX_STREAMS * 2) for (const k of keys.filter((x) => !pr.health[x]).slice(0, keys.length - HEALTH_MAX_STREAMS * 2)) delete pr.codecs[k];
+  prefsChanged();
+}
+
+/** "This stream is H.265 (HEVC); this browser cannot decode that." */
+const codecMessage = (codec: LiveTvCodec): string => `This stream is ${LIVETV_CODEC_LABEL[codec]}, which this browser cannot decode. Most channels are H.264; the channel's other streams, when it has any, are tried next.`;
 function prefsChanged(): void {
   load().rev++;
   changed();
@@ -780,6 +804,7 @@ export function reportHealth(r: LiveTvHealthReport): LiveTvPrefs {
   const tries = pr.health[key] || [];
   const last = tries[tries.length - 1];
   const ms = Number(r.ms) > 0 ? Math.min(600_000, Math.round(Number(r.ms))) : undefined;
+  if (isCodec(r.codec)) noteCodec(key, r.codec);
   if (r.ok) {
     if (last && last.ok && now - last.at < HEALTH_AMEND_MS) {
       if (ms) last.ms = ms;
@@ -796,11 +821,11 @@ export function reportHealth(r: LiveTvHealthReport): LiveTvPrefs {
 /** A viewer id as the page sends it (letters, digits, - and _; at most 64) */
 const cleanViewer = (v: unknown): string | undefined => (typeof v === 'string' && /^[\w-]{1,64}$/.test(v) ? v : undefined);
 
-export async function tune(key: string, viewer?: string, maxHeight?: number): Promise<LiveTvTuneResponse> {
+export async function tune(key: string, viewer?: string, maxHeight?: number, codecs?: LiveTvCodec[]): Promise<LiveTvTuneResponse> {
   const t0 = Date.now();
   tuning.set(key, { phase: 'probing', at: t0 });
   try {
-    const r = await tuneChannel(key, viewer, maxHeight);
+    const r = await tuneChannel(key, viewer, maxHeight, codecs);
     noteTune(key, r.state === 'ok', Date.now() - t0);
     return r;
   } finally {
@@ -825,7 +850,7 @@ export function tuneStatus(key: string): LiveTvTuneStatus {
   return { phase: t.phase, sinceMs: Date.now() - t.at, load };
 }
 
-async function tuneChannel(key: string, viewer: string | undefined, maxHeight?: number): Promise<LiveTvTuneResponse> {
+async function tuneChannel(key: string, viewer: string | undefined, maxHeight?: number, codecs?: LiveTvCodec[]): Promise<LiveTvTuneResponse> {
   const t0 = Date.now();
   const found = findChannel(key);
   if (!found) throw new LiveTvError('That channel is not in the list any more (the provider changed its playlist?)', 404);
@@ -833,8 +858,17 @@ async function tuneChannel(key: string, viewer: string | undefined, maxHeight?: 
   if (c.drm) return { key, state: 'unsupported', detail: 'DRM', message: 'This channel is DRM-protected (the playlist names license keys); it cannot play here.', elapsedMs: Date.now() - t0 };
   if (!p.enabled) throw new LiveTvError('That provider is disabled', 409);
   const src = sourceOf(key)!;
+  // a codec this browser said it does not decode: no use recording the stream for it
+  const decodes = (codec: LiveTvCodec | undefined): boolean => !codec || !codecs || codecs.includes(codec);
   const kept = verdicts.get(key);
   let v = kept && Date.now() - kept.at < VERDICT_MS ? kept : undefined;
+  // a kept verdict whose HLS variant was picked for another browser's codecs is made again for this one
+  if (v && v.kind === 'hls' && v.hlsInput?.codec && !decodes(v.hlsInput.codec)) v = undefined;
+  const known = loadPrefs().codecs?.[key];
+  if (known && !decodes(known) && (!v || v.kind !== 'hls')) {
+    log(`tune ${p.name} / ${cleanChannelName(c.name)}: ${known} stream, the browser does not decode it`);
+    return { key, state: 'unsupported', detail: 'codec', codec: known, message: codecMessage(known), elapsedMs: Date.now() - t0 };
+  }
   let detail: string | undefined;
   let message: string | undefined;
   if (!v) {
@@ -846,8 +880,14 @@ async function tuneChannel(key: string, viewer: string | undefined, maxHeight?: 
     }
     v = { kind: r.kind === 'ts' ? 'remux' : r.kind, url: r.url, headers: r.headers, at: Date.now() };
     if (r.kind === 'hls') {
-      // what the recorder would read: the variant picked here, checked like any upstream URL
-      const input = pickVariant(r.playlist, r.url, maxHeight) || { url: r.url };
+      // what the recorder would read: the variant picked here (among the browser's codecs when it
+      // can be), checked like any upstream URL
+      const input = pickVariant(r.playlist, r.url, maxHeight, codecs) || { url: r.url };
+      if (input.codec) noteCodec(key, input.codec);
+      if (!decodes(input.codec)) {
+        log(`tune ${p.name} / ${cleanChannelName(c.name)}: only ${input.codec} variants, the browser does not decode it`);
+        return { key, state: 'unsupported', detail: 'codec', codec: input.codec, message: codecMessage(input.codec!), elapsedMs: Date.now() - t0 };
+      }
       try {
         mark(key, 'checking');
         await checkLiveUrl(input.url);
@@ -855,6 +895,9 @@ async function tuneChannel(key: string, viewer: string | undefined, maxHeight?: 
       } catch (e) {
         log(`tune ${p.name} / ${cleanChannelName(c.name)}: no recorder, variant refused: ${(e as Error).message}`);
       }
+    } else if (known && !decodes(known)) {
+      // a raw stream (one codec, nothing to pick): known from an earlier play to be beyond this browser
+      return { key, state: 'unsupported', detail: 'codec', codec: known, message: codecMessage(known), elapsedMs: Date.now() - t0 };
     }
     verdicts.set(key, v);
     detail = r.kind === 'progressive' ? r.contentType : r.kind;
@@ -870,10 +913,17 @@ async function tuneChannel(key: string, viewer: string | undefined, maxHeight?: 
   const input: RemuxSource = v.kind === 'hls' ? { url: (v.hlsInput || { url: v.url! }).url, headers: v.headers, input: 'hls', program: v.hlsInput?.program } : { url: v.url!, headers: v.headers, input: 'ts' };
   try {
     mark(key, 'starting');
-    const playUrl = (await ensureRemux(key, input, src.secrets || [], viewer)).playUrl;
+    const rec = await ensureRemux(key, input, src.secrets || [], viewer);
+    const codec = rec.codec || v.hlsInput?.codec || known;
+    if (rec.codec) noteCodec(key, rec.codec);
     const what = v.kind === 'hls' ? `hls${v.hlsInput?.resolution ? ' ' + v.hlsInput.resolution : ''}${v.hlsInput?.bandwidth ? ' ' + Math.round(v.hlsInput.bandwidth / 1000) + ' kbps' : ''}` : 'mpeg-ts';
-    log(`tune ${p.name} / ${cleanChannelName(c.name)}: recording ${what} from ${redactUrl(input.url, src.secrets || [])}, ${Date.now() - t0} ms`);
-    return { key, state: 'ok', kind: 'remux', playUrl, detail: `${what}, recorded`, message, dvr: true, windowSec: DVR_WINDOW_SEC, elapsedMs: Date.now() - t0 };
+    log(`tune ${p.name} / ${cleanChannelName(c.name)}: recording ${what}${codec ? ` (${codec})` : ''} from ${redactUrl(input.url, src.secrets || [])}, ${Date.now() - t0} ms`);
+    if (codec && !decodes(codec)) {
+      // the recording turned out to be in a codec this browser lacks: said now, before the page downloads it
+      log(`tune ${p.name} / ${cleanChannelName(c.name)}: the recording is ${codec}, the browser does not decode it`);
+      return { key, state: 'unsupported', detail: 'codec', codec, message: codecMessage(codec), elapsedMs: Date.now() - t0 };
+    }
+    return { key, state: 'ok', kind: 'remux', playUrl: rec.playUrl, detail: `${what}, recorded`, message, dvr: true, windowSec: DVR_WINDOW_SEC, codec, elapsedMs: Date.now() - t0 };
   } catch (e) {
     verdicts.delete(key);
     const m = (e as Error).message;
@@ -1009,7 +1059,7 @@ export function registerLiveTv(app: FastifyInstance): void {
       const key = String(req.body?.key || '');
       if (!key) throw new LiveTvError('Which channel?');
       const maxHeight = Number(req.body?.maxHeight) || undefined;
-      return await tune(key, cleanViewer(req.body?.viewer), maxHeight && maxHeight >= 240 ? Math.round(maxHeight) : undefined);
+      return await tune(key, cleanViewer(req.body?.viewer), maxHeight && maxHeight >= 240 ? Math.round(maxHeight) : undefined, cleanCodecs(req.body?.codecs));
     } catch (e) {
       return fail(reply, e);
     }
