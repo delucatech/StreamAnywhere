@@ -84,9 +84,22 @@ export async function readLiveBody(res: IncomingMessage, limit: number): Promise
   return Buffer.concat(chunks);
 }
 
-/** GET a text document (a playlist, a JSON answer); gzip bodies are inflated (by magic, whatever the headers say). */
-export async function fetchLiveText(url: string, opts: { limit?: number; headers?: Record<string, string>; timeoutMs?: number } = {}): Promise<{ text: string; status: number; contentType: string; finalUrl: string }> {
-  const { res, status, finalUrl } = await openLive(url, { headers: opts.headers, timeoutMs: opts.timeoutMs });
+/**
+ * GET a text document (a playlist, a JSON answer); gzip bodies are inflated (by magic, whatever the
+ * headers say). With `etag` / `lastModified` from an earlier answer the request is conditional:
+ * a 304 comes back as status 304 with an empty text (the caller keeps what it has).
+ */
+export async function fetchLiveText(url: string, opts: { limit?: number; headers?: Record<string, string>; timeoutMs?: number; etag?: string; lastModified?: string } = {}): Promise<{ text: string; status: number; contentType: string; finalUrl: string; etag?: string; lastModified?: string }> {
+  const headers: Record<string, string> = { ...(opts.headers || {}) };
+  if (opts.etag) headers['if-none-match'] = opts.etag;
+  if (opts.lastModified) headers['if-modified-since'] = opts.lastModified;
+  const { res, status, finalUrl } = await openLive(url, { headers, timeoutMs: opts.timeoutMs });
+  const etag = typeof res.headers.etag === 'string' ? res.headers.etag : undefined;
+  const lastModified = typeof res.headers['last-modified'] === 'string' ? res.headers['last-modified'] : undefined;
+  if (status === 304) {
+    res.resume();
+    return { text: '', status, contentType: '', finalUrl, etag: etag || opts.etag, lastModified: lastModified || opts.lastModified };
+  }
   if (status >= 400) {
     res.resume();
     throw new Error(`HTTP ${status} from ${safeHost(finalUrl)}`);
@@ -94,7 +107,7 @@ export async function fetchLiveText(url: string, opts: { limit?: number; headers
   const limit = opts.limit ?? 32 * 1024 * 1024;
   let body = await readLiveBody(res, limit);
   if (isGzip(body)) body = zlib.gunzipSync(body, { maxOutputLength: limit * 8 });
-  return { text: body.toString('utf8'), status, contentType: String(res.headers['content-type'] || ''), finalUrl };
+  return { text: body.toString('utf8'), status, contentType: String(res.headers['content-type'] || ''), finalUrl, etag, lastModified };
 }
 
 export const isGzip = (b: Buffer): boolean => b.length > 2 && b[0] === 0x1f && b[1] === 0x8b;

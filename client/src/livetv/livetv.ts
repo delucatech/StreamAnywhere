@@ -16,6 +16,7 @@ import type { LiveTvChannel, LiveTvPrefs, LiveTvPreset, LiveTvProgramme, LiveTvP
 import { HEALTH_AMEND_MS, pushTry, rateStream, ratingRank, type StreamRating } from '../../../shared/livetvHealth';
 import { api, ApiError } from '../api';
 import { rememberApp } from '../platforms';
+import { watchServer, type ServerWord } from '../serverStatus';
 import { LiveTvPlayer } from './player';
 
 (window as unknown as { streamAnywhereStarted: boolean }).streamAnywhereStarted = true;
@@ -382,13 +383,39 @@ let polling = false;
  * waited for, with the seconds ticking, so a slow server (the small VM is busy at times) never
  * looks like a frozen tile. `error` is the last failed attempt's reason, shown with "Try again".
  */
-const boot: { phase: 'connect' | 'channels' | 'done'; at: number; error?: string; timer: number } = { phase: 'connect', at: Date.now(), timer: 0 };
+const boot: { phase: 'connect' | 'channels' | 'done'; at: number; error?: string; timer: number; retryAt: number } = { phase: 'connect', at: Date.now(), timer: 0, retryAt: 0 };
+/** A failed start tries again by itself after this long (the splash counts it down; a tap tries at once) */
+const BOOT_RETRY_MS = 8000;
+/** What /api/health says the server is doing, asked every few seconds while the page starts */
+let serverWord: ServerWord = {};
+let serverWatch: ReturnType<typeof watchServer> | undefined;
+function watchServerWhileBooting(): void {
+  if (serverWatch) return;
+  serverWatch = watchServer(
+    (w) => {
+      serverWord = w;
+    },
+    { everyMs: 4000, timeoutMs: 6000 },
+  );
+}
+function stopServerWatch(): void {
+  serverWatch?.stop();
+  serverWatch = undefined;
+}
 
 function bootText(): { text: string; detail: string } {
   const sec = Math.round((Date.now() - boot.at) / 1000);
-  if (boot.error) return { text: `The server did not answer: ${boot.error}`, detail: offline ? 'You are offline.' : 'Tap to try again.' };
+  if (boot.error) {
+    const left = Math.max(0, Math.ceil((boot.retryAt - Date.now()) / 1000));
+    const detail = offline ? 'You are offline.' : `${left ? `Trying again in ${left} s.` : 'Trying again…'} Tap to try now.${serverWord.line ? ` ${serverWord.line}` : ''}`;
+    return { text: `The server did not answer: ${boot.error}`, detail };
+  }
   const text = boot.phase === 'connect' ? (sec < 2 ? 'Connecting to the server…' : `Connecting to the server… ${sec} s`) : `Loading the channel list… ${sec} s`;
-  const detail = sec >= 10 ? 'The server is slow to answer; it may be busy. Still waiting…' : '';
+  // after a moment, what the server says about itself (busy with what, short of memory); else that it is slow
+  let detail = '';
+  if (sec >= 3 && serverWord.line) detail = serverWord.line;
+  else if (sec >= 3 && serverWord.pendingMs && serverWord.pendingMs > 3000) detail = `The server has not answered the health check for ${Math.round(serverWord.pendingMs / 1000)} s; it may be starved. Still waiting…`;
+  else if (sec >= 10) detail = 'The server is slow to answer; it may be busy. Still waiting…';
   return { text, detail };
 }
 
@@ -397,6 +424,15 @@ function renderBoot(): void {
   el.splashStatus.innerHTML = `${esc(text)}${detail ? `<small>${esc(detail)}</small>` : ''}`;
   el.splash.classList.toggle('retry', !!boot.error);
   if (!channels.length) renderEmpty();
+  // a failed start tries again by itself
+  if (boot.error && boot.retryAt && Date.now() >= boot.retryAt && !polling) retryBoot();
+}
+
+function retryBoot(): void {
+  boot.at = Date.now();
+  boot.retryAt = 0;
+  setBoot('connect');
+  void sync();
 }
 
 /** The splash leaves (the server answered, or gave up); the list area carries on with the status. */
@@ -409,21 +445,22 @@ function leaveSplash(): void {
 function setBoot(phase: typeof boot.phase, error?: string): void {
   boot.phase = phase;
   boot.error = error;
+  if (error) boot.retryAt = Date.now() + BOOT_RETRY_MS;
   if (phase === 'done') {
     window.clearInterval(boot.timer);
     boot.timer = 0;
+    stopServerWatch();
     leaveSplash();
     renderEmpty();
     return;
   }
+  watchServerWhileBooting();
   if (!boot.timer) boot.timer = window.setInterval(renderBoot, 1000);
   renderBoot();
 }
 el.splash.addEventListener('click', () => {
   if (!boot.error) return;
-  boot.at = Date.now();
-  setBoot('connect');
-  void sync();
+  retryBoot();
 });
 
 async function sync(): Promise<void> {
@@ -605,11 +642,7 @@ function renderEmpty(): void {
   el.empty.innerHTML = html;
   el.empty.classList.toggle('hidden', !html);
   el.empty.querySelector('#emptySettings')?.addEventListener('click', () => openSettings());
-  el.empty.querySelector('#emptyRetry')?.addEventListener('click', () => {
-    boot.at = Date.now();
-    setBoot('connect');
-    void sync();
-  });
+  el.empty.querySelector('#emptyRetry')?.addEventListener('click', () => retryBoot());
 }
 
 function renderStatus(): void {

@@ -1743,6 +1743,7 @@ async function headlessBrowser(): Promise<Browser> {
   headlessLaunch = (async () => {
     try {
       await closeHeadless();
+      noteHeadlessUse();
       feedLog?.('launching headless browser');
       const browser = await launch(true);
       feedLog?.('headless browser launched: ' + (await browser.version()));
@@ -1795,6 +1796,33 @@ export async function parkHeadlessBrowser(log?: (m: string) => void): Promise<bo
   (log || feedLog)?.('headless browser closed to free memory for another platform (it restarts on the next TikTok request)');
   return true;
 }
+
+/**
+ * The browser is closed by itself after HEADLESS_IDLE_MS without a TikTok request (a work-page
+ * job, a For You ask, a sign-in). Found 2026-11-04 on the VM: four Chromium processes resident
+ * for 5.7 days, 1.2 GB of the 2 GB swap in use, every page of the site stalling for minutes.
+ * The next TikTok request starts it again (about a minute on the VM; the profile, the cookies
+ * and the captured For You items stay). TIKTOK_BROWSER_IDLE_MIN=0 keeps it running.
+ */
+const HEADLESS_IDLE_MS = (process.env.TIKTOK_BROWSER_IDLE_MIN === undefined ? 10 : Number(process.env.TIKTOK_BROWSER_IDLE_MIN) || 0) * 60_000;
+let headlessUsedAt = 0;
+const noteHeadlessUse = (): void => {
+  headlessUsedAt = Date.now();
+};
+async function closeIdleHeadless(): Promise<void> {
+  if (!HEADLESS_IDLE_MS || !s.headless) return;
+  const idleFor = Date.now() - Math.max(headlessUsedAt, forYouAskedAt);
+  if (idleFor < HEADLESS_IDLE_MS) return;
+  if (headlessLaunch || feedPageOpening || probe || forYouInFlight > 0 || forYouPump) return;
+  if (s.qrPage || work.busy || work.waiting) return;
+  await closeHeadless();
+  feedLog?.(`headless browser closed after ${Math.round(idleFor / 60_000)} min without a TikTok request (it restarts on the next one)`);
+}
+const idleTimer = setInterval(() => void closeIdleHeadless().catch(() => undefined), 60_000);
+idleTimer.unref?.();
+
+/** Whether the headless TikTok browser is running right now (for /api/health). */
+export const headlessRunning = (): boolean => Boolean(s.headless?.isConnected());
 
 /** After a sign-in: drop guest items and make the feed page reload as the signed-in account. */
 async function resetFeedPage(): Promise<void> {
@@ -1909,6 +1937,7 @@ export async function withWorkPage<T>(log: (m: string) => void, fn: (page: Page)
   work.since = Date.now();
   try {
     if (s.qrPage && !s.qrPage.isClosed()) throw new Error('A QR sign-in is in progress; the browser is reserved for it for the moment');
+    noteHeadlessUse();
     const browser = await headlessBrowser();
     let page = s.explorePage;
     if (!page || page.isClosed()) {
@@ -1923,6 +1952,7 @@ export async function withWorkPage<T>(log: (m: string) => void, fn: (page: Page)
     work.busy = false;
     work.last = op;
     work.lastMs = Date.now() - work.since;
+    noteHeadlessUse();
     release();
   }
 }
@@ -1942,7 +1972,16 @@ export async function pageCookieHeader(page: Page): Promise<string> {
 
 export const isLoggedIn = (): boolean => s.state === 'logged_in';
 
-export async function fetchExploreViaBrowser(category: number, count: number, log: (m: string) => void): Promise<ExploreResult> {
+/** Thrown for an idle top-up when the browser is closed: the reservoir waits for a viewer instead of starting it. */
+export class BrowserParkedError extends Error {
+  readonly parked = true;
+  constructor() {
+    super('the headless browser is closed while idle; not started for a top-up nobody is waiting for');
+  }
+}
+
+export async function fetchExploreViaBrowser(category: number, count: number, log: (m: string) => void, opts: { noLaunch?: boolean } = {}): Promise<ExploreResult> {
+  if (opts.noLaunch && !s.headless?.isConnected()) throw new BrowserParkedError();
   return withWorkPage(log, async (page) => {
     const url = exploreApiUrl(category, count);
     const text = String(await page.evaluate(`fetch(${JSON.stringify(url)}, { credentials: 'include', signal: AbortSignal.timeout(25000) }).then((r) => r.text())`));

@@ -102,8 +102,19 @@ async function getJson<T>(path: string, timeoutMs?: number): Promise<T> {
 }
 
 export const api = {
-  health: async (): Promise<HealthResponse> => {
-    const res = await fetch(apiUrl('/api/health'), { mode: 'cors', credentials: 'same-origin' });
+  /** `timeoutMs`: give up (ApiError 504) when the server takes longer; without it the browser's own limit applies. */
+  health: async (timeoutMs?: number): Promise<HealthResponse> => {
+    const ctl = timeoutMs ? new AbortController() : undefined;
+    const timer = ctl ? window.setTimeout(() => ctl.abort(), timeoutMs) : undefined;
+    let res: Response;
+    try {
+      res = await fetch(apiUrl('/api/health'), { mode: 'cors', credentials: 'same-origin', cache: 'no-store', signal: ctl?.signal });
+    } catch (e) {
+      if (ctl?.signal.aborted) throw new ApiError(`no answer in ${Math.round(timeoutMs! / 1000)} s`, 504);
+      throw e;
+    } finally {
+      window.clearTimeout(timer);
+    }
     if (!res.ok) throw new ApiError(`health ${res.status}`, res.status);
     return res.json();
   },

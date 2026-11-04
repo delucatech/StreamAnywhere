@@ -198,8 +198,12 @@ export function mergeChannels(entries: MergeEntry[]): MergedChannel[] {
   return out;
 }
 
-export function parseM3u(text: string): M3uPlaylist {
-  const lines = text.split(/\r?\n/);
+/**
+ * The playlist parser as a line-by-line state machine, so a large list can be parsed in pieces
+ * (parseM3uAsync yields to the event loop between pieces: a refresh on the small VM used to hold
+ * every page and API call of the site while it ran).
+ */
+export function createM3uParser(): { line(raw: string): void; done(): M3uPlaylist } {
   const channels: M3uChannel[] = [];
   const epgUrls: string[] = [];
   let skipped = 0;
@@ -213,14 +217,14 @@ export function parseM3u(text: string): M3uPlaylist {
   let ahead: { headers?: Record<string, string>; drm?: boolean } = {};
   const target = (): { headers?: Record<string, string>; drm?: boolean } => pending || ahead;
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
+  const line = (raw: string): void => {
+    const line = raw.trim();
+    if (!line) return;
     if (line.startsWith('#EXTM3U')) {
       const a = parseAttrs(line.slice(7));
       const tvg = a['url-tvg'] || a['x-tvg-url'] || a['tvg-url'];
       if (tvg) for (const u of tvg.split(/[,\s]+/)) if (/^https?:\/\//i.test(u)) epgUrls.push(u);
-      continue;
+      return;
     }
     if (line.startsWith('#EXTINF')) {
       // #EXTINF:-1 tvg-id="x" group-title="News",Channel name
@@ -241,12 +245,12 @@ export function parseM3u(text: string): M3uPlaylist {
         drm: ahead.drm,
       };
       ahead = {};
-      continue;
+      return;
     }
     if (line.startsWith('#EXTGRP:')) {
       currentGroup = line.slice(8).trim();
       if (pending && !pending.group) pending.group = currentGroup;
-      continue;
+      return;
     }
     if (line.startsWith('#EXTVLCOPT:')) {
       const opt = line.slice(11);
@@ -259,7 +263,7 @@ export function parseM3u(text: string): M3uPlaylist {
         else if (k === 'http-referrer' || k === 'http-referer') t.headers = { ...(t.headers || {}), referer: v };
         else if (k === 'http-origin') t.headers = { ...(t.headers || {}), origin: v };
       }
-      continue;
+      return;
     }
     if (line.startsWith('#KODIPROP:')) {
       const opt = line.slice(10);
@@ -276,7 +280,7 @@ export function parseM3u(text: string): M3uPlaylist {
           }
         }
       }
-      continue;
+      return;
     }
     if (line.startsWith('#EXTHTTP:')) {
       try {
@@ -287,14 +291,14 @@ export function parseM3u(text: string): M3uPlaylist {
       } catch {
         skipped++;
       }
-      continue;
+      return;
     }
-    if (line.startsWith('#')) continue; // other comments / tags
+    if (line.startsWith('#')) return; // other comments / tags
     // a URL line
     if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(line)) {
       skipped++;
       pending = undefined;
-      continue;
+      return;
     }
     const url = line;
     const p = pending || {};
@@ -314,8 +318,29 @@ export function parseM3u(text: string): M3uPlaylist {
       headers: p.headers,
       drm: p.drm,
     });
+  };
+  return { line, done: () => ({ channels, epgUrls, skipped }) };
+}
+
+/** The whole playlist at once (small lists, tests). */
+export function parseM3u(text: string): M3uPlaylist {
+  const p = createM3uParser();
+  for (const l of text.split(/\r?\n/)) p.line(l);
+  return p.done();
+}
+
+/**
+ * The same, yielding to the event loop every `chunk` lines: other requests (a page, the health
+ * check, a channel being tuned) are answered while a long list is parsed.
+ */
+export async function parseM3uAsync(text: string, chunk = 1500): Promise<M3uPlaylist> {
+  const p = createM3uParser();
+  const lines = text.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    p.line(lines[i]);
+    if (i % chunk === chunk - 1) await new Promise<void>((r) => setImmediate(r));
   }
-  return { channels, epgUrls, skipped };
+  return p.done();
 }
 
 /**

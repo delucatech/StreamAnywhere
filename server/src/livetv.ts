@@ -24,8 +24,9 @@ import { detectFfmpeg } from './ffmpeg';
 import { decryptJson, encryptJson, setLiveTvCryptoLogger } from './livetvCrypto';
 import { EPG_TTL_MS, epgLoading, epgStore, forgetEpg, loadEpg, nowNext, programmesFor, setEpgDir, type EpgWanted } from './livetvEpg';
 import { checkLiveUrl, fetchLiveText, redactUrl, safeHost } from './livetvHttp';
-import { cleanChannelName, countGroups, mergeChannels, parseM3u, splitGroups, type M3uChannel, type MergeEntry } from './livetvM3u';
+import { cleanChannelName, countGroups, mergeChannels, parseM3uAsync, splitGroups, type M3uChannel, type MergeEntry } from './livetvM3u';
 import { LIVETV_PRESETS, presetById } from './livetvPresets';
+import { pressureReason } from './pressure';
 import { classify, DVR_WINDOW_SEC, ensureRemux, leaveRemux, pickVariant, recorderStarting, registerLiveTvStreamRoutes, remuxAvailable, remuxProgress, remuxStats, setLiveTvStreamLogger, setRemuxRoot, shutdownLiveTvStreams, type RemuxSource, type StreamSource, type Verdict } from './livetvStream';
 import { normalizeXtreamServer, xtreamAccount, xtreamEpgUrl, xtreamLiveChannels, xtreamLiveUrl, xtreamSecrets, XtreamError, type XtreamCreds } from './livetvXtream';
 
@@ -74,6 +75,10 @@ interface CachedList {
   at: number;
   channels: M3uChannel[];
   epgUrls: string[];
+  /** The playlist's validators and a hash of its text: the next refresh asks "changed?" and keeps this list when not */
+  etag?: string;
+  lastModified?: string;
+  hash?: string;
 }
 
 let file: ProvidersFile | undefined;
@@ -268,8 +273,13 @@ const splitKey = (key: string): { providerId: string; channelId: string } | unde
  * qualities) folded into one with its streams as sources (mergeChannels): the user's eight
  * iptv-org lists (a country and seven categories) name the same channels over and over.
  */
+let channelsMemo: { key: string; value: LiveTvChannelsResponse } | undefined;
 export function liveTvChannels(): LiveTvChannelsResponse {
   const f = load();
+  // the merge of ~6,000 entries is work (0.7 s on the VM when it is idle, much more when it is not):
+  // done once per change, not once per page open or poll
+  const key = `${f.channelsRev}|${f.providers.map((p) => `${p.id}:${p.enabled ? 1 : 0}`).join(',')}`;
+  if (channelsMemo?.key === key) return channelsMemo.value;
   const entries: MergeEntry[] = [];
   for (const p of f.providers) {
     if (!p.enabled) continue;
@@ -285,7 +295,8 @@ export function liveTvChannels(): LiveTvChannelsResponse {
     }
   }
   const channels: LiveTvChannel[] = mergeChannels(entries);
-  return { channelsRev: f.channelsRev, channels };
+  channelsMemo = { key, value: { channelsRev: f.channelsRev, channels } };
+  return channelsMemo.value;
 }
 
 function findChannel(key: string): { p: Stored; c: M3uChannel } | undefined {
@@ -472,21 +483,30 @@ export function deleteProvider(id: string): void {
 const STALE_MS = 12 * 60 * 60 * 1000;
 const running = new Map<string, Promise<void>>();
 
-/** Fetches the provider's channels (the playlist, or the panel's list). */
-async function fetchChannels(p: Stored): Promise<{ channels: M3uChannel[]; epgUrls: string[]; account?: LiveTvAccount; message: string }> {
+/**
+ * Fetches the provider's channels (the playlist, or the panel's list). With the list fetched last
+ * time (`prev`), a playlist is asked for conditionally (ETag / Last-Modified: iptv-org's lists are
+ * on GitHub Pages, which answers 304) and compared by hash when it does come: an unchanged list
+ * is reported as such (`unchanged`) and not parsed again - the parse is what starved the small VM.
+ */
+async function fetchChannels(p: Stored, prev?: CachedList): Promise<{ channels: M3uChannel[]; epgUrls: string[]; account?: LiveTvAccount; message: string; unchanged?: boolean; etag?: string; lastModified?: string; hash?: string }> {
   const s = secretsOf(p);
   if (p.kind === 'm3u') {
     if (!s.url) throw new LiveTvError('The provider has no playlist URL');
-    const r = await fetchLiveText(s.url, { limit: 64 * 1024 * 1024, timeoutMs: 60_000 });
+    const r = await fetchLiveText(s.url, { limit: 64 * 1024 * 1024, timeoutMs: 60_000, etag: prev?.etag, lastModified: prev?.lastModified });
+    if (r.status === 304 && prev) return { channels: prev.channels, epgUrls: prev.epgUrls, message: `unchanged (the server said so)`, unchanged: true, etag: r.etag, lastModified: r.lastModified, hash: prev.hash };
+    const hash = crypto.createHash('sha1').update(r.text).digest('hex');
+    if (prev?.hash && prev.hash === hash) return { channels: prev.channels, epgUrls: prev.epgUrls, message: `unchanged (same ${Math.round(r.text.length / 1024)} KB)`, unchanged: true, etag: r.etag, lastModified: r.lastModified, hash };
     const head = r.text.trimStart().slice(0, 200);
     if (!head.startsWith('#EXTM3U') && !head.startsWith('#EXTINF')) {
       if (/^<!doctype html|^<html/i.test(head)) throw new LiveTvError('That link answers with a web page, not a playlist');
       if (head.startsWith('{') || head.startsWith('[')) throw new LiveTvError('That link answers with JSON, not an M3U playlist (an Xtream panel? add it as one)');
       throw new LiveTvError(`That link is not an M3U playlist (it starts with "${head.slice(0, 30).replace(/\s+/g, ' ')}")`);
     }
-    const pl = parseM3u(r.text);
+    // in pieces, so pages and API calls are answered while a long list is parsed
+    const pl = await parseM3uAsync(r.text);
     if (!pl.channels.length) throw new LiveTvError('The playlist has no channels');
-    return { channels: pl.channels, epgUrls: pl.epgUrls, message: `${pl.channels.length} channels${pl.skipped ? `, ${pl.skipped} lines skipped` : ''}` };
+    return { channels: pl.channels, epgUrls: pl.epgUrls, message: `${pl.channels.length} channels${pl.skipped ? `, ${pl.skipped} lines skipped` : ''}`, etag: r.etag, lastModified: r.lastModified, hash };
   }
   const creds = credsOf(p);
   const acc = await xtreamAccount(creds, log);
@@ -503,19 +523,23 @@ export function refreshProvider(id: string): Promise<void> {
     p.refresh = { ...p.refresh, state: 'running', error: undefined };
     changed();
     try {
-      const r = await fetchChannels(p);
-      const l: CachedList = { at: Date.now(), channels: r.channels, epgUrls: r.epgUrls };
+      const prev = listOf(p);
+      const r = await fetchChannels(p, prev);
+      const l: CachedList = { at: Date.now(), channels: r.channels, epgUrls: r.epgUrls, etag: r.etag, lastModified: r.lastModified, hash: r.hash };
       saveList(p, l);
-      const groups = countGroups(r.channels);
+      const groups = r.unchanged && prev ? p.refresh.groups || countGroups(r.channels) : countGroups(r.channels);
       p.refresh = { state: 'ok', at: Date.now(), channels: r.channels.length, groups, ms: Date.now() - t0 };
       if (r.account) p.account = r.account;
       p.epgSource = epgSourceOf(p, l);
       log(`${p.name}: ${r.message}, ${groups} groups, ${Date.now() - t0} ms`);
-      changed(true);
-      void ensureEpg(p, true).catch(() => undefined);
+      // an unchanged list keeps its channelsRev: no page re-downloads the (large) channel list
+      changed(!r.unchanged);
+      if (!r.unchanged) void ensureEpg(p, true).catch(() => undefined);
     } catch (e) {
-      const err = e as Error;
-      p.refresh = { ...p.refresh, state: 'error', at: Date.now(), error: redactUrl(err.message, secretStrings(p)), ms: Date.now() - t0 };
+      const err = e as Error & { code?: string };
+      // never a blank reason (seen in the log: "refresh failed:" with nothing after it)
+      const reason = err?.message || err?.code || err?.name || String(e) || 'unknown error';
+      p.refresh = { ...p.refresh, state: 'error', at: Date.now(), error: redactUrl(reason, secretStrings(p)), ms: Date.now() - t0 };
       log(`${p.name}: refresh failed: ${p.refresh.error}`);
       changed();
     }
@@ -534,9 +558,20 @@ export function refreshProvider(id: string): Promise<void> {
  * eight lists refreshing together (20 s of parsing on the free VM) starved the recorder that was
  * starting for them, and the channel "did not play".
  */
+let pressureNotedAt = 0;
 function keepFresh(): void {
   if (running.size) return;
   if (tuning.size || recorderStarting()) return deferFresh();
+  // A starved machine (deep in swap, timers late) refreshes nothing: the lists it has are fine for
+  // hours more, and a fetch + parse now would only stall the pages further. Checked again later.
+  const pressure = pressureReason();
+  if (pressure) {
+    if (Date.now() - pressureNotedAt > 10 * 60_000) {
+      pressureNotedAt = Date.now();
+      log(`channel lists not refreshed while the server is under pressure (${pressure})`);
+    }
+    return deferFresh(5 * 60_000);
+  }
   for (const p of load().providers) {
     if (!p.enabled || p.refresh.state === 'running') continue;
     const l = listOf(p);
@@ -552,12 +587,12 @@ function keepFresh(): void {
   }
 }
 let freshRetry: NodeJS.Timeout | undefined;
-function deferFresh(): void {
+function deferFresh(ms = 20_000): void {
   if (freshRetry) return;
   freshRetry = setTimeout(() => {
     freshRetry = undefined;
     keepFresh();
-  }, 20_000);
+  }, ms);
   freshRetry.unref?.();
 }
 const freshTimer = setInterval(keepFresh, 30 * 60_000);
@@ -898,6 +933,20 @@ export function setPrefs(patch: LiveTvPrefsPatch): LiveTvPrefs {
 }
 
 export const liveTvStats = (): Record<string, unknown> => ({ providers: load().providers.length, channels: [...lists.values()].reduce((n, l) => n + (l?.channels.length || 0), 0), refreshing: [...running.keys()], verdicts: verdicts.size, remux: remuxStats() });
+
+/** What Live TV is doing right now, in words (for /api/health's `busy`): list refreshes, channels being opened or recorded. */
+export function liveTvBusy(): string[] {
+  const out: string[] = [];
+  const f = load();
+  const names = [...running.keys()].map((id) => f.providers.find((p) => p.id === id)?.name || id);
+  if (names.length) out.push(`refreshing the channel list of ${names.join(', ')}`);
+  const epg = f.providers.filter((p) => p.epg.state === 'running').map((p) => p.name);
+  if (epg.length) out.push(`loading the programme guide of ${epg.join(', ')}`);
+  if (tuning.size) out.push(`opening ${tuning.size} live channel${tuning.size > 1 ? 's' : ''}`);
+  const rec = remuxStats().running;
+  if (rec) out.push(`recording ${rec} live channel${rec > 1 ? 's' : ''}`);
+  return out;
+}
 
 // ---------------------------------------------------------------- routes
 

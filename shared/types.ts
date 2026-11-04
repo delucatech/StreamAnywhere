@@ -132,6 +132,34 @@ export interface HealthResponse {
   resolver: string;
   proxyAllowedHosts: string[];
   uptimeSec: number;
+  /**
+   * How the machine is doing and what the server is busy with (the home screen and the Live TV
+   * page show it while they wait). Missing on an older build.
+   */
+  server?: ServerStatus;
+}
+
+export interface ServerStatus {
+  /** Memory available on the machine, and its total (MB) */
+  memoryMb: number;
+  memoryTotalMb: number;
+  /** Swap in use, and the swap size (MB; 0 when there is none) */
+  swapMb: number;
+  swapTotalMb: number;
+  /** The server process's resident memory (MB) */
+  rssMb: number;
+  /** One-minute load per CPU (above ~1.5 the machine is busy) */
+  load: number;
+  /** How late the server's timers ran at worst in the last ~30 s (ms): seconds mean a starved machine */
+  lagMs: number;
+  /** The machine is starved (little memory, deep in swap, timers late): everything takes longer */
+  pressure: boolean;
+  /** Why, in words, when `pressure` is set */
+  reason?: string;
+  /** What the server is doing right now, in words ("refreshing the channel list of IPTV-org – Kids") */
+  busy: string[];
+  /** The headless TikTok browser is running (it is the big memory user on the small VM) */
+  browser: boolean;
 }
 
 export interface ProbeRequest {

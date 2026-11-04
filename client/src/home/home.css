@@ -298,3 +298,54 @@ body {
     transition: none;
   }
 }
+
+/* the splash's line may run to two lines ("Opening Live TV… 6 s" + what the server says) */
+.zoom-label {
+  white-space: pre-line;
+  text-align: center;
+  max-width: min(560px, 86vw);
+}
+
+/*
+ * The status line at the top of the home screen: "Connecting to the server… 4 s", or what the
+ * server is busy with / short of, while that is the case. Hidden while all is well.
+ */
+.server-status {
+  position: fixed;
+  left: 50%;
+  top: calc(var(--safe-t) + 10px);
+  transform: translateX(-50%);
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  max-width: min(720px, 92vw);
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: rgba(10, 14, 32, 0.72);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.3);
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+}
+.server-status.hidden {
+  display: none;
+}
+.server-spinner {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  animation: zoom-spin 0.8s linear infinite;
+  display: none;
+}
+.server-status.spin .server-spinner {
+  display: block;
+}

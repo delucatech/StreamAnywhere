@@ -19,7 +19,7 @@ import { logStream, recentLog } from './logbuf';
 import { defaultExpiry, mediaCount, registerMedia } from './mediaStore';
 import { hostAllowed } from './ssrf';
 import { EXPLORE_DEFAULT_CATEGORY, FeedError, fetchExploreFeed, normalizeExploreOptions, type ExploreResult } from './feed';
-import { cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouCheap, forYouPutBack, forYouQuick, forYouStock, forYouWarm, logout, rememberLog, workState, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
+import { cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouCheap, forYouPutBack, forYouQuick, forYouStock, forYouWarm, headlessRunning, logout, rememberLog, workState, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
 import { Reservoir, type ReservoirStats } from './reservoir';
 import { hasBatch, reviveItems, slimItems } from './lastBatch';
 import { invalidateJobs, jobStats, sharedJob } from './jobs';
@@ -30,7 +30,8 @@ import { exploreInstagram, forYouInstagram, instagramCategory, instagramStats, I
 import { instagramCancelLogin, instagramLogout, instagramMaySignIn, instagramSessionLog, ensureInstagramSession, instagramSessionLost, instagramSessionStatus, instagramSignedIn, instagramStartLogin, InstagramSessionError, setInstagramSessionLogger, shutdownInstagramSession } from './instagramSession';
 import { setYouTubeSessionLogger, shutdownYouTubeSession, youtubeCancelLogin, youtubeCookieFile, youtubeLogout, youtubeSessionLog, youtubeSessionLost, youtubeSessionStatus, youtubeStartLogin, YouTubeSessionError } from './youtubeSession';
 import { exploreFacebook, facebookCategory, facebookStats, FacebookError, forYouFacebook, isFacebookUrl, profileFacebook, resolveFacebook, searchFacebook, setFacebookLogger } from './facebook';
-import { flushLiveTv, liveTvStats, registerLiveTv, setLiveTvLogger } from './livetv';
+import { flushLiveTv, liveTvBusy, liveTvStats, registerLiveTv, setLiveTvLogger } from './livetv';
+import { serverPressure } from './pressure';
 import { ensureFacebookSession, facebookCancelLogin, facebookLogout, facebookMaySignIn, facebookSessionLog, facebookSessionLost, facebookSessionStatus, facebookSignedIn, facebookStartLogin, FacebookSessionError, setFacebookSessionLogger, shutdownFacebookSession } from './facebookSession';
 
 /** After the browser path rescued an explore request, prefer it for a while (datacenter IPs). */
@@ -41,21 +42,23 @@ const EXPLORE_VIA_BROWSER_ENV = /^(1|true|yes)$/i.test(process.env.EXPLORE_VIA_B
  * One Explore batch from TikTok: the plain request first, the headless browser as rescue (and
  * preferred for 15 min after a rescue, since datacenter IPs get refused by the plain request).
  */
-async function fetchExploreAny(category: number, count: number, log: (m: string) => void, warn: (err: string, msg: string) => void): Promise<ExploreResult> {
+async function fetchExploreAny(category: number, count: number, log: (m: string) => void, warn: (err: string, msg: string) => void, idle = false): Promise<ExploreResult> {
   const browserOk = sessionSupported().ok;
+  // an idle top-up (nobody watching) never starts the headless browser: the plain request, or nothing
+  const viaBrowser = { noLaunch: idle };
   if (browserOk && (EXPLORE_VIA_BROWSER_ENV || Date.now() < exploreViaBrowserUntil)) {
     try {
-      return await fetchExploreViaBrowser(category, count, log);
+      return await fetchExploreViaBrowser(category, count, log, viaBrowser);
     } catch (e) {
-      warn((e as Error).message, 'explore via browser failed; trying the direct request');
+      if (!idle) warn((e as Error).message, 'explore via browser failed; trying the direct request');
     }
   }
   try {
     return await fetchExploreFeed({ category, count, log });
   } catch (e) {
     if (!browserOk) throw e;
-    warn((e as Error).message, 'direct explore request failed; trying through the headless browser');
-    const r = await fetchExploreViaBrowser(category, count, log);
+    if (!idle) warn((e as Error).message, 'direct explore request failed; trying through the headless browser');
+    const r = await fetchExploreViaBrowser(category, count, log, viaBrowser);
     r.warnings.push('direct explore request was blocked; served through the headless browser');
     exploreViaBrowserUntil = Date.now() + 15 * 60 * 1000;
     return r;
@@ -76,7 +79,7 @@ function exploreReservoir(category: number, log: (m: string) => void, warn: (err
   if (!r) {
     r = new Reservoir(
       `explore ${category}`,
-      ({ count, index, lastAdded }) => {
+      ({ count, index, lastAdded, idle }) => {
         const n = Math.max(12, count - (index % 8));
         let cat = category;
         if (category === EXPLORE_DEFAULT_CATEGORY && lastAdded !== undefined && lastAdded < 5) {
@@ -84,7 +87,7 @@ function exploreReservoir(category: number, log: (m: string) => void, warn: (err
           cat = others[index % others.length].id;
           log(`explore ${category}: pool dry (${lastAdded} new last time), borrowing from category ${cat}`);
         }
-        return fetchExploreAny(cat, n, log, warn);
+        return fetchExploreAny(cat, n, log, warn, idle);
       },
       // Kept stocked around the clock once used (one call an hour: TikTok's play URLs last about an
       // hour), so the first open of the day is answered from the stock, not after TikTok.
@@ -286,16 +289,37 @@ export async function buildServer() {
   setLibraryLogger((m) => app.log.info({ what: 'library' }, m));
   setLiveTvLogger((m) => app.log.info({ what: 'livetv' }, m));
 
-  app.get('/api/health', async (): Promise<HealthResponse> => ({
-    ok: true,
-    node: process.version,
-    ytdlp: await detectYtDlp(),
-    ytdlpDaemon: daemonStatus(),
-    ffmpeg: await detectFfmpeg(),
-    resolver: config.resolver,
-    proxyAllowedHosts: config.proxyAllowedHosts,
-    uptimeSec: Math.round(process.uptime()),
-  }));
+  /** What the server is doing right now, in words, for the pages' "the server is busy: …" lines. */
+  const serverBusy = (): string[] => {
+    const out: string[] = [...liveTvBusy()];
+    const w = workState();
+    if (w.busy) out.push(`TikTok browser: ${w.op}${w.waiting ? ` (+${w.waiting} waiting)` : ''}`);
+    if (forYouStock().pumping) out.push('loading the TikTok For You feed');
+    for (const [cat, st] of Object.entries(exploreStock())) if (st.filling) out.push(`topping up TikTok Explore ${cat}`);
+    if (instagramStats().browser) out.push('the Instagram browser is open');
+    const dl = downloaderStats();
+    if (dl.running) out.push(`${dl.running} download${dl.running > 1 ? 's' : ''} running`);
+    const im = importStats();
+    if (im.running) out.push(`importing ${im.running} file${im.running > 1 ? 's' : ''} to the library`);
+    const lookups = (jobStats() as { inFlight?: unknown[] }).inFlight?.length || 0;
+    if (lookups) out.push(`${lookups} video lookup${lookups > 1 ? 's' : ''}`);
+    return out;
+  };
+
+  app.get('/api/health', async (): Promise<HealthResponse> => {
+    const p = serverPressure();
+    return {
+      ok: true,
+      node: process.version,
+      ytdlp: await detectYtDlp(),
+      ytdlpDaemon: daemonStatus(),
+      ffmpeg: await detectFfmpeg(),
+      resolver: config.resolver,
+      proxyAllowedHosts: config.proxyAllowedHosts,
+      uptimeSec: Math.round(process.uptime()),
+      server: { memoryMb: p.availableMb, memoryTotalMb: p.totalMb, swapMb: p.swapUsedMb, swapTotalMb: p.swapTotalMb, rssMb: p.rssMb, load: p.load, lagMs: p.lagMs, pressure: p.pressure, reason: p.reason, busy: serverBusy(), browser: headlessRunning() },
+    };
+  });
 
   app.post<{ Body: ResolveRequest }>('/api/resolve', resolveLimit, async (req, reply) => {
     const body = req.body || ({} as ResolveRequest);

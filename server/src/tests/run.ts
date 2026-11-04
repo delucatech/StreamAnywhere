@@ -35,7 +35,9 @@ import type { FeedResponse } from '../../../shared/types';
 import { openUpstream } from '../http';
 import { daemonStatus, detectYtDlp, shutdownYtDlp, ytdlpInfo } from '../ytdlp';
 import type { LiveTvTry, ResolveResponse } from '../../../shared/types';
-import { parseAttrs, parseM3u, cleanChannelName, channelNameKey, countGroups, mergeChannels, qualityOf, splitGroups } from '../livetvM3u';
+import { parseAttrs, parseM3u, parseM3uAsync, cleanChannelName, channelNameKey, countGroups, mergeChannels, qualityOf, splitGroups } from '../livetvM3u';
+import { serverPressure } from '../pressure';
+import { isParkedError } from '../reservoir';
 import { XmltvScanner, nowNext, parseXmltvTime, resolveGuideId } from '../livetvEpg';
 import { decryptJson, decryptText, encryptJson, encryptText, useEphemeralLiveTvKey } from '../livetvCrypto';
 import { redactUrl } from '../livetvHttp';
@@ -81,6 +83,24 @@ not-a-url
   check('channels, guide url, skipped line', pl.channels.length === 5 && pl.epgUrls[0] === 'https://g.example/epg.xml.gz' && pl.skipped === 1, { n: pl.channels.length, epg: pl.epgUrls, skipped: pl.skipped });
   check('attributes, name, logo, number', pl.channels[0].epgId === 'CNN.us@SD' && pl.channels[0].logo === 'https://l.example/cnn.png' && pl.channels[0].group === 'News' && pl.channels[0].name === 'CNN (720p) [Geo-blocked]' && pl.channels[1].number === 12, pl.channels[0]);
   check('same id + name twice -> two distinct stable ids', pl.channels[0].id !== pl.channels[1].id && pl.channels[0].id === parseM3u(m3u).channels[0].id);
+  {
+    // the yielding parser gives the very same result, chunk boundaries anywhere (also inside a channel's lines)
+    const big = m3u.repeat(40);
+    const sync = parseM3u(big);
+    const a = await parseM3uAsync(big, 3);
+    const b = await parseM3uAsync(big, 1500);
+    check('parseM3uAsync == parseM3u (chunk of 3 lines and of 1500)', JSON.stringify(a) === JSON.stringify(sync) && JSON.stringify(b) === JSON.stringify(sync) && sync.channels.length === 200, { n: a.channels.length, skipped: a.skipped });
+    let ticks = 0;
+    const t = setInterval(() => ticks++, 0);
+    await parseM3uAsync(m3u.repeat(400), 100);
+    clearInterval(t);
+    check('parseM3uAsync lets the event loop run between chunks', ticks > 5, { ticks });
+  }
+  {
+    const p = serverPressure();
+    check('server pressure: memory, load and lag figures', p.totalMb > 0 && p.availableMb >= 0 && p.availableMb <= p.totalMb + 1 && p.cpus >= 1 && p.lagMs >= 0 && typeof p.pressure === 'boolean', { ...p });
+    check('a parked error is told apart from a failure', isParkedError(Object.assign(new Error('x'), { parked: true })) && !isParkedError(new Error('x')) && !isParkedError(undefined));
+  }
   check('VLC options become request headers', pl.channels[2].headers?.['user-agent'] === 'VLC/3' && pl.channels[2].headers?.referer === 'https://r.example/', pl.channels[2].headers);
   check('a comma inside a quoted group stays; the name keeps its comma', pl.channels[2].group === 'Sports, Live' && pl.channels[2].name === 'Sports, the channel', { g: pl.channels[2].group, n: pl.channels[2].name });
   check('license props mark DRM; #EXTGRP groups', pl.channels[3].drm === true && pl.channels[4].group === 'Radio');

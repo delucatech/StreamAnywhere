@@ -9,6 +9,7 @@
 import type { Platform, SessionStatus } from '../../../shared/types';
 import { api } from '../api';
 import { PLATFORMS, rememberApp, type PlatformDef, type ToolApp } from '../platforms';
+import { watchServer, type ServerWord } from '../serverStatus';
 
 // The pages and their scripts come from this device from the second visit on (public/sw.js).
 if ('serviceWorker' in navigator && window.isSecureContext) {
@@ -168,12 +169,34 @@ function open(app: App, tile: HTMLElement): void {
   // Still here long after the tap (the app's page never arrived): never hang on "Opening …".
   clearTimeout(stuckTimer);
   stuckTimer = window.setTimeout(() => launchStuck(app), 15_000);
+  const since = Date.now();
+  window.clearInterval(launchTicker);
+  launchTicker = window.setInterval(() => tickLaunch(app, since), 1000);
+}
+
+/**
+ * The splash's line while the app's page is on its way: "Opening Live TV…", then with the seconds
+ * and what the server says it is doing once it takes more than a moment (the small VM is busy at
+ * times; a line that says so beats a spinner that looks frozen).
+ */
+let launchTicker = 0;
+function tickLaunch(app: App, since: number): void {
+  const sec = Math.round((Date.now() - since) / 1000);
+  const w = server.last();
+  let text = sec < 3 ? `Opening ${app.name}…` : `Opening ${app.name}… ${sec} s`;
+  if (sec >= 3) {
+    if (w.line) text += `\n${w.line}`;
+    else if (w.pendingMs && w.pendingMs > 3000) text += `\nThe server has not answered for ${Math.round(w.pendingMs / 1000)} s…`;
+    else if (!navigator.onLine) text += '\nYou are offline.';
+  }
+  zoomStatus.querySelector('.zoom-label')!.textContent = text;
 }
 
 /** The app's page has not replaced this one 15 s after the tap: say so, tap to try again, tell the server. */
 let stuckTimer = 0;
 function launchStuck(app: App): void {
-  zoomStatus.querySelector('.zoom-label')!.textContent = `Opening ${app.name} is taking too long. Tap to try again.`;
+  window.clearInterval(launchTicker);
+  zoomStatus.querySelector('.zoom-label')!.textContent = `Opening ${app.name} is taking too long. Tap to try again.${server.last().line ? `\n${server.last().line}` : ''}`;
   el.zoom.classList.add('stuck');
   el.zoom.onclick = () => location.assign(app.url);
   void api.report({
@@ -228,6 +251,7 @@ window.addEventListener('pageshow', (e) => {
   if (e.persisted) {
     opening = false;
     clearTimeout(stuckTimer);
+    window.clearInterval(launchTicker);
     el.zoom.onclick = null;
     el.screen.classList.remove('launching');
     el.zoom.classList.remove('waiting', 'stuck');
@@ -347,8 +371,57 @@ async function prefetchFeeds(): Promise<void> {
   }
 }
 
+/**
+ * The status line at the top: what is happening between this screen and the server, updated every
+ * second - "Connecting to the server… 4 s" until the first answer, then what the server is busy
+ * with or short of (from /api/health) while that is the case, nothing while all is well. Hidden
+ * once the server has answered and has nothing to report.
+ */
+const statusEl = document.createElement('div');
+statusEl.className = 'server-status hidden';
+statusEl.setAttribute('role', 'status');
+statusEl.innerHTML = '<span class="server-spinner" aria-hidden="true"></span><span class="server-text"></span>';
+document.body.appendChild(statusEl);
+const statusText = statusEl.querySelector<HTMLElement>('.server-text')!;
+const loadedAt = Date.now();
+let hideStatusAt = 0;
+function showServer(w: ServerWord): void {
+  const now = Date.now();
+  let text = '';
+  let spin = false;
+  if (w.answeredAgoMs === undefined) {
+    // nothing has answered yet: the seconds tick (only shown after a moment, so a quick start shows nothing)
+    const sec = Math.round((now - loadedAt) / 1000);
+    if (w.failed) text = w.line || 'The server did not answer.';
+    else if (sec >= 2) {
+      text = `Connecting to the server… ${sec} s`;
+      spin = true;
+    }
+  } else if (w.pendingMs && w.pendingMs > 4000) {
+    text = `The server is slow to answer (${Math.round(w.pendingMs / 1000)} s)…${w.line ? ` ${w.line}` : ''}`;
+    spin = true;
+  } else if (w.failed) text = w.line || 'The server did not answer.';
+  else if (w.line) {
+    text = w.line;
+    spin = Boolean(w.status?.busy.length);
+  } else if (w.tookMs !== undefined && w.tookMs > 3000 && w.answeredAgoMs < 10_000) text = `The server answered after ${Math.round(w.tookMs / 1000)} s; it may be busy.`;
+  if (text) {
+    hideStatusAt = 0;
+    statusText.textContent = text;
+    statusEl.classList.toggle('spin', spin);
+    statusEl.classList.remove('hidden');
+  } else if (!statusEl.classList.contains('hidden')) {
+    // leaves a moment after the last word, so a flicker of "busy" does not blink
+    if (!hideStatusAt) hideStatusAt = now + 1500;
+    else if (now >= hideStatusAt) statusEl.classList.add('hidden');
+  }
+}
+const server = watchServer(showServer, { everyMs: 10_000, timeoutMs: 8000 });
+
 playReturn();
 window.setTimeout(warmAppPage, 1200);
-window.setTimeout(() => void prefetchFeeds(), 2500);
+// the feeds' top-up starts the server's heavy work (TikTok's browser): not in the first seconds,
+// when the viewer is most likely about to tap an app that then competes with it
+window.setTimeout(() => void prefetchFeeds(), 12_000);
 void refreshBadges();
 window.setInterval(() => void refreshBadges(), 30_000);

@@ -33,7 +33,16 @@ export interface ReservoirFillContext {
   index: number;
   /** New items the previous fill brought (undefined before the first) */
   lastAdded?: number;
+  /**
+   * A keep-stocked fill while nobody is watching: the source may decline it cheaply (throw an
+   * error with `parked: true`) instead of starting something expensive - the headless browser on
+   * the 1 GB VM is closed when idle, and a top-up nobody waits for must not reopen it.
+   */
+  idle?: boolean;
 }
+
+/** An error a source throws to decline an idle fill without it counting as a failure */
+export const isParkedError = (e: unknown): boolean => Boolean((e as { parked?: boolean } | undefined)?.parked);
 
 export interface ReservoirOptions {
   /** How many items to keep ready */
@@ -316,6 +325,7 @@ export class Reservoir {
       this.prune();
       if (this.stock.length >= this.opt.low && (this.dryAt() ?? Infinity) - 4 * 60 * 1000 > this.opt.now()) return this.planKeep();
       this.opt.log?.(`${this.name}: ${this.stock.length} ready, topping up for the next viewer`);
+      this.idleFill = true;
       void this.fill(true);
     }, wait);
     // never keeps the process alive on its own (tests, shutdown)
@@ -365,11 +375,16 @@ export class Reservoir {
     return this.filling;
   }
 
+  /** The fill about to run is a keep-stocked one (nobody waiting); cleared by the fill */
+  private idleFill = false;
+
   private async fillOnce(): Promise<void> {
     this.lastFillAt = this.opt.now();
+    const idle = this.idleFill && !this.active();
+    this.idleFill = false;
     try {
       // Always a full batch: the source's cost per call is the same, and duplicates are dropped anyway.
-      const r = await this.fetch({ count: this.opt.batch, index: this.fillIndex++, lastAdded: this.lastAdded });
+      const r = await this.fetch({ count: this.opt.batch, index: this.fillIndex++, lastAdded: this.lastAdded, idle });
       const now = this.opt.now();
       let added = 0;
       let dupes = 0;
@@ -403,6 +418,12 @@ export class Reservoir {
       this.opt.log?.(`${this.name}: +${added} (${dupes} duplicates), ${this.stock.length} ready, ${this.recent.size} ids remembered`);
     } catch (e) {
       const now = this.opt.now();
+      if (isParkedError(e)) {
+        // the source declined an idle top-up (nothing started for nobody): not a failure, asked again much later
+        this.backoffUntil = now + 30 * 60_000;
+        this.opt.log?.(`${this.name}: idle top-up skipped (${(e as Error).message}); the next viewer's request fills it`);
+        throw e;
+      }
       this.failures++;
       this.lastAdded = 0;
       this.backoffUntil = now + Math.min(60_000, 3000 * 2 ** Math.min(this.failures - 1, 5));
