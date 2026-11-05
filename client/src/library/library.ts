@@ -557,7 +557,7 @@ function renderSheet(): void {
         <p class="sh-sub">${esc(sub)}</p>
         <p class="sh-link"><a href="${esc(e.url)}" target="_blank" rel="noopener noreferrer">Open on ${esc(s.name)}</a> · added ${esc(timeAgo(e.addedAt))}</p>
       </div>
-      <button type="button" class="sh-close" data-act="close" aria-label="Close">✕</button>`;
+      <button type="button" class="sh-close" data-act="close" aria-label="Close">×</button>`;
   }
   el.shBody.innerHTML =
     view.kind === 'options' ? optionsHtml(e, view) : view.kind === 'remove' ? removeHtml(e) : view.kind === 'menu' ? menuHtml(e) : view.kind === 'category' ? categoryHtml(e) : infoHtml(e);

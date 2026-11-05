@@ -130,7 +130,7 @@
       <div class="context hidden" id="context">
         <button id="contextBack" class="context-close" type="button" aria-label="Back to the list">←</button>
         <span id="contextLabel"></span>
-        <button id="contextClose" class="context-close" type="button" aria-label="Back to the feed">✕</button>
+        <button id="contextClose" class="context-close" type="button" aria-label="Back to the feed">×</button>
       </div>
 
       <!-- The stage. Phones: both wrappers are display: contents, so the feed fills the screen as before.
@@ -264,12 +264,12 @@
       <div id="search" class="panel hidden" role="dialog" aria-label="Search">
         <div class="panel-card">
           <form id="searchForm" class="panel-head" autocomplete="off">
-            <button id="searchClose" class="btn ghost icon-btn" type="button" aria-label="Close">✕</button>
+            <button id="searchClose" class="btn ghost icon-btn" type="button" aria-label="Close">×</button>
             <input id="searchInput" type="search" placeholder="Search videos and accounts" enterkeyhint="search" aria-label="Search" />
             <button id="searchGo" class="btn primary" type="submit">Search</button>
           </form>
           <!-- Earlier searches on this device: shown under the box while typing (filtered by what is typed);
-               a row searches again, its ✕ forgets it. Filled in by social.ts. -->
+               a row searches again, its × forgets it. Filled in by social.ts. -->
           <div id="searchHistory" class="search-history hidden" role="listbox" aria-label="Earlier searches"></div>
           <div id="searchStatus" class="panel-status hidden"></div>
           <div id="searchUsers" class="user-list"></div>
@@ -285,7 +285,7 @@
       <div id="profile" class="panel hidden" role="dialog" aria-label="Account">
         <div class="panel-card">
           <div class="panel-head">
-            <button id="profileClose" class="btn ghost icon-btn" type="button" aria-label="Close">✕</button>
+            <button id="profileClose" class="btn ghost icon-btn" type="button" aria-label="Close">×</button>
             <div id="profileHandle" class="panel-title">@…</div>
           </div>
           <div id="profileStatus" class="panel-status hidden"></div>
@@ -309,7 +309,7 @@
       <div id="inbox" class="panel hidden" role="dialog" aria-label="Messages">
         <div class="panel-card inbox-card">
           <div class="panel-head">
-            <button id="inboxClose" class="btn ghost icon-btn" type="button" aria-label="Close">✕</button>
+            <button id="inboxClose" class="btn ghost icon-btn" type="button" aria-label="Close">×</button>
             <button id="inboxBack" class="btn ghost icon-btn hidden" type="button" aria-label="Back to the list">←</button>
             <div id="inboxTitle" class="panel-title">Messages</div>
             <button id="inboxRefresh" class="btn ghost small" type="button">Refresh</button>

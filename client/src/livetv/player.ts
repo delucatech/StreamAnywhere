@@ -214,7 +214,7 @@ export class LiveTvPlayer {
         </div>
       </div>
       <aside class="th-guide" aria-label="Programme guide">
-        <div class="th-guide-head"><span>Guide</span><button type="button" class="sh-close th-guideclose" aria-label="Close guide">✕</button></div>
+        <div class="th-guide-head"><span>Guide</span><button type="button" class="sh-close th-guideclose" aria-label="Close guide">×</button></div>
         <div class="th-guide-list"></div>
       </aside>`;
     const q = <T extends HTMLElement>(sel: string): T => root.querySelector(sel) as T;

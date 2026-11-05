@@ -1038,7 +1038,7 @@ el.settingsBody.addEventListener('click', async (e) => {
         try {
           const r = await api.liveTvTest({ id: p.id });
           out.className = `prov-status ${r.ok ? '' : 'err'}`;
-          out.textContent = `${r.ok ? '✓' : '✕'} ${r.message} (${(r.elapsedMs / 1000).toFixed(1)} s)`;
+          out.textContent = `${r.ok ? '✓' : '×'} ${r.message} (${(r.elapsedMs / 1000).toFixed(1)} s)`;
         } catch (err) {
           out.className = 'prov-status err';
           out.textContent = errMsg(err);
@@ -1115,7 +1115,7 @@ function renderForm(): void {
     busy(btn, async () => {
       try {
         const r = await api.liveTvTest({ ...input(), id: p?.id, preset: p?.preset });
-        say(`${r.ok ? '✓' : '✕'} ${esc(r.message)} (${(r.elapsedMs / 1000).toFixed(1)} s)`, r.ok ? 'ok' : 'error');
+        say(`${r.ok ? '✓' : '×'} ${esc(r.message)} (${(r.elapsedMs / 1000).toFixed(1)} s)`, r.ok ? 'ok' : 'error');
       } catch (err) {
         say(esc(errMsg(err)), 'error');
       }

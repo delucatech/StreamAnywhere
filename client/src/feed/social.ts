@@ -7,7 +7,7 @@
  * or the account's videos, with the continuation) to the feed through SocialHost.play().
  *
  * Search remembers, per platform and on this device (localStorage): the phrases searched, shown
- * under the box while typing (filtered by what is typed) with a ✕ to forget one, and the results
+ * under the box while typing (filtered by what is typed) with a × to forget one, and the results
  * of the recent ones. A phrase searched again shows its earlier results at once and the fresh
  * search runs behind them (a status at the end of the list says so); fresh results then take over.
  */
@@ -30,6 +30,8 @@ export interface SocialHost {
   platform: PlatformDef;
   /** The signed-in account's follow state of an account became known (a profile opened, a follow pressed) */
   onFollowState?(user: string, state: FollowState): void;
+  /** The search or account panel closed (its list may be playing behind it) */
+  onPanelClosed?(kind: 'search' | 'profile'): void;
 }
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
@@ -103,6 +105,8 @@ function hide(panel: HTMLElement): void {
   open.splice(i, 1);
   panel.classList.add('hidden');
   if (!open.length) host.onPanelsChange(false);
+  if (panel === el.profile) host.onPanelClosed?.('profile');
+  else if (panel === el.search) host.onPanelClosed?.('search');
 }
 /** Closes the panel on top; false when none is open. */
 export function closeTopPanel(): boolean {
@@ -283,7 +287,7 @@ function renderHistory(typed: string): void {
     const x = document.createElement('button');
     x.type = 'button';
     x.className = 'history-del';
-    x.textContent = '✕';
+    x.textContent = '×';
     x.title = 'Forget this search';
     x.setAttribute('aria-label', `Forget “${h.q}”`);
     x.addEventListener('click', (e) => {

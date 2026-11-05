@@ -1139,6 +1139,8 @@ button {
   width: 32px;
   height: 32px;
   cursor: pointer;
+  font-size: 20px;
+  line-height: 1;
 }
 .act .ico.avatar {
   overflow: hidden;

@@ -433,7 +433,10 @@ async function setSource(src: FeedSource, announce = true): Promise<void> {
   await reload();
 }
 /** Plays a list from search or a profile (social.ts), starting at `startIndex`. */
+/** The feed a list interrupted (its videos and the one in view): restored when the list is left, no fetch */
+let sourceKeep: { items: FeedItem[]; index: number } | undefined;
 function playList(list: PlayList, startIndex: number): void {
+  if (state.mode.kind === 'source' && state.entries.length) sourceKeep = { items: state.entries.map((e) => e.item), index: Math.max(0, state.active) };
   state.mode = list;
   renderSourceUi();
   toast(list.kind === 'search' ? `Search: ${list.q}` : `Videos of @${list.user}`);
@@ -457,12 +460,26 @@ window.addEventListener('popstate', () => {
 });
 el.contextBack.addEventListener('click', backToPanel);
 el.contextLabel.addEventListener('click', backToPanel);
-el.contextClose.addEventListener('click', () => {
+/**
+ * Leaves a playing list for the feed it interrupted: the × of the list bar, and the close of the
+ * list's own panel (closing the account page while its videos play used to leave them playing
+ * under a bar whose × was a square on the car: the viewer was stuck on that account, 2026-11-05).
+ * The feed comes back where it was, from the kept items (their play URLs may have aged: a failure
+ * re-resolves once, as after a resume); a feed that was never there is fetched.
+ */
+function leaveList(): void {
   if (state.mode.kind === 'source') return;
   state.mode = { kind: 'source' };
   renderSourceUi();
-  void reload();
-});
+  const keep = sourceKeep;
+  sourceKeep = undefined;
+  if (keep?.items.length) {
+    void reload(keep.items, keep.index);
+    for (const e of state.entries) e.restored = true;
+    toast(prefs.source === 'foryou' ? P.tabs.foryou : P.tabs.explore);
+  } else void reload();
+}
+el.contextClose.addEventListener('click', leaveList);
 for (const b of el.tabs.querySelectorAll<HTMLButtonElement>('.tab')) b.textContent = b.dataset.source === 'foryou' ? P.tabs.foryou : P.tabs.explore;
 for (const c of P.categories) {
   const b = document.createElement('button');
@@ -580,6 +597,14 @@ initSocial({
   fmtCount,
   platform: P,
   onPanelsChange: syncOverlayPause,
+  onPanelClosed: (kind) => {
+    // a tap on a tile closes the panel and then starts its list (host.play): only a close that
+    // leaves the mode as it was means the viewer is done with the list
+    const was = state.mode;
+    setTimeout(() => {
+      if (state.mode === was && was.kind === kind) leaveList();
+    }, 0);
+  },
   onFollowState: (user, s) => {
     rememberFollowState(user, s);
     syncFollow(activeEntry());
