@@ -73,6 +73,7 @@ const el = {
   inboxBack: $<HTMLButtonElement>('inboxBack'),
   inboxTitle: $('inboxTitle'),
   inboxRefresh: $<HTMLButtonElement>('inboxRefresh'),
+  inboxCancel: $<HTMLButtonElement>('inboxCancel'),
   inboxStatus: $('inboxStatus'),
   inboxList: $('inboxList'),
   inboxThread: $('inboxThread'),
@@ -107,6 +108,7 @@ function hide(panel: HTMLElement): void {
   if (!open.length) host.onPanelsChange(false);
   if (panel === el.profile) host.onPanelClosed?.('profile');
   else if (panel === el.search) host.onPanelClosed?.('search');
+  else if (panel === el.inbox) cancelInboxRead(); // nobody waits for the messages any more: the server stops reading them
 }
 /** Closes the panel on top; false when none is open. */
 export function closeTopPanel(): boolean {
@@ -712,7 +714,47 @@ el.profileMessage.addEventListener('click', () => {
 
 // ---------------------------------------------------------------- inbox
 
-const inbox = { conversation: undefined as Conversation | undefined, threadId: '', busy: false };
+/**
+ * Reading the list or a thread takes a while (the server drives TikTok's messages page in its
+ * headless browser), so every read can be cancelled: Cancel in the header, Back, closing the
+ * panel, or starting another read. The cancel aborts this browser's request AND tells the server
+ * (POST /api/inbox/cancel) to stop the page work, so the next read is not queued behind it.
+ * `seq` tells a stale answer (of a read that was replaced) from the current one.
+ */
+const inbox = { conversation: undefined as Conversation | undefined, threadId: '', busy: false, ctl: undefined as AbortController | undefined, seq: 0 };
+
+/** Header: Cancel while a read runs, Refresh otherwise. */
+function inboxBusy(busy: boolean): void {
+  inbox.busy = busy;
+  el.inboxRefresh.classList.toggle('hidden', busy);
+  el.inboxCancel.classList.toggle('hidden', !busy);
+}
+
+/** Starts a read: the previous one (if any) is cancelled first. Returns what the read checks itself against. */
+function beginRead(): { seq: number; signal: AbortSignal } {
+  cancelInboxRead();
+  const ctl = new AbortController();
+  inbox.ctl = ctl;
+  inboxBusy(true);
+  return { seq: ++inbox.seq, signal: ctl.signal };
+}
+/** The read is over (answered, failed or cancelled); only the current one touches the panel state. */
+function endRead(seq: number): boolean {
+  if (seq !== inbox.seq) return false;
+  inbox.ctl = undefined;
+  inboxBusy(false);
+  return true;
+}
+/** Stops the read in flight here and on the server; false when none runs. */
+function cancelInboxRead(): boolean {
+  const ctl = inbox.ctl;
+  if (!ctl) return false;
+  inbox.ctl = undefined;
+  inboxBusy(false);
+  ctl.abort();
+  void api.inboxCancel().catch((e) => console.warn('[inbox] cancel not delivered:', errMsg(e)));
+  return true;
+}
 
 function renderConversations(list: Conversation[]): void {
   el.inboxList.innerHTML = '';
@@ -779,34 +821,33 @@ function showList(): void {
 }
 
 async function loadInbox(): Promise<void> {
-  if (inbox.busy) return;
-  inbox.busy = true;
+  const { seq, signal } = beginRead();
   status(el.inboxStatus, 'Reading your messages… (the server opens TikTok’s inbox)');
   try {
-    const r = await api.inbox();
+    const r = await api.inbox(signal);
+    if (!endRead(seq)) return;
     renderConversations(r.conversations);
     status(el.inboxStatus, r.conversations.length ? '' : r.warnings[0] || 'No conversations', !r.conversations.length && !/no conversations/i.test(r.warnings[0] || ''));
     for (const w of r.warnings) console.warn('[inbox]', w);
   } catch (e) {
+    if (!endRead(seq) || signal.aborted) return; // replaced or cancelled: whoever did it set the status
     status(el.inboxStatus, `Messages could not be read: ${errMsg(e)}`, true);
-  } finally {
-    inbox.busy = false;
   }
 }
 
 async function openThread(id: string, title?: string): Promise<void> {
-  if (inbox.busy) return;
-  inbox.busy = true;
+  const { seq, signal } = beginRead();
   inbox.threadId = id;
   el.inboxTitle.textContent = title || id.replace(/^\d+:/, '');
   el.inboxBack.classList.remove('hidden');
   el.inboxList.classList.add('hidden');
   el.inboxThread.classList.remove('hidden');
   el.inboxMessages.innerHTML = '';
+  el.inboxForm.classList.add('hidden');
   status(el.inboxStatus, 'Opening the conversation…');
   try {
-    const r = await api.inboxOpen(id);
-    if (inbox.threadId !== id) return;
+    const r = await api.inboxOpen(id, signal);
+    if (!endRead(seq) || inbox.threadId !== id) return;
     inbox.conversation = r.conversation;
     inbox.threadId = r.conversation.id || id;
     el.inboxTitle.textContent = r.conversation.title || title || id;
@@ -816,9 +857,8 @@ async function openThread(id: string, title?: string): Promise<void> {
     for (const w of r.warnings) console.warn('[inbox]', w);
     if (r.canSend) el.inboxText.focus();
   } catch (e) {
+    if (!endRead(seq) || signal.aborted) return;
     status(el.inboxStatus, `Could not open the conversation: ${errMsg(e)}`, true);
-  } finally {
-    inbox.busy = false;
   }
 }
 
@@ -838,10 +878,14 @@ export async function openInbox(threadId?: string): Promise<void> {
 
 el.inboxClose.addEventListener('click', () => hide(el.inbox));
 el.inboxBack.addEventListener('click', () => {
+  cancelInboxRead();
   showList();
   void loadInbox();
 });
-el.inboxRefresh.addEventListener('click', () => pressed(el.inboxRefresh, () => (inbox.threadId ? openThread(inbox.threadId, inbox.conversation?.title) : loadInbox()), { label: 'Refreshing' }));
+el.inboxRefresh.addEventListener('click', () => void (inbox.threadId ? openThread(inbox.threadId, inbox.conversation?.title) : loadInbox()));
+el.inboxCancel.addEventListener('click', () => {
+  if (cancelInboxRead()) status(el.inboxStatus, inbox.threadId ? 'Stopped. Refresh opens the conversation again.' : 'Stopped. Refresh reads your messages again.');
+});
 el.inboxForm.addEventListener('submit', (e) => {
   e.preventDefault();
   const text = el.inboxText.value.trim();

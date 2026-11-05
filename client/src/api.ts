@@ -1,4 +1,4 @@
-import type { LiveTvChannelGuideResponse, LiveTvChannelsResponse, LiveTvCodec, LiveTvGuideNowResponse, LiveTvHealthReport, LiveTvPrefs, LiveTvPrefsPatch, LiveTvPreset, LiveTvWindow, LiveTvProvider, LiveTvProviderInput, LiveTvState, LiveTvTestRequest, LiveTvTestResponse, LiveTvTuneResponse, LiveTvTuneStatus, ConversationResponse, DownloadJob, DownloadProbeResponse, DownloadSource, FeedProgress, LibraryCategory, LibraryEntry, LibraryEntryPatch, LibraryOptionsResponse, LibrarySaveHint, LibrarySaveResponse, LibraryState, FeedRequest, FeedResponse, FollowRequest, FollowResponse, HealthResponse, InboxResponse, LoginMode, Platform, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SendMessageResponse, ServerProbe, SessionInputRequest, SessionStatus } from '../../shared/types';
+import type { LiveTvChannelGuideResponse, LiveTvChannelsResponse, LiveTvCodec, LiveTvGuideNowResponse, LiveTvHealthReport, LiveTvPrefs, LiveTvPrefsPatch, LiveTvPreset, LiveTvWindow, LiveTvProvider, LiveTvProviderInput, LiveTvState, LiveTvTestRequest, LiveTvTestResponse, LiveTvTuneResponse, LiveTvTuneStatus, ConversationResponse, DownloadJob, DownloadProbeResponse, DownloadSource, FeedProgress, LibraryCategory, LibraryEntry, LibraryEntryPatch, LibraryOptionsResponse, LibrarySaveHint, LibrarySaveResponse, LibraryState, FeedRequest, FeedResponse, FollowRequest, FollowResponse, HealthResponse, InboxCancelResponse, InboxResponse, LoginMode, Platform, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SendMessageResponse, ServerProbe, SessionInputRequest, SessionStatus } from '../../shared/types';
 
 /**
  * API base URL. Empty = same origin (dev server proxy or SERVE_CLIENT deployments). When the
@@ -53,20 +53,47 @@ function toLoginOn401(res: Response, body?: unknown): void {
   if (res.status === 401 && !apiBase && (body === undefined || typeof login === 'string')) location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search);
 }
 
-/** `timeoutMs`: give up (ApiError 504) when the answer takes longer, the body included. */
-async function post<T>(path: string, body: unknown, timeoutMs?: number): Promise<T> {
-  const ctl = timeoutMs ? new AbortController() : undefined;
-  const timer = ctl ? window.setTimeout(() => ctl.abort(), timeoutMs) : undefined;
+/** The caller gave up (ApiError 499): the fetch was aborted through the `signal` it passed. */
+export const CANCELLED = 499;
+export const isCancelled = (e: unknown): boolean => e instanceof ApiError && e.status === CANCELLED;
+
+/**
+ * One AbortController for a request: fires on `timeoutMs` and when the caller's `signal` aborts
+ * (AbortSignal.any is too new for the car's browser). Undefined when neither is wanted.
+ */
+function requestAbort(timeoutMs?: number, signal?: AbortSignal): { ctl: AbortController; timer?: number; done: () => void } | undefined {
+  if (!timeoutMs && !signal) return undefined;
+  const ctl = new AbortController();
+  const timer = timeoutMs ? window.setTimeout(() => ctl.abort(), timeoutMs) : undefined;
+  const onAbort = (): void => ctl.abort();
+  if (signal?.aborted) ctl.abort();
+  else signal?.addEventListener('abort', onAbort, { once: true });
+  return {
+    ctl,
+    timer,
+    done: () => {
+      window.clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    },
+  };
+}
+/** What an aborted fetch means: the caller's cancel (499) or the time limit (504). */
+const abortedError = (signal: AbortSignal | undefined, timeoutMs: number | undefined): ApiError =>
+  signal?.aborted ? new ApiError('Cancelled', CANCELLED) : new ApiError(`no answer from the server in ${Math.round((timeoutMs || 0) / 1000)} s`, 504);
+
+/** `timeoutMs`: give up (ApiError 504) when the answer takes longer, the body included. `signal`: the caller's cancel (ApiError 499). */
+async function post<T>(path: string, body: unknown, timeoutMs?: number, signal?: AbortSignal): Promise<T> {
+  const ab = requestAbort(timeoutMs, signal);
   let res: Response;
   let text: string;
   try {
-    res = await fetch(apiUrl(path), { method: 'POST', mode: 'cors', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: ctl?.signal });
+    res = await fetch(apiUrl(path), { method: 'POST', mode: 'cors', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: ab?.ctl.signal });
     text = await res.text();
   } catch (e) {
-    if (ctl?.signal.aborted) throw new ApiError(`no answer from the server in ${Math.round(timeoutMs! / 1000)} s`, 504);
+    if (ab?.ctl.signal.aborted) throw abortedError(signal, timeoutMs);
     throw e;
   } finally {
-    window.clearTimeout(timer);
+    ab?.done();
   }
   let json: unknown;
   try {
@@ -83,17 +110,16 @@ async function post<T>(path: string, body: unknown, timeoutMs?: number): Promise
 }
 
 /** GET JSON (same conventions as post: the site's 401 goes to the login page, errors carry the server's message). */
-async function getJson<T>(path: string, timeoutMs?: number): Promise<T> {
-  const ctl = timeoutMs ? new AbortController() : undefined;
-  const timer = ctl ? window.setTimeout(() => ctl.abort(), timeoutMs) : undefined;
+async function getJson<T>(path: string, timeoutMs?: number, signal?: AbortSignal): Promise<T> {
+  const ab = requestAbort(timeoutMs, signal);
   let res: Response;
   try {
-    res = await fetch(apiUrl(path), { mode: 'cors', credentials: 'same-origin', cache: 'no-store', signal: ctl?.signal });
+    res = await fetch(apiUrl(path), { mode: 'cors', credentials: 'same-origin', cache: 'no-store', signal: ab?.ctl.signal });
   } catch (e) {
-    if (ctl?.signal.aborted) throw new ApiError(`no answer from the server in ${Math.round(timeoutMs! / 1000)} s`, 504);
+    if (ab?.ctl.signal.aborted) throw abortedError(signal, timeoutMs);
     throw e;
   } finally {
-    window.clearTimeout(timer);
+    ab?.done();
   }
   toLoginOn401(res);
   const json = await res.json().catch(() => undefined);
@@ -144,13 +170,10 @@ export const api = {
   search: (req: SearchRequest): Promise<SearchResponse> => post('/api/search', req),
   profile: (req: ProfileRequest): Promise<ProfileResponse> => post('/api/profile', req),
   follow: (req: FollowRequest): Promise<FollowResponse> => post('/api/follow', req),
-  inbox: async (): Promise<InboxResponse> => {
-    const res = await fetch(apiUrl('/api/inbox'), { mode: 'cors', credentials: 'same-origin' });
-    toLoginOn401(res);
-    const json = await res.json().catch(() => undefined);
-    if (!res.ok) throw new ApiError((json as { error?: string })?.error || `inbox ${res.status}`, res.status, json);
-    return json as InboxResponse;
-  },
+  /** The conversation list; `signal` cancels the read (ApiError 499). Pair it with inboxCancel so the server's work stops as well. */
+  inbox: (signal?: AbortSignal): Promise<InboxResponse> => getJson('/api/inbox', undefined, signal),
+  /** Stops the server's messages reads in flight (the headless page's work), so the next request is not queued behind them. */
+  inboxCancel: (): Promise<InboxCancelResponse> => post('/api/inbox/cancel', {}, 10_000),
   // Video Downloader (download.html)
   downloadSources: async (): Promise<{ sources: { id: DownloadSource; name: string; enabled: boolean }[]; maxBytes: number; ffmpeg: boolean; ytdlp: boolean }> => {
     const res = await fetch(apiUrl('/api/download/sources'), { mode: 'cors', credentials: 'same-origin' });
@@ -168,7 +191,7 @@ export const api = {
     return json as DownloadJob;
   },
   downloadCancel: (jobId: string): Promise<DownloadJob> => post(`/api/download/jobs/${jobId}/cancel`, {}),
-  inboxOpen: (id: string): Promise<ConversationResponse> => post('/api/inbox/open', { id }),
+  inboxOpen: (id: string, signal?: AbortSignal): Promise<ConversationResponse> => post('/api/inbox/open', { id }, undefined, signal),
   inboxSend: (req: SendMessageRequest): Promise<SendMessageResponse> => post('/api/inbox/send', req),
   // Video Library (library.html)
   /** The whole library, or { rev, unchanged: true } when nothing changed since `rev` */

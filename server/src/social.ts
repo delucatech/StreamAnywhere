@@ -25,6 +25,9 @@
  *  - messages: /messages needs the signed-in session (guest = redirect to /login). Read and sent
  *              through the page's DOM; the selectors are best-effort and /api/inbox/debug shows
  *              what the page actually contains, for tuning on the deployed server.
+ *              A read can be cancelled (the viewer closed the panel, pressed Cancel, or its
+ *              request dropped): the page's load is stopped and the work page is released at
+ *              once, so the next request is not queued behind a read nobody waits for.
  */
 import type { Page } from 'puppeteer-core';
 import type { ChatMessage, Conversation, ConversationResponse, FeedItem, FollowResponse, FollowState, InboxResponse, ProfileResponse, SearchResponse, SendMessageResponse, UserSummary } from '../../shared/types';
@@ -34,7 +37,20 @@ import { ytdlpInfo } from './ytdlp';
 
 const TT = 'https://www.tiktok.com';
 const MESSAGES_URL = `${TT}/messages?lang=en`;
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+/** Resolves after `ms`, or rejects with CancelledError as soon as `signal` aborts. */
+export const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
+  new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new CancelledError());
+    const onAbort = (): void => {
+      clearTimeout(t);
+      reject(new CancelledError());
+    };
+    const t = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 const num = (v: unknown): number | undefined => {
   const n = typeof v === 'string' ? Number(v) : (v as number);
   return Number.isFinite(n) ? n : undefined;
@@ -43,6 +59,69 @@ const num = (v: unknown): number | undefined => {
 export class SocialError extends Error {
   constructor(message: string, public readonly status = 502) {
     super(message);
+  }
+}
+
+/** The caller gave up on the read (panel closed, Cancel pressed, request dropped). 499 like nginx's "client closed request". */
+export class CancelledError extends SocialError {
+  readonly cancelled = true;
+  constructor() {
+    super('Cancelled', 499);
+  }
+}
+export const isCancelled = (e: unknown): boolean => e instanceof CancelledError || (e as { cancelled?: boolean })?.cancelled === true;
+
+function throwIfCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new CancelledError();
+}
+
+/**
+ * Page work (a goto, a long evaluate) that the cancel can interrupt: on abort the page's load is
+ * stopped (window.stop, so TikTok's scripts do not keep the tab busy) and the caller gets
+ * CancelledError at once; the puppeteer promise is left to settle on its own (a stopped
+ * navigation rejects, which is swallowed).
+ */
+function cancellable<T>(page: Page, work: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return work;
+  if (signal.aborted) {
+    work.catch(() => undefined);
+    return Promise.reject(new CancelledError());
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      work.catch(() => undefined);
+      page.evaluate('window.stop()').catch(() => undefined);
+      reject(new CancelledError());
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
+}
+
+/**
+ * The messages reads in flight or waiting for the work page, so POST /api/inbox/cancel can stop
+ * them all (the viewer's own request is usually gone already; this reaches the headless work).
+ */
+const reads = new Set<AbortController>();
+export const inboxReadsInFlight = (): number => reads.size;
+export function cancelInboxReads(): number {
+  const n = reads.size;
+  for (const c of reads) c.abort();
+  reads.clear();
+  return n;
+}
+/** Runs a read registered for cancelInboxReads, cancelled as well when the request's own `signal` aborts. */
+export async function tracked<T>(signal: AbortSignal | undefined, fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const ctl = new AbortController();
+  const onAbort = (): void => ctl.abort();
+  if (signal?.aborted) ctl.abort();
+  else signal?.addEventListener('abort', onAbort, { once: true });
+  reads.add(ctl);
+  try {
+    return await fn(ctl.signal);
+  } finally {
+    reads.delete(ctl);
+    signal?.removeEventListener('abort', onAbort);
   }
 }
 
@@ -335,12 +414,12 @@ function absorbProfile(p: ProfileState): void {
   }
 }
 
-async function openProfile(page: Page, user: string, log: (m: string) => void): Promise<ProfileState> {
+async function openProfile(page: Page, user: string, log: (m: string) => void, signal?: AbortSignal): Promise<ProfileState> {
   if (profile && sameUser(profile.user, user) && onProfilePage(page, user)) return profile;
   captured = [];
   profile = { user, items: [], ids: new Set(), hasMore: true, cookieHeader: '' };
   log(`profile @${user}: opening the page`);
-  await page.goto(`${TT}/@${encodeURIComponent(user)}`, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+  await cancellable(page, page.goto(`${TT}/@${encodeURIComponent(user)}`, { waitUntil: 'domcontentloaded', timeout: 45_000 }), signal);
   profile.cookieHeader = await pageCookieHeader(page);
   return profile;
 }
@@ -557,79 +636,93 @@ interface RawMessage {
 const convId = (c: RawConversation): string => `${c.index}:${c.title}`;
 const toConversation = (c: RawConversation): Conversation => ({ id: convId(c), title: c.title, avatar: c.avatar, preview: c.preview || undefined, time: c.time || undefined, unread: c.unread });
 
-async function gotoMessages(page: Page, log: (m: string) => void): Promise<void> {
+async function gotoMessages(page: Page, log: (m: string) => void, signal?: AbortSignal): Promise<void> {
+  throwIfCancelled(signal);
   if (page.url().startsWith(`${TT}/messages`)) return;
   log('messages: opening /messages');
-  await page.goto(MESSAGES_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+  await cancellable(page, page.goto(MESSAGES_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 }), signal);
   if (/\/login/.test(page.url())) throw new SocialError('TikTok sent the messages page to its login: the session is no longer valid. Sign in again (Profile).', 401);
 }
 
-async function readConversations(page: Page, waitMs: number): Promise<RawConversation[]> {
+async function readConversations(page: Page, waitMs: number, signal?: AbortSignal): Promise<RawConversation[]> {
   const until = Date.now() + waitMs;
   let list: RawConversation[] = [];
   while (Date.now() < until) {
+    throwIfCancelled(signal);
     list = ((await page.evaluate(READ_CONVERSATIONS).catch(() => [])) as RawConversation[]).filter((c) => c.title);
     if (list.length) break;
-    await sleep(500);
+    await sleep(500, signal);
   }
   return list;
 }
 
-async function readMessages(page: Page, waitMs: number): Promise<RawMessage[]> {
+async function readMessages(page: Page, waitMs: number, signal?: AbortSignal): Promise<RawMessage[]> {
   const until = Date.now() + waitMs;
   let list: RawMessage[] = [];
   while (Date.now() < until) {
+    throwIfCancelled(signal);
     list = ((await page.evaluate(READ_MESSAGES).catch(() => [])) as RawMessage[]).filter((m) => m.text || m.media || m.link);
     if (list.length) break;
-    await sleep(500);
+    await sleep(500, signal);
   }
   return list;
 }
 
 const toMessages = (raw: RawMessage[]): ChatMessage[] => raw.map((m) => ({ id: String(m.index), from: m.from, text: m.text || (m.media ? 'Shared video' : m.link ? 'Link' : ''), time: m.time, kind: m.media ? 'media' : m.text ? 'text' : 'other', link: m.link }));
 
-export async function inbox(log: (m: string) => void): Promise<InboxResponse> {
+/** The conversation list. `signal` (the request's) cancels the read; POST /api/inbox/cancel does as well. */
+export async function inbox(log: (m: string) => void, signal?: AbortSignal): Promise<InboxResponse> {
   requireLogin('read messages');
   const t0 = Date.now();
-  return withWorkPage(log, async (page) => {
-    await gotoMessages(page, log);
-    const list = await readConversations(page, 12_000);
-    const warnings: string[] = [];
-    if (!list.length) {
-      const txt = String(await page.evaluate('document.body.innerText').catch(() => '')).replace(/\s+/g, ' ');
-      warnings.push(/no messages|start a chat|no conversations/i.test(txt) ? 'No conversations yet' : `No conversation list found on the page (${txt.slice(0, 120)})`);
-    }
-    log(`messages: ${list.length} conversation(s)`);
-    return { conversations: list.map(toConversation), warnings, elapsedMs: Date.now() - t0 };
-  }, 'inbox');
+  return tracked(signal, (sig) =>
+    withWorkPage(
+      log,
+      async (page) => {
+        // Cancelled while waiting in line for the work page: hand it on without touching it.
+        throwIfCancelled(sig);
+        await gotoMessages(page, log, sig);
+        const list = await readConversations(page, 12_000, sig);
+        const warnings: string[] = [];
+        if (!list.length) {
+          const txt = String(await page.evaluate('document.body.innerText').catch(() => '')).replace(/\s+/g, ' ');
+          warnings.push(/no messages|start a chat|no conversations/i.test(txt) ? 'No conversations yet' : `No conversation list found on the page (${txt.slice(0, 120)})`);
+        }
+        log(`messages: ${list.length} conversation(s)`);
+        return { conversations: list.map(toConversation), warnings, elapsedMs: Date.now() - t0 };
+      },
+      'inbox',
+    ),
+  );
 }
 
 /** Opens the thread (an inbox id, or "@handle" through the profile's Message button) and reads it. */
-async function openThread(page: Page, id: string, log: (m: string) => void): Promise<{ conversation: Conversation; messages: ChatMessage[]; canSend: boolean; warnings: string[] }> {
+async function openThread(page: Page, id: string, log: (m: string) => void, signal?: AbortSignal): Promise<{ conversation: Conversation; messages: ChatMessage[]; canSend: boolean; warnings: string[] }> {
   const warnings: string[] = [];
   let conversation: Conversation | undefined;
+  throwIfCancelled(signal);
   if (id.startsWith('@')) {
     const user = id.slice(1);
     installCapture(page);
-    await openProfile(page, user, log);
+    await openProfile(page, user, log, signal);
     const until = Date.now() + 15_000;
     let clicked = false;
     while (!clicked && Date.now() < until) {
+      throwIfCancelled(signal);
       clicked = (await page.evaluate(`(() => { const b = document.querySelector('[data-e2e="message-button"]'); if (!b) return false; b.click(); return true; })()`).catch(() => false)) as boolean;
-      if (!clicked) await sleep(400);
+      if (!clicked) await sleep(400, signal);
     }
     if (!clicked) throw new SocialError(`@${user}: the profile has no Message button (TikTok does not allow messaging this account)`);
     const t = Date.now() + 15_000;
-    while (!page.url().startsWith(`${TT}/messages`) && Date.now() < t) await sleep(400);
+    while (!page.url().startsWith(`${TT}/messages`) && Date.now() < t) await sleep(400, signal);
     if (!page.url().startsWith(`${TT}/messages`)) throw new SocialError(`@${user}: TikTok did not open the conversation (${page.url()})`);
     profile = undefined; // the page left the profile
-    await sleep(1500);
-    const list = await readConversations(page, 5000);
+    await sleep(1500, signal);
+    const list = await readConversations(page, 5000, signal);
     const row = list.find((c) => sameUser(c.title, user) || c.title.toLowerCase().includes(user.toLowerCase()));
     conversation = row ? toConversation(row) : { id, title: user };
   } else {
-    await gotoMessages(page, log);
-    const list = await readConversations(page, 12_000);
+    await gotoMessages(page, log, signal);
+    const list = await readConversations(page, 12_000, signal);
     const [idxStr, ...rest] = id.split(':');
     const title = rest.join(':');
     const row = list.find((c) => c.index === Number(idxStr) && c.title === title) || list.find((c) => c.title === title);
@@ -638,32 +731,42 @@ async function openThread(page: Page, id: string, log: (m: string) => void): Pro
     const sel = ['[data-e2e="chat-list-item"]', '[class*="DivItemWrapper" i]', '[class*="ChatListItem" i]', '[class*="chat-list" i] li', '[class*="ChatList" i] [class*="Item" i]'];
     const ok = (await page.evaluate(`(() => { for (const s of ${JSON.stringify(sel)}) { const n = document.querySelectorAll(s); if (n.length) { const el = n[${row.index}]; if (!el) return false; el.click(); return true; } } return false; })()`).catch(() => false)) as boolean;
     if (!ok) throw new SocialError('The conversation row could not be opened');
-    await sleep(1200);
+    await sleep(1200, signal);
   }
-  const raw = await readMessages(page, 8000);
+  const raw = await readMessages(page, 8000, signal);
   const editor = (await page.evaluate(READ_EDITOR).catch(() => null)) as { sel: string; text: string } | null;
   if (!raw.length) warnings.push('No messages found in the thread (or the page did not render it)');
   return { conversation, messages: toMessages(raw), canSend: Boolean(editor), warnings };
 }
 
-export async function conversation(id: string, log: (m: string) => void): Promise<ConversationResponse> {
+/** Opens and reads one thread. `signal` (the request's) cancels the read; POST /api/inbox/cancel does as well. */
+export async function conversation(id: string, log: (m: string) => void, signal?: AbortSignal): Promise<ConversationResponse> {
   requireLogin('read messages');
   const t0 = Date.now();
-  return withWorkPage(log, async (page) => {
-    const r = await openThread(page, id, log);
-    log(`messages: "${r.conversation.title}" – ${r.messages.length} message(s), can send: ${r.canSend}`);
-    return { ...r, elapsedMs: Date.now() - t0 };
-  }, 'conversation');
+  return tracked(signal, (sig) =>
+    withWorkPage(
+      log,
+      async (page) => {
+        throwIfCancelled(sig);
+        const r = await openThread(page, id, log, sig);
+        log(`messages: "${r.conversation.title}" – ${r.messages.length} message(s), can send: ${r.canSend}`);
+        return { ...r, elapsedMs: Date.now() - t0 };
+      },
+      'conversation',
+    ),
+  );
 }
 
-export async function sendMessage(id: string, text: string, log: (m: string) => void): Promise<SendMessageResponse> {
+/** Sends `text`. The request's `signal` stops the work only while the thread is being opened: once typing started, the message goes out. */
+export async function sendMessage(id: string, text: string, log: (m: string) => void, signal?: AbortSignal): Promise<SendMessageResponse> {
   requireLogin('send messages');
   const msg = text.trim();
   if (!msg) throw new SocialError('Nothing to send', 400);
   if (msg.length > 1000) throw new SocialError('Messages are limited to 1000 characters', 400);
   const t0 = Date.now();
   return withWorkPage(log, async (page) => {
-    const opened = await openThread(page, id, log);
+    throwIfCancelled(signal);
+    const opened = await openThread(page, id, log, signal);
     if (!opened.canSend) throw new SocialError('TikTok offers no message box for this conversation');
     const before = opened.messages.filter((m) => m.from === 'me').length;
     await page.click('[data-sa-editor="1"]').catch(() => undefined);
@@ -695,15 +798,22 @@ export async function sendMessage(id: string, text: string, log: (m: string) => 
 }
 
 /** What the messages page contains (for tuning the selectors on the deployed server). */
-export async function inboxDebug(log: (m: string) => void): Promise<unknown> {
+export async function inboxDebug(log: (m: string) => void, signal?: AbortSignal): Promise<unknown> {
   requireLogin('read messages');
-  return withWorkPage(log, async (page) => {
-    await gotoMessages(page, log);
-    await sleep(3000);
-    const dbg = (await page.evaluate(PAGE_DEBUG)) as Record<string, unknown>;
-    const conversations = await page.evaluate(READ_CONVERSATIONS).catch((e: Error) => e.message);
-    const messages = await page.evaluate(READ_MESSAGES).catch((e: Error) => e.message);
-    const editor = await page.evaluate(READ_EDITOR).catch((e: Error) => e.message);
-    return { ...dbg, conversations, messages, editor };
-  }, 'inbox debug');
+  return tracked(signal, (sig) =>
+    withWorkPage(
+      log,
+      async (page) => {
+        throwIfCancelled(sig);
+        await gotoMessages(page, log, sig);
+        await sleep(3000, sig);
+        const dbg = (await page.evaluate(PAGE_DEBUG)) as Record<string, unknown>;
+        const conversations = await page.evaluate(READ_CONVERSATIONS).catch((e: Error) => e.message);
+        const messages = await page.evaluate(READ_MESSAGES).catch((e: Error) => e.message);
+        const editor = await page.evaluate(READ_EDITOR).catch((e: Error) => e.message);
+        return { ...dbg, conversations, messages, editor };
+      },
+      'inbox debug',
+    ),
+  );
 }

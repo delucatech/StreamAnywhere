@@ -364,6 +364,11 @@ export interface InboxResponse {
   elapsedMs: number;
 }
 
+/** POST /api/inbox/cancel: how many reads (list / thread) the server stopped */
+export interface InboxCancelResponse {
+  cancelled: number;
+}
+
 export interface ConversationRequest {
   /** A conversation id from the inbox, or "@handle" to open (or start) the thread with that user */
   id: string;

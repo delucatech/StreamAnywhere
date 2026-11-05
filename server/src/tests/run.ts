@@ -45,6 +45,7 @@ import { initTimescales, initVideoCodec, mintToken, pickVariant, playlistSegment
 import { normalizeXtreamServer, xtreamLiveUrl } from '../livetvXtream';
 import { LIVETV_PRESETS } from '../livetvPresets';
 import { pushTry, rateStream, ratingRank } from '../../../shared/livetvHealth';
+import { cancelInboxReads, CancelledError, inboxReadsInFlight, sleep as cancellableSleep, tracked as trackedRead } from '../social';
 
 const TEST_MP4 = 'https://mdn.github.io/learning-area/html/multimedia-and-embedding/video-and-audio-content/rabbit320.mp4';
 const TIKTOK_URL = process.env.TIKTOK_TEST_URL || 'https://www.tiktok.com/@tiktok/video/7693184538704416031';
@@ -1127,8 +1128,54 @@ async function ytdlpChecks(): Promise<void> {
   shutdownYtDlp();
 }
 
+/** Messages reads can be cancelled: by the viewer's request going away, and by POST /api/inbox/cancel (cancelInboxReads). */
+async function inboxCancelChecks(): Promise<void> {
+  console.log('\n== messages: cancellable reads');
+  // sleep: the plain wait resolves; an aborted signal rejects at once with CancelledError
+  const t0 = Date.now();
+  await cancellableSleep(20);
+  check('sleep without a signal waits', Date.now() - t0 >= 15);
+  const ctl = new AbortController();
+  const t1 = Date.now();
+  const p = cancellableSleep(5_000, ctl.signal).then(
+    () => 'resolved',
+    (e) => (e instanceof CancelledError ? `cancelled ${e.status}` : `other: ${(e as Error).message}`),
+  );
+  setTimeout(() => ctl.abort(), 30);
+  const slept = await p;
+  check('sleep rejects with CancelledError (499) as soon as the signal aborts', slept === 'cancelled 499' && Date.now() - t1 < 1_000, { slept, ms: Date.now() - t1 });
+  const already = new AbortController();
+  already.abort();
+  check('sleep on an aborted signal rejects at once', (await cancellableSleep(5_000, already.signal).then(() => 'resolved', (e) => (e instanceof CancelledError ? 'cancelled' : 'other'))) === 'cancelled');
+
+  // tracked: the read's own signal fires on cancelInboxReads and when the request's signal aborts; the registry empties either way
+  check('no read in flight to begin with', inboxReadsInFlight() === 0);
+  const seen: string[] = [];
+  const read1 = trackedRead(undefined, async (sig) => {
+    await cancellableSleep(5_000, sig).catch((e) => seen.push(e instanceof CancelledError ? 'read1 cancelled' : 'read1 other'));
+    return 'done';
+  });
+  const req = new AbortController();
+  const read2 = trackedRead(req.signal, async (sig) => {
+    await cancellableSleep(5_000, sig).catch((e) => seen.push(e instanceof CancelledError ? 'read2 cancelled' : 'read2 other'));
+    return 'done';
+  });
+  await cancellableSleep(10);
+  check('two reads registered while they run', inboxReadsInFlight() === 2, inboxReadsInFlight());
+  req.abort();
+  await read2;
+  check("the request's own abort cancels its read only", seen.join(',') === 'read2 cancelled' && inboxReadsInFlight() === 1, { seen, inFlight: inboxReadsInFlight() });
+  const n = cancelInboxReads();
+  await read1;
+  check('cancelInboxReads stops every read in flight and empties the registry', n === 1 && seen.includes('read1 cancelled') && inboxReadsInFlight() === 0, { n, seen, inFlight: inboxReadsInFlight() });
+  const r3 = await trackedRead(already.signal, async (sig) => (sig.aborted ? 'aborted from the start' : 'live'));
+  check('a read whose request is already gone starts aborted (hands the work page on without touching it)', r3 === 'aborted from the start' && inboxReadsInFlight() === 0, r3);
+  check('cancelInboxReads with nothing in flight answers 0', cancelInboxReads() === 0);
+}
+
 (async () => {
   await offline();
+  await inboxCancelChecks();
   await liveTvChecks();
   await downloaderChecks();
   if (skipNetwork) console.log('\n(network checks skipped: SKIP_NETWORK=1)');

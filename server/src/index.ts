@@ -4,7 +4,7 @@ import rateLimit from '@fastify/rate-limit';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { EXPLORE_CATEGORIES, YOUTUBE_CATEGORIES, platformOf } from '../../shared/types';
-import type { ConversationRequest, DownloadProbeRequest, LibraryCategoryRequest, LibraryEntryPatch, LibrarySaveRequest, DownloadStartRequest, FeedItem, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ProbeRequest, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SessionActionRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
+import type { ConversationRequest, DownloadProbeRequest, InboxCancelResponse, LibraryCategoryRequest, LibraryEntryPatch, LibrarySaveRequest, DownloadStartRequest, FeedItem, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ProbeRequest, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SessionActionRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
 import { registerAuth } from './auth';
 import { mirrorStats, registerMirror, shutdownMirror } from './mirror';
 import { config, findUp } from './config';
@@ -24,7 +24,7 @@ import { Reservoir, type ReservoirStats } from './reservoir';
 import { hasBatch, reviveItems, slimItems } from './lastBatch';
 import { invalidateJobs, jobStats, sharedJob } from './jobs';
 import { getProgress } from './progress';
-import { conversation, fetchProfile, followUser, inbox, inboxDebug, searchTikTok, sendMessage, SocialError } from './social';
+import { cancelInboxReads, conversation, fetchProfile, followUser, inbox, inboxDebug, isCancelled, searchTikTok, sendMessage, SocialError } from './social';
 import { channelVideos, exploreYouTube, isYouTubeUrl, recommendedYouTube, resolveYouTube, searchYouTube, youTubeCategory, YouTubeError } from './youtube';
 import { exploreInstagram, forYouInstagram, instagramCategory, instagramStats, InstagramError, isInstagramUrl, pauseInstagramPages, profileInstagram, resolveInstagram, searchInstagram, setInstagramLogger, shutdownInstagram } from './instagram';
 import { instagramCancelLogin, instagramLogout, instagramMaySignIn, instagramSessionLog, ensureInstagramSession, instagramSessionLost, instagramSessionStatus, instagramSignedIn, instagramStartLogin, InstagramSessionError, setInstagramSessionLogger, shutdownInstagramSession } from './instagramSession';
@@ -630,7 +630,8 @@ export async function buildServer() {
   const socialLog = (what: string) => rememberLog((msg: string) => app.log.info({ what }, msg));
   const socialFail = (reply: import('fastify').FastifyReply, e: unknown, t0: number) => {
     const err = e as Error;
-    app.log.warn({ err: err.message }, 'social request failed');
+    if (isCancelled(e)) app.log.info({ what: 'inbox' }, 'messages: read cancelled, the work page is free again');
+    else app.log.warn({ err: err.message }, 'social request failed');
     return reply.code(e instanceof SocialError || e instanceof YouTubeError || e instanceof InstagramError || e instanceof FacebookError ? e.status : 502).send({ error: err.message, elapsedMs: Date.now() - t0 });
   };
   const youtubeLog = (m: string) => app.log.info({ what: 'youtube' }, m);
@@ -721,10 +722,22 @@ export async function buildServer() {
       return socialFail(reply, e, t0);
     }
   });
+  // Messages are read through the headless page, which takes a while (navigation + TikTok's
+  // scripts) and holds the work page meanwhile. A read whose viewer is gone (the panel closed,
+  // Cancel pressed, the car's link dropped) is stopped: `untilGone` aborts when the connection
+  // closes before the answer went out, and POST /api/inbox/cancel stops every read in flight (the
+  // viewer sends it with its own abort, for the browsers that keep the socket open a while).
+  const untilGone = (reply: import('fastify').FastifyReply): AbortSignal => {
+    const ctl = new AbortController();
+    reply.raw.once('close', () => {
+      if (!reply.raw.writableFinished) ctl.abort();
+    });
+    return ctl.signal;
+  };
   app.get('/api/inbox', async (req, reply) => {
     const t0 = Date.now();
     try {
-      return await inbox(socialLog('inbox'));
+      return await inbox(socialLog('inbox'), untilGone(reply));
     } catch (e) {
       return socialFail(reply, e, t0);
     }
@@ -732,10 +745,15 @@ export async function buildServer() {
   app.get('/api/inbox/debug', async (req, reply) => {
     const t0 = Date.now();
     try {
-      return await inboxDebug(socialLog('inbox'));
+      return await inboxDebug(socialLog('inbox'), untilGone(reply));
     } catch (e) {
       return socialFail(reply, e, t0);
     }
+  });
+  app.post('/api/inbox/cancel', async (): Promise<InboxCancelResponse> => {
+    const cancelled = cancelInboxReads();
+    if (cancelled) app.log.info({ what: 'inbox' }, `messages: ${cancelled} read(s) cancelled by the viewer`);
+    return { cancelled };
   });
   app.post<{ Body: ConversationRequest }>('/api/inbox/open', resolveLimit, async (req, reply) => {
     const t0 = Date.now();
@@ -743,7 +761,7 @@ export async function buildServer() {
       const id = String(req.body?.id || '').trim();
       if (!id) throw new SocialError('Which conversation?', 400);
       if (id.startsWith('@')) handle(id);
-      return await conversation(id, socialLog('inbox'));
+      return await conversation(id, socialLog('inbox'), untilGone(reply));
     } catch (e) {
       return socialFail(reply, e, t0);
     }
@@ -754,7 +772,7 @@ export async function buildServer() {
       const id = String(req.body?.id || '').trim();
       if (!id) throw new SocialError('Which conversation?', 400);
       if (id.startsWith('@')) handle(id);
-      return await sendMessage(id, String(req.body?.text || ''), socialLog('inbox'));
+      return await sendMessage(id, String(req.body?.text || ''), socialLog('inbox'), untilGone(reply));
     } catch (e) {
       return socialFail(reply, e, t0);
     }
