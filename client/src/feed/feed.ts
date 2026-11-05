@@ -50,7 +50,7 @@ import * as libdl from '../library/downloads';
 import { currentPlatform, PLATFORMS, rememberApp, type PlatformDef } from '../platforms';
 import { fileKey, getCached, itemKey, MAX_AGE as CACHE_MAX_AGE, overBudget, putCached, sweep, type CacheRole } from './mediaCache';
 import { FeedPlayer, feedPlayerMode } from './player';
-import { closeTopPanel, initSocial, openInbox, openProfile, openSearch, panelOpen, reopenPlayList, type PlayList } from './social';
+import { closeTopPanel, initSocial, openComments, openInbox, openProfile, openSearch, panelOpen, reopenPlayList, type PlayList } from './social';
 
 // feed.html's failsafe reports whether this script ran at all
 (window as unknown as { streamAnywhereStarted: boolean }).streamAnywhereStarted = true;
@@ -530,6 +530,11 @@ el.navInbox.addEventListener('click', () => (P.social ? pressed(el.navInbox, () 
 el.actAuthor.addEventListener('click', () => {
   const cur = activeEntry();
   if (cur?.item.author.uniqueId) void openProfile(cur.item.author.uniqueId);
+});
+// The comment bubble: the comments of the video in view (read on the server, cancellable; see social.ts).
+el.actComments.addEventListener('click', () => {
+  const cur = activeEntry();
+  if (cur) openComments(cur.item);
 });
 // The "+" on the avatar: follow the account of the video in view; the badge goes once the account is followed.
 el.actFollow.addEventListener('click', () => {
@@ -2778,6 +2783,10 @@ document.addEventListener('keydown', (e) => {
     case 'S':
       if (speedMenuOpen()) closeSpeedMenu();
       else openSpeedMenu();
+      break;
+    case 'c':
+    case 'C':
+      if (!el.actComments.classList.contains('hidden')) el.actComments.click();
       break;
     case 'Escape':
       if (saveMenuOpen()) {

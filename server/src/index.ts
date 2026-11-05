@@ -4,7 +4,7 @@ import rateLimit from '@fastify/rate-limit';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { EXPLORE_CATEGORIES, YOUTUBE_CATEGORIES, platformOf } from '../../shared/types';
-import type { ConversationRequest, DownloadProbeRequest, InboxCancelResponse, LibraryCategoryRequest, LibraryEntryPatch, LibrarySaveRequest, DownloadStartRequest, FeedItem, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ProbeRequest, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SessionActionRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
+import type { CommentsRequest, ConversationRequest, DownloadProbeRequest, InboxCancelResponse, LibraryCategoryRequest, LibraryEntryPatch, LibrarySaveRequest, DownloadStartRequest, FeedItem, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ProbeRequest, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SessionActionRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
 import { registerAuth } from './auth';
 import { mirrorStats, registerMirror, shutdownMirror } from './mirror';
 import { config, findUp } from './config';
@@ -24,7 +24,7 @@ import { Reservoir, type ReservoirStats } from './reservoir';
 import { hasBatch, reviveItems, slimItems } from './lastBatch';
 import { invalidateJobs, jobStats, sharedJob } from './jobs';
 import { getProgress } from './progress';
-import { cancelInboxReads, conversation, fetchProfile, followUser, inbox, inboxDebug, isCancelled, searchTikTok, sendMessage, SocialError } from './social';
+import { cancelInboxReads, cancelReads, commentsDebug, conversation, fetchComments, fetchProfile, followUser, inbox, inboxDebug, isCancelled, searchTikTok, sendMessage, SocialError } from './social';
 import { channelVideos, exploreYouTube, isYouTubeUrl, recommendedYouTube, resolveYouTube, searchYouTube, youTubeCategory, YouTubeError } from './youtube';
 import { exploreInstagram, forYouInstagram, instagramCategory, instagramStats, InstagramError, isInstagramUrl, pauseInstagramPages, profileInstagram, resolveInstagram, searchInstagram, setInstagramLogger, shutdownInstagram } from './instagram';
 import { instagramCancelLogin, instagramLogout, instagramMaySignIn, instagramSessionLog, ensureInstagramSession, instagramSessionLost, instagramSessionStatus, instagramSignedIn, instagramStartLogin, InstagramSessionError, setInstagramSessionLogger, shutdownInstagramSession } from './instagramSession';
@@ -754,6 +754,36 @@ export async function buildServer() {
     const cancelled = cancelInboxReads();
     if (cancelled) app.log.info({ what: 'inbox' }, `messages: ${cancelled} read(s) cancelled by the viewer`);
     return { cancelled };
+  });
+  // A video's comments (the bubble beside it), read from the signed-in work page: slow and cancellable like the messages.
+  const commentArgs = (body: CommentsRequest | undefined): { id: string; author: string; cursor: number } => {
+    if (platformOf(body?.platform) !== 'tiktok') throw new SocialError('Comments are available for TikTok videos only for now', 400);
+    const id = String(body?.id || '').trim();
+    if (!/^\d{5,30}$/.test(id)) throw new SocialError('That is not a TikTok video id', 400);
+    return { id, author: handle(body?.author), cursor: Math.max(0, Math.min(5000, Math.floor(Number(body?.cursor) || 0))) };
+  };
+  app.post<{ Body: CommentsRequest }>('/api/comments', resolveLimit, async (req, reply) => {
+    const t0 = Date.now();
+    try {
+      const { id, author, cursor } = commentArgs(req.body);
+      return await fetchComments(id, author, cursor, socialLog('comments'), untilGone(reply));
+    } catch (e) {
+      return socialFail(reply, e, t0);
+    }
+  });
+  app.post('/api/comments/cancel', async (): Promise<InboxCancelResponse> => {
+    const cancelled = cancelReads('comments');
+    if (cancelled) app.log.info({ what: 'comments' }, `comments: ${cancelled} read(s) cancelled by the viewer`);
+    return { cancelled };
+  });
+  app.get<{ Querystring: { id?: string; author?: string } }>('/api/comments/debug', async (req, reply) => {
+    const t0 = Date.now();
+    try {
+      const { id, author } = commentArgs({ id: String(req.query.id || ''), author: String(req.query.author || '') });
+      return await commentsDebug(id, author, socialLog('comments'), untilGone(reply));
+    } catch (e) {
+      return socialFail(reply, e, t0);
+    }
   });
   app.post<{ Body: ConversationRequest }>('/api/inbox/open', resolveLimit, async (req, reply) => {
     const t0 = Date.now();

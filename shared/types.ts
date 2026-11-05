@@ -364,9 +364,49 @@ export interface InboxResponse {
   elapsedMs: number;
 }
 
-/** POST /api/inbox/cancel: how many reads (list / thread) the server stopped */
+/** POST /api/inbox/cancel, /api/comments/cancel: how many reads the server stopped */
 export interface InboxCancelResponse {
   cancelled: number;
+}
+
+// ---------------------------------------------------------------- comments (the bubble beside a video)
+
+export interface CommentsRequest {
+  /** Which platform's video (TikTok only for now) */
+  platform?: Platform;
+  /** The video's id (FeedItem.id) and the handle of its author (the video page is /@author/video/id) */
+  id: string;
+  author: string;
+  /** Where the previous answer stopped (CommentsResponse.cursor); 0 or absent = from the top */
+  cursor?: number;
+}
+
+export interface VideoComment {
+  id: string;
+  text: string;
+  user: { id?: string; uniqueId?: string; nickname?: string; avatar?: string };
+  /** Unix seconds, when the source gives it; `when` is the page's own wording ("4d ago") otherwise */
+  time?: number;
+  when?: string;
+  likes?: number;
+  /** Replies under this comment (not fetched; the count tells the viewer there are some) */
+  replies?: number;
+  /** The video's author wrote it */
+  byAuthor?: boolean;
+}
+
+export interface CommentsResponse {
+  id: string;
+  comments: VideoComment[];
+  /** Pass back as CommentsRequest.cursor for the next ones */
+  cursor: number;
+  hasMore: boolean;
+  /** The video's comment count as the source says */
+  total?: number;
+  /** Where the comments came from: the page's own request, a request made from inside the page, or the page's DOM */
+  how: 'page' | 'fetch' | 'dom';
+  warnings: string[];
+  elapsedMs: number;
 }
 
 export interface ConversationRequest {

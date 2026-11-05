@@ -28,9 +28,19 @@
  *              A read can be cancelled (the viewer closed the panel, pressed Cancel, or its
  *              request dropped): the page's load is stopped and the work page is released at
  *              once, so the next request is not queued behind a read nobody waits for.
+ *  - comments: measured 2026-11-05 (local headless Chrome, guest): a hand-built
+ *              /api/comment/list/ request gets an EMPTY 200 body even when the page's SDK signed
+ *              it, yt-dlp does not extract TikTok comments at all, and the guest video page shows
+ *              TikTok's login dialog with no comments and makes no comment request. So comments
+ *              need the signed-in session and are taken from the video page itself, like the
+ *              profile: navigate to /@author/video/id, read the page's OWN comment/list answer as
+ *              it happens (scrolling the list for the next page), then a request from inside the
+ *              page, then the rendered comments (data-e2e="comment-level-1") as fallbacks.
+ *              Unverified against a signed-in page at the time of writing: /api/comments/debug
+ *              shows what the page contains, for tuning on the deployed server.
  */
 import type { Page } from 'puppeteer-core';
-import type { ChatMessage, Conversation, ConversationResponse, FeedItem, FollowResponse, FollowState, InboxResponse, ProfileResponse, SearchResponse, SendMessageResponse, UserSummary } from '../../shared/types';
+import type { ChatMessage, CommentsResponse, Conversation, ConversationResponse, FeedItem, FollowResponse, FollowState, InboxResponse, ProfileResponse, SearchResponse, SendMessageResponse, UserSummary, VideoComment } from '../../shared/types';
 import { itemToFeedItem, relationToState } from './feed';
 import { isLoggedIn, pageCookieHeader, resetWorkPage, withWorkPage } from './session';
 import { ytdlpInfo } from './ytdlp';
@@ -99,28 +109,39 @@ function cancellable<T>(page: Page, work: Promise<T>, signal?: AbortSignal): Pro
 }
 
 /**
- * The messages reads in flight or waiting for the work page, so POST /api/inbox/cancel can stop
- * them all (the viewer's own request is usually gone already; this reaches the headless work).
+ * The reads in flight or waiting for the work page, by kind ("inbox": the messages list and
+ * threads, "comments": a video's comments), so POST /api/inbox/cancel and /api/comments/cancel
+ * can stop them all (the viewer's own request is usually gone already; this reaches the headless work).
  */
-const reads = new Set<AbortController>();
-export const inboxReadsInFlight = (): number => reads.size;
-export function cancelInboxReads(): number {
-  const n = reads.size;
-  for (const c of reads) c.abort();
-  reads.clear();
+export type ReadKind = 'inbox' | 'comments';
+const reads = new Map<ReadKind, Set<AbortController>>();
+const readsOf = (kind: ReadKind): Set<AbortController> => {
+  let set = reads.get(kind);
+  if (!set) reads.set(kind, (set = new Set()));
+  return set;
+};
+export const readsInFlight = (kind: ReadKind): number => readsOf(kind).size;
+export function cancelReads(kind: ReadKind): number {
+  const set = readsOf(kind);
+  const n = set.size;
+  for (const c of set) c.abort();
+  set.clear();
   return n;
 }
-/** Runs a read registered for cancelInboxReads, cancelled as well when the request's own `signal` aborts. */
-export async function tracked<T>(signal: AbortSignal | undefined, fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
+export const inboxReadsInFlight = (): number => readsInFlight('inbox');
+export const cancelInboxReads = (): number => cancelReads('inbox');
+/** Runs a read registered for cancelReads(kind), cancelled as well when the request's own `signal` aborts. */
+export async function tracked<T>(kind: ReadKind, signal: AbortSignal | undefined, fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const ctl = new AbortController();
   const onAbort = (): void => ctl.abort();
   if (signal?.aborted) ctl.abort();
   else signal?.addEventListener('abort', onAbort, { once: true });
-  reads.add(ctl);
+  const set = readsOf(kind);
+  set.add(ctl);
   try {
     return await fn(ctl.signal);
   } finally {
-    reads.delete(ctl);
+    set.delete(ctl);
     signal?.removeEventListener('abort', onAbort);
   }
 }
@@ -137,13 +158,25 @@ interface Captured {
 }
 const installed = new WeakSet<Page>();
 let captured: Captured[] = [];
+/** The page's own comment/list answers (url keeps the aweme_id and cursor they were asked for) */
+let commentAnswers: { url: string; json: any }[] = [];
 
-/** Records the page's own user/detail and post/item_list answers (hand-built requests are refused). */
+/** Records the page's own user/detail, post/item_list and comment/list answers (hand-built requests are refused). */
 function installCapture(page: Page): void {
   if (installed.has(page)) return;
   installed.add(page);
   page.on('response', (res) => {
     const u = res.url();
+    if (/\/api\/comment\/list\//.test(u)) {
+      res
+        .json()
+        .then((json: any) => {
+          commentAnswers.push({ url: u, json });
+          if (commentAnswers.length > 20) commentAnswers.splice(0, commentAnswers.length - 20);
+        })
+        .catch(() => undefined);
+      return;
+    }
     const kind: Captured['kind'] | undefined = /\/api\/user\/detail\//.test(u) ? 'user' : /\/api\/post\/item_list\//.test(u) ? 'posts' : undefined;
     if (!kind) return;
     res
@@ -228,9 +261,10 @@ const FETCH_TIMEOUT_MS = 25_000;
  * TikTok stalls (observed on the Google VM: "Runtime.evaluate timed out" after 45 s) comes back as
  * a clear error instead of a protocol timeout.
  */
-async function fetchInPage(page: Page, url: string, attempts = 3, log?: (m: string) => void): Promise<string> {
+async function fetchInPage(page: Page, url: string, attempts = 3, log?: (m: string) => void, signal?: AbortSignal): Promise<string> {
   let text = '';
   for (let attempt = 1; attempt <= attempts; attempt++) {
+    throwIfCancelled(signal);
     const t0 = Date.now();
     const r = (await page.evaluate(`(async () => {
       const ctl = new AbortController();
@@ -247,7 +281,7 @@ async function fetchInPage(page: Page, url: string, attempts = 3, log?: (m: stri
     if (r.error && attempt === attempts) throw new SocialError(`TikTok did not answer (${r.error})`);
     text = r.text;
     if (text.trim()) break;
-    if (attempt < attempts) await sleep(1200 * attempt);
+    if (attempt < attempts) await sleep(1200 * attempt, signal);
   }
   return text;
 }
@@ -566,6 +600,186 @@ export async function followUser(user: string, follow: boolean, log: (m: string)
   }, `follow @${user}`);
 }
 
+// ---------------------------------------------------------------- comments
+
+/**
+ * The comments rendered on the video page (TikTok's data-e2e hooks: comment-level-1 is the text,
+ * comment-username-1 / comment-time-1 / comment-like-count its neighbours), each reduced to its
+ * fields; a fallback for when the page's own answer was not seen.
+ */
+const READ_COMMENTS_DOM = `(() => {
+  const out = [];
+  const seen = new Set();
+  for (const t of document.querySelectorAll('[data-e2e="comment-level-1"]')) {
+    let row = t;
+    for (let i = 0; i < 6 && row.parentElement; i++) { row = row.parentElement; if (row.querySelector('[data-e2e="comment-username-1"]')) break; }
+    if (seen.has(row)) continue;
+    seen.add(row);
+    const name = row.querySelector('[data-e2e="comment-username-1"]');
+    const a = name ? name.closest('a[href]') || row.querySelector('a[href*="/@"]') : row.querySelector('a[href*="/@"]');
+    const m = a ? (a.getAttribute('href') || '').match(/\\/@([^/?#]+)/) : null;
+    const img = row.querySelector('img');
+    const time = row.querySelector('[data-e2e="comment-time-1"]');
+    const likes = row.querySelector('[data-e2e="comment-like-count"]');
+    const reply = [...row.querySelectorAll('[data-e2e^="view-more"], [class*="ViewReplies" i], [class*="DivReplyAction" i]')].map((e) => e.innerText || '').join(' ');
+    const rm = reply.match(/(\\d[\\d.,]*[KM]?)/i);
+    out.push({ text: (t.innerText || '').trim(), nickname: name ? (name.innerText || '').trim() : '', uniqueId: m ? m[1] : undefined, avatar: img ? img.src : undefined, when: time ? (time.innerText || '').trim() : undefined, likes: likes ? (likes.innerText || '').trim() : undefined, replies: rm ? rm[1] : undefined, byAuthor: /creator|author/i.test(row.innerText || '') });
+  }
+  return out;
+})()`;
+
+const COMMENTS_DEBUG = `(() => {
+  const e2e = [...new Set([...document.querySelectorAll('[data-e2e]')].map((e) => e.getAttribute('data-e2e')))];
+  const cls = new Set();
+  for (const el of document.querySelectorAll('[class]')) for (const c of String(el.className).split(/\\s+/)) if (/comment/i.test(c)) cls.add(c);
+  return { url: location.href, title: document.title, e2e: e2e.filter((k) => /comment|login|captcha|verify|reply/i.test(k)), classes: [...cls].slice(0, 80), commentNodes: document.querySelectorAll('[data-e2e="comment-level-1"]').length, text: (document.body.innerText || '').replace(/\\s+/g, ' ').slice(0, 1200) };
+})()`;
+
+/** "1.2K" / "45" / "3M" as a number */
+export const countOf = (s: unknown): number | undefined => {
+  const m = String(s ?? '')
+    .trim()
+    .match(/^(\d+(?:[.,]\d+)?)\s*([KM])?$/i);
+  if (!m) return undefined;
+  const n = Number(m[1].replace(',', '.'));
+  return Math.round(n * (m[2]?.toUpperCase() === 'M' ? 1e6 : m[2]?.toUpperCase() === 'K' ? 1e3 : 1));
+};
+
+function commentFromApi(c: any): VideoComment | undefined {
+  if (!c?.cid && !c?.text) return undefined;
+  const u = c.user || {};
+  return {
+    id: String(c.cid || c.text),
+    text: String(c.text || ''),
+    user: { id: u.uid ? String(u.uid) : undefined, uniqueId: u.unique_id, nickname: u.nickname, avatar: u.avatar_thumb?.url_list?.[0] || u.avatar_medium?.url_list?.[0] },
+    time: num(c.create_time),
+    likes: num(c.digg_count),
+    replies: num(c.reply_comment_total),
+    byAuthor: c.author_pin === 1 || c.is_author === true || c.label_text === 'Creator' || undefined,
+  };
+}
+
+const videoPageUrl = (author: string, id: string): string => `${TT}/@${encodeURIComponent(author)}/video/${id}`;
+
+/**
+ * A video's comments from the signed-in work page: the page's own comment/list answer (the list
+ * scrolled for the next page), else a request from inside the page, else the rendered comments.
+ * `signal` (the request's) cancels the read; POST /api/comments/cancel does as well.
+ */
+export async function fetchComments(id: string, author: string, cursor: number, log: (m: string) => void, signal?: AbortSignal): Promise<CommentsResponse> {
+  requireLogin('read comments'); // a guest page shows TikTok's login dialog and no comments (seen 2026-11-05)
+  const t0 = Date.now();
+  return tracked('comments', signal, (sig) =>
+    withWorkPage(
+      log,
+      async (page) => {
+        throwIfCancelled(sig);
+        installCapture(page);
+        const warnings: string[] = [];
+        const url = videoPageUrl(author, id);
+        const onPage = page.url().split('?')[0] === url;
+        const wanted = (a: { url: string }): boolean => {
+          try {
+            const q = new URL(a.url).searchParams;
+            return q.get('aweme_id') === id && Number(q.get('cursor') || 0) === cursor;
+          } catch {
+            return false;
+          }
+        };
+        if (!onPage) {
+          commentAnswers = [];
+          log(`comments ${id}: opening the video page`);
+          await cancellable(page, page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 }), sig);
+          profile = undefined; // the page left the profile (if it was on one)
+          if (/\/login/.test(page.url())) throw new SocialError('TikTok sent the video page to its login: the session is no longer valid. Sign in again (Profile).', 401);
+        } else if (cursor > 0 && !commentAnswers.some(wanted)) {
+          // The next page: TikTok asks for it when the list is scrolled to its end.
+          await page
+            .evaluate(`(() => { const sels = ['[data-e2e="comment-list"]', '[class*="DivCommentListContainer" i]', '[class*="CommentList" i]']; for (const s of sels) { const p = document.querySelector(s); if (p) { p.scrollTop = p.scrollHeight; return s; } } window.scrollTo(0, document.body.scrollHeight); return 'window'; })()`)
+            .catch(() => undefined);
+        }
+        let answer: any;
+        let how: CommentsResponse['how'] = 'page';
+        const until = Date.now() + (onPage ? 8_000 : 12_000);
+        while (!answer && Date.now() < until) {
+          answer = commentAnswers.find(wanted)?.json;
+          if (!answer) await sleep(400, sig);
+        }
+        if (!answer) {
+          // The page did not ask (or its answer was not seen): ask from inside it, signed by its scripts.
+          how = 'fetch';
+          const params = new URLSearchParams({ ...COMMON, aweme_id: id, count: '20', cursor: String(cursor), enter_from: 'tiktok_web', fromWeb: '1', current_region: 'US' });
+          try {
+            const text = await fetchInPage(page, `${TT}/api/comment/list/?${params}`, 2, log, sig);
+            if (text.trim()) answer = JSON.parse(text);
+            else warnings.push('TikTok answered the comment request from inside the page with an empty body');
+          } catch (e) {
+            if (isCancelled(e)) throw e;
+            warnings.push(`comment request from inside the page failed (${(e as Error).message})`);
+          }
+        }
+        let comments: VideoComment[] = [];
+        let next = cursor;
+        let hasMore = false;
+        let total: number | undefined;
+        if (answer) {
+          const code = Number(answer.status_code ?? answer.statusCode ?? 0);
+          if (code !== 0) warnings.push(`TikTok comment list status ${code}: ${answer.status_msg || answer.statusMsg || 'unavailable'}`);
+          comments = (Array.isArray(answer.comments) ? answer.comments : []).map(commentFromApi).filter(Boolean) as VideoComment[];
+          hasMore = answer.has_more === 1 || answer.has_more === true;
+          next = num(answer.cursor) ?? cursor + comments.length;
+          total = num(answer.total);
+        }
+        if (!comments.length) {
+          // The rendered comments (whatever the page shows), the ones after `cursor` of them.
+          const dom = ((await page.evaluate(READ_COMMENTS_DOM).catch(() => [])) as any[]).map(
+            (d, i): VideoComment => ({ id: `dom:${i}:${d.text.slice(0, 40)}`, text: d.text, user: { uniqueId: d.uniqueId, nickname: d.nickname, avatar: d.avatar }, when: d.when, likes: countOf(d.likes), replies: countOf(d.replies), byAuthor: d.byAuthor || undefined }),
+          );
+          if (dom.length) {
+            how = 'dom';
+            comments = dom.slice(cursor);
+            next = dom.length;
+            hasMore = false;
+          } else if (!answer) {
+            const txt = String(await page.evaluate('document.body.innerText').catch(() => '')).replace(/\s+/g, ' ');
+            const title = String(await page.title().catch(() => ''));
+            warnings.push(/log in/i.test(title) ? 'TikTok shows its login dialog on the video page: the session may be signed out (Profile → sign in again)' : /no comments yet|be the first to comment/i.test(txt) ? 'No comments yet' : `No comments found on the page (${txt.slice(0, 120)})`);
+          }
+        }
+        log(`comments ${id} from ${cursor}: ${comments.length} (${how}), more: ${hasMore}, ${Date.now() - t0} ms`);
+        return { id, comments, cursor: next, hasMore, total, how, warnings, elapsedMs: Date.now() - t0 };
+      },
+      'comments',
+    ),
+  );
+}
+
+/** What the video page contains (for tuning the comment hooks on the deployed server). */
+export async function commentsDebug(id: string, author: string, log: (m: string) => void, signal?: AbortSignal): Promise<unknown> {
+  requireLogin('read comments');
+  return tracked('comments', signal, (sig) =>
+    withWorkPage(
+      log,
+      async (page) => {
+        throwIfCancelled(sig);
+        installCapture(page);
+        const url = videoPageUrl(author, id);
+        if (page.url().split('?')[0] !== url) {
+          commentAnswers = [];
+          await cancellable(page, page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 }), sig);
+          profile = undefined;
+        }
+        await sleep(6000, sig);
+        const dbg = (await page.evaluate(COMMENTS_DEBUG)) as Record<string, unknown>;
+        const dom = await page.evaluate(READ_COMMENTS_DOM).catch((e: Error) => e.message);
+        const answers = commentAnswers.map((a) => ({ url: a.url.slice(0, 200), status_code: a.json?.status_code, total: a.json?.total, has_more: a.json?.has_more, cursor: a.json?.cursor, n: Array.isArray(a.json?.comments) ? a.json.comments.length : undefined, first: a.json?.comments?.[0] }));
+        return { ...dbg, answers, dom };
+      },
+      'comments debug',
+    ),
+  );
+}
+
 // ---------------------------------------------------------------- messages
 
 /**
@@ -674,7 +888,7 @@ const toMessages = (raw: RawMessage[]): ChatMessage[] => raw.map((m) => ({ id: S
 export async function inbox(log: (m: string) => void, signal?: AbortSignal): Promise<InboxResponse> {
   requireLogin('read messages');
   const t0 = Date.now();
-  return tracked(signal, (sig) =>
+  return tracked('inbox', signal, (sig) =>
     withWorkPage(
       log,
       async (page) => {
@@ -743,7 +957,7 @@ async function openThread(page: Page, id: string, log: (m: string) => void, sign
 export async function conversation(id: string, log: (m: string) => void, signal?: AbortSignal): Promise<ConversationResponse> {
   requireLogin('read messages');
   const t0 = Date.now();
-  return tracked(signal, (sig) =>
+  return tracked('inbox', signal, (sig) =>
     withWorkPage(
       log,
       async (page) => {
@@ -800,7 +1014,7 @@ export async function sendMessage(id: string, text: string, log: (m: string) => 
 /** What the messages page contains (for tuning the selectors on the deployed server). */
 export async function inboxDebug(log: (m: string) => void, signal?: AbortSignal): Promise<unknown> {
   requireLogin('read messages');
-  return tracked(signal, (sig) =>
+  return tracked('inbox', signal, (sig) =>
     withWorkPage(
       log,
       async (page) => {

@@ -45,7 +45,7 @@ import { initTimescales, initVideoCodec, mintToken, pickVariant, playlistSegment
 import { normalizeXtreamServer, xtreamLiveUrl } from '../livetvXtream';
 import { LIVETV_PRESETS } from '../livetvPresets';
 import { pushTry, rateStream, ratingRank } from '../../../shared/livetvHealth';
-import { cancelInboxReads, CancelledError, inboxReadsInFlight, sleep as cancellableSleep, tracked as trackedRead } from '../social';
+import { cancelInboxReads, CancelledError, cancelReads, countOf, inboxReadsInFlight, readsInFlight, sleep as cancellableSleep, tracked as trackedRead } from '../social';
 
 const TEST_MP4 = 'https://mdn.github.io/learning-area/html/multimedia-and-embedding/video-and-audio-content/rabbit320.mp4';
 const TIKTOK_URL = process.env.TIKTOK_TEST_URL || 'https://www.tiktok.com/@tiktok/video/7693184538704416031';
@@ -1151,12 +1151,12 @@ async function inboxCancelChecks(): Promise<void> {
   // tracked: the read's own signal fires on cancelInboxReads and when the request's signal aborts; the registry empties either way
   check('no read in flight to begin with', inboxReadsInFlight() === 0);
   const seen: string[] = [];
-  const read1 = trackedRead(undefined, async (sig) => {
+  const read1 = trackedRead('inbox', undefined, async (sig) => {
     await cancellableSleep(5_000, sig).catch((e) => seen.push(e instanceof CancelledError ? 'read1 cancelled' : 'read1 other'));
     return 'done';
   });
   const req = new AbortController();
-  const read2 = trackedRead(req.signal, async (sig) => {
+  const read2 = trackedRead('inbox', req.signal, async (sig) => {
     await cancellableSleep(5_000, sig).catch((e) => seen.push(e instanceof CancelledError ? 'read2 cancelled' : 'read2 other'));
     return 'done';
   });
@@ -1168,9 +1168,19 @@ async function inboxCancelChecks(): Promise<void> {
   const n = cancelInboxReads();
   await read1;
   check('cancelInboxReads stops every read in flight and empties the registry', n === 1 && seen.includes('read1 cancelled') && inboxReadsInFlight() === 0, { n, seen, inFlight: inboxReadsInFlight() });
-  const r3 = await trackedRead(already.signal, async (sig) => (sig.aborted ? 'aborted from the start' : 'live'));
+  const r3 = await trackedRead('inbox', already.signal, async (sig) => (sig.aborted ? 'aborted from the start' : 'live'));
   check('a read whose request is already gone starts aborted (hands the work page on without touching it)', r3 === 'aborted from the start' && inboxReadsInFlight() === 0, r3);
   check('cancelInboxReads with nothing in flight answers 0', cancelInboxReads() === 0);
+  // kinds are apart: cancelling the comments reads leaves a messages read running
+  const seen2: string[] = [];
+  const c1 = trackedRead('comments', undefined, async (sig) => cancellableSleep(5_000, sig).catch(() => seen2.push('comments cancelled')));
+  const m1 = trackedRead('inbox', undefined, async (sig) => cancellableSleep(300, sig).then(() => seen2.push('inbox finished')));
+  await cancellableSleep(10);
+  check('comments and messages reads are counted apart', readsInFlight('comments') === 1 && readsInFlight('inbox') === 1);
+  const nc = cancelReads('comments');
+  await Promise.all([c1, m1]);
+  check('cancelReads("comments") stops the comments read only', nc === 1 && seen2.includes('comments cancelled') && seen2.includes('inbox finished') && readsInFlight('inbox') === 0, { nc, seen2 });
+  check('"1.2K" / "45" / "3M" / "" as counts', countOf('1.2K') === 1200 && countOf('45') === 45 && countOf('3M') === 3_000_000 && countOf('') === undefined && countOf('4d ago') === undefined);
 }
 
 (async () => {

@@ -11,7 +11,7 @@
  * of the recent ones. A phrase searched again shows its earlier results at once and the fresh
  * search runs behind them (a status at the end of the list says so); fresh results then take over.
  */
-import type { ChatMessage, Conversation, FeedItem, FollowState, SearchResponse, UserSummary } from '../../../shared/types';
+import type { ChatMessage, Conversation, FeedItem, FollowState, SearchResponse, UserSummary, VideoComment } from '../../../shared/types';
 import { api, ApiError } from '../api';
 import { pressed } from '../busy';
 import type { PlatformDef } from '../platforms';
@@ -74,6 +74,14 @@ const el = {
   inboxTitle: $('inboxTitle'),
   inboxRefresh: $<HTMLButtonElement>('inboxRefresh'),
   inboxCancel: $<HTMLButtonElement>('inboxCancel'),
+  comments: $('comments'),
+  commentsClose: $<HTMLButtonElement>('commentsClose'),
+  commentsTitle: $('commentsTitle'),
+  commentsRefresh: $<HTMLButtonElement>('commentsRefresh'),
+  commentsCancel: $<HTMLButtonElement>('commentsCancel'),
+  commentsStatus: $('commentsStatus'),
+  commentsList: $('commentsList'),
+  commentsMore: $<HTMLButtonElement>('commentsMore'),
   inboxStatus: $('inboxStatus'),
   inboxList: $('inboxList'),
   inboxThread: $('inboxThread'),
@@ -109,6 +117,7 @@ function hide(panel: HTMLElement): void {
   if (panel === el.profile) host.onPanelClosed?.('profile');
   else if (panel === el.search) host.onPanelClosed?.('search');
   else if (panel === el.inbox) cancelInboxRead(); // nobody waits for the messages any more: the server stops reading them
+  else if (panel === el.comments) cancelCommentsRead();
 }
 /** Closes the panel on top; false when none is open. */
 export function closeTopPanel(): boolean {
@@ -911,6 +920,158 @@ el.inboxForm.addEventListener('submit', (e) => {
     },
     { label: 'Sending' },
   );
+});
+
+// ---------------------------------------------------------------- comments
+
+/**
+ * The comments of a video (the bubble beside it). Same shape as the inbox: the server reads them
+ * from its signed-in TikTok page, which takes a while, so the read shows Cancel and is stopped
+ * (here and on the server, POST /api/comments/cancel) by Cancel, closing the panel, or a new read.
+ */
+const comments = { item: undefined as FeedItem | undefined, list: [] as VideoComment[], cursor: 0, hasMore: false, total: undefined as number | undefined, ctl: undefined as AbortController | undefined, seq: 0 };
+
+function commentsBusy(busy: boolean): void {
+  el.commentsRefresh.classList.toggle('hidden', busy);
+  el.commentsCancel.classList.toggle('hidden', !busy);
+  el.commentsMore.disabled = busy;
+}
+function beginCommentsRead(): { seq: number; signal: AbortSignal } {
+  cancelCommentsRead();
+  const ctl = new AbortController();
+  comments.ctl = ctl;
+  commentsBusy(true);
+  return { seq: ++comments.seq, signal: ctl.signal };
+}
+function endCommentsRead(seq: number): boolean {
+  if (seq !== comments.seq) return false;
+  comments.ctl = undefined;
+  commentsBusy(false);
+  return true;
+}
+/** Stops the comments read in flight here and on the server; false when none runs. */
+function cancelCommentsRead(): boolean {
+  const ctl = comments.ctl;
+  if (!ctl) return false;
+  comments.ctl = undefined;
+  commentsBusy(false);
+  ctl.abort();
+  void api.commentsCancel().catch((e) => console.warn('[comments] cancel not delivered:', errMsg(e)));
+  return true;
+}
+
+const whenOf = (c: VideoComment): string => {
+  if (c.when) return c.when;
+  if (!c.time) return '';
+  const s = Math.max(0, Date.now() / 1000 - c.time);
+  if (s < 3600) return `${Math.max(1, Math.round(s / 60))}m ago`;
+  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+  if (s < 86400 * 30) return `${Math.round(s / 86400)}d ago`;
+  return new Date(c.time * 1000).toLocaleDateString();
+};
+
+function commentRow(c: VideoComment): HTMLElement {
+  const row = document.createElement('div');
+  row.className = 'comment-row';
+  const img = document.createElement('img');
+  if (c.user.avatar) img.src = c.user.avatar;
+  img.alt = '';
+  img.loading = 'lazy';
+  img.draggable = false;
+  row.appendChild(img);
+  const body = document.createElement('div');
+  const name = document.createElement('div');
+  name.className = 'c-name';
+  name.textContent = c.user.nickname || (c.user.uniqueId ? '@' + c.user.uniqueId : '');
+  if (c.byAuthor) {
+    const a = document.createElement('span');
+    a.className = 'c-author';
+    a.textContent = 'Creator';
+    name.appendChild(a);
+  }
+  const text = document.createElement('div');
+  text.className = 'c-text';
+  text.textContent = c.text;
+  const meta = document.createElement('div');
+  meta.className = 'c-meta';
+  const parts = [whenOf(c), c.likes ? `${host.fmtCount(c.likes)} likes` : '', c.replies ? `${host.fmtCount(c.replies)} ${c.replies === 1 ? 'reply' : 'replies'}` : ''].filter(Boolean);
+  for (const p of parts) {
+    const s = document.createElement('span');
+    s.textContent = p;
+    meta.appendChild(s);
+  }
+  body.append(name, text, meta);
+  row.appendChild(body);
+  return row;
+}
+
+function renderComments(list: VideoComment[], append: boolean): void {
+  if (!append) el.commentsList.innerHTML = '';
+  for (const c of list) el.commentsList.appendChild(commentRow(c));
+}
+
+function commentsTitle(): void {
+  const n = comments.total ?? comments.item?.stats.comments;
+  el.commentsTitle.textContent = n !== undefined ? `${host.fmtCount(n)} comments` : 'Comments';
+}
+
+async function loadComments(more: boolean): Promise<void> {
+  const item = comments.item;
+  if (!item?.author.uniqueId) return;
+  const { seq, signal } = beginCommentsRead();
+  if (!more) {
+    comments.list = [];
+    comments.cursor = 0;
+    comments.hasMore = false;
+    el.commentsList.innerHTML = '';
+    el.commentsMore.classList.add('hidden');
+  }
+  status(el.commentsStatus, more ? 'Loading more comments…' : 'Reading the comments… (the server opens the video on TikTok)');
+  try {
+    const r = await api.comments({ platform: host.platform.id, id: item.id, author: item.author.uniqueId, cursor: more ? comments.cursor : 0 }, signal);
+    if (!endCommentsRead(seq) || comments.item !== item) return;
+    comments.list = more ? comments.list.concat(r.comments) : r.comments;
+    comments.cursor = r.cursor;
+    comments.hasMore = r.hasMore && r.comments.length > 0;
+    if (r.total !== undefined) comments.total = r.total;
+    commentsTitle();
+    renderComments(r.comments, more);
+    el.commentsMore.classList.toggle('hidden', !comments.hasMore);
+    status(el.commentsStatus, comments.list.length ? '' : r.warnings[0] || 'No comments yet', !comments.list.length && !/no comments yet/i.test(r.warnings[0] || ''));
+    for (const w of r.warnings) console.warn('[comments]', w);
+  } catch (e) {
+    if (!endCommentsRead(seq) || signal.aborted) return;
+    if (e instanceof ApiError && e.status === 401 && !host.isLoggedIn()) {
+      status(el.commentsStatus, 'Sign in to TikTok first (Profile) to read comments.', true);
+      return;
+    }
+    status(el.commentsStatus, `Comments could not be read: ${errMsg(e)}`, true);
+  }
+}
+
+/** Opens the comments panel for `item` (the video in view); a different video starts a fresh read. */
+export function openComments(item: FeedItem): void {
+  if (!host.platform.social) {
+    host.toast(`Comments are not available for ${host.platform.name} yet`);
+    return;
+  }
+  if (!item.author.uniqueId) {
+    host.toast('This video has no account to read the comments from');
+    return;
+  }
+  show(el.comments);
+  if (comments.item?.id === item.id && (comments.list.length || comments.ctl)) return;
+  comments.item = item;
+  comments.total = undefined;
+  commentsTitle();
+  void loadComments(false);
+}
+
+el.commentsClose.addEventListener('click', () => hide(el.comments));
+el.commentsRefresh.addEventListener('click', () => void loadComments(false));
+el.commentsMore.addEventListener('click', () => void loadComments(true));
+el.commentsCancel.addEventListener('click', () => {
+  if (cancelCommentsRead()) status(el.commentsStatus, comments.list.length ? 'Stopped.' : 'Stopped. Refresh reads the comments again.');
 });
 
 export function initSocial(h: SocialHost): void {
