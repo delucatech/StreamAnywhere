@@ -157,8 +157,9 @@ export const api = {
       return { platform };
     }
   },
-  session: async (platform: Platform = 'tiktok', recheck = false): Promise<SessionStatus> => {
-    const res = await fetch(apiUrl(`/api/session?platform=${platform}${recheck ? '&recheck=1' : ''}`), { mode: 'cors', credentials: 'same-origin' });
+  /** `badge`: the home screen's sign-in badge - only what the server knows, no check started for it. */
+  session: async (platform: Platform = 'tiktok', recheck = false, badge = false): Promise<SessionStatus> => {
+    const res = await fetch(apiUrl(`/api/session?platform=${platform}${recheck ? '&recheck=1' : ''}${badge ? '&badge=1' : ''}`), { mode: 'cors', credentials: 'same-origin' });
     toLoginOn401(res);
     if (!res.ok) throw new ApiError(`session ${res.status}`, res.status);
     return res.json();

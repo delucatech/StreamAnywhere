@@ -103,7 +103,7 @@ export function createTopUpQueue(options: TopUpQueueOptions): TopUpQueue {
       try {
         if (await job.start()) {
           started++;
-          job.log(`${job.what}: topping up for the home screen`);
+          job.log(`${job.what}: started for the home screen`);
           await sleep(settleMs);
           const until = now() + runMs;
           while (job.running() && now() < until) await sleep(pollMs);

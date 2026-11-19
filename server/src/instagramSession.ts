@@ -368,10 +368,19 @@ export async function ensureInstagramSession(): Promise<boolean> {
   return s.state === 'logged_in';
 }
 
-export async function instagramSessionStatus(recheck = false): Promise<SessionStatus> {
+/** A check of the saved cookies is due (it starts the headless browser): none ran yet, none runs, the pacing allows one. */
+export function instagramWantsProbe(): boolean {
+  return s.state === 'none' && !probe && !probed && fileExists() && Date.now() >= probeRetryAt && probeTries < PROBE_MAX_TRIES;
+}
+
+/**
+ * `passive` (the home screen's badge): only what is known - the check of saved cookies is NOT
+ * started here (it launches the headless browser; the caller queues it for when the server has room).
+ */
+export async function instagramSessionStatus(recheck = false, passive = false): Promise<SessionStatus> {
   const sup = sessionSupported();
   if (!sup.ok) return { platform: 'instagram', supported: false, state: 'unsupported', error: sup.reason, message: 'Instagram runs in a browser on the server: it needs Chrome or Edge there (set BROWSER_PATH).' };
-  if (s.state === 'none') startProbe(recheck);
+  if (s.state === 'none' && !passive) startProbe(recheck);
   const base: SessionStatus = { platform: 'instagram', supported: true, state: s.state, username: s.username, nickname: s.nickname, avatar: s.avatar, error: s.error, browser: path.basename(sup.executable || 'browser') };
   if (s.state === 'none') {
     // "Checking" only while a check runs; between tries the reason (s.error) is shown and the cookies form is usable.

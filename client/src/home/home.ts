@@ -261,7 +261,7 @@ async function refreshBadges(): Promise<void> {
     PLATFORMS.map(async (p) => {
       let s: SessionStatus | undefined;
       try {
-        s = await api.session(p.id);
+        s = await api.session(p.id, false, true);
       } catch {
         s = undefined;
       }

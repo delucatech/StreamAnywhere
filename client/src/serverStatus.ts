@@ -25,6 +25,8 @@ export interface ServerWord {
   status?: ServerStatus;
   /** The last check failed (no answer in time, or an error): the server (or the connection) is down or stalled */
   failed?: boolean;
+  /** Failed checks in a row (0 after an answer) */
+  failures?: number;
 }
 
 /** The health answer in one line, or undefined when there is nothing to say. */
@@ -54,6 +56,7 @@ export function watchServer(onWord: (w: ServerWord) => void, opts: { everyMs?: n
   let answeredAt = 0;
   let inFlight = false;
   let timer = 0;
+  let fails = 0;
   const tell = (): void => {
     const now = Date.now();
     onWord({ ...word, answeredAgoMs: answeredAt ? now - answeredAt : undefined, pendingMs: inFlight ? now - askedAt : undefined });
@@ -65,9 +68,18 @@ export function watchServer(onWord: (w: ServerWord) => void, opts: { everyMs?: n
     try {
       const h = await api.health(timeoutMs);
       answeredAt = Date.now();
-      word = { line: describeServer(h), tookMs: answeredAt - askedAt, status: h.server, failed: false };
+      fails = 0;
+      word = { line: describeServer(h), tookMs: answeredAt - askedAt, status: h.server, failed: false, failures: 0 };
     } catch (e) {
-      word = { ...word, failed: true, line: navigator.onLine ? `The server did not answer the health check (${(e as Error).message}).` : 'You are offline.' };
+      fails++;
+      // One check without an answer is a busy moment (the small VM starting a browser answers after
+      // 8-12 s): said as "slow", and asked again. Only checks failing in a row are "did not answer".
+      const line = !navigator.onLine
+        ? 'You are offline.'
+        : fails === 1
+          ? `The server is slow to answer (no reply within ${Math.round(timeoutMs / 1000)} s). Checking again…`
+          : `The server did not answer the last ${fails} health checks (${(e as Error).message}).`;
+      word = { ...word, failed: true, failures: fails, line };
     } finally {
       inFlight = false;
     }

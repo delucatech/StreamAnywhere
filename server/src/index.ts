@@ -27,7 +27,7 @@ import { getProgress } from './progress';
 import { cancelInboxReads, cancelReads, commentsDebug, conversation, fetchComments, fetchProfile, followUser, inbox, inboxDebug, isCancelled, searchTikTok, sendMessage, SocialError } from './social';
 import { channelVideos, exploreYouTube, isYouTubeUrl, recommendedYouTube, resolveYouTube, searchYouTube, youTubeCategory, YouTubeError } from './youtube';
 import { exploreInstagram, forYouInstagram, instagramCategory, instagramStats, InstagramError, isInstagramUrl, pauseInstagramPages, profileInstagram, resolveInstagram, searchInstagram, setInstagramLogger, shutdownInstagram } from './instagram';
-import { instagramCancelLogin, instagramLogout, instagramMaySignIn, instagramSessionLog, ensureInstagramSession, instagramSessionLost, instagramSessionStatus, instagramSignedIn, instagramStartLogin, InstagramSessionError, setInstagramSessionLogger, shutdownInstagramSession } from './instagramSession';
+import { instagramCancelLogin, instagramLogout, instagramMaySignIn, instagramSessionLog, ensureInstagramSession, instagramSessionLost, instagramSessionStatus, instagramSignedIn, instagramWantsProbe, instagramStartLogin, InstagramSessionError, setInstagramSessionLogger, shutdownInstagramSession } from './instagramSession';
 import { setYouTubeSessionLogger, shutdownYouTubeSession, youtubeCancelLogin, youtubeCookieFile, youtubeLogout, youtubeSessionLog, youtubeSessionLost, youtubeSessionStatus, youtubeStartLogin, YouTubeSessionError } from './youtubeSession';
 import { exploreFacebook, facebookCategory, facebookStats, FacebookError, forYouFacebook, isFacebookUrl, profileFacebook, resolveFacebook, searchFacebook, setFacebookLogger } from './facebook';
 import { flushLiveTv, liveTvBusy, liveTvStats, registerLiveTv, setLiveTvLogger } from './livetv';
@@ -833,8 +833,18 @@ export async function buildServer() {
     }
   });
 
-  app.get<{ Querystring: { platform?: string; recheck?: string } }>('/api/session', async (req): Promise<SessionStatus> => {
+  app.get<{ Querystring: { platform?: string; recheck?: string; badge?: string } }>('/api/session', async (req): Promise<SessionStatus> => {
     const platform = platformOf(req.query.platform);
+    // badge=1 is the home screen's sign-in badge. For Instagram the check of saved cookies starts the
+    // headless browser (after a restart: load 4 and timers 5 s late on the VM, the home screen's
+    // health check timing out, 2026-11-19): a badge does not start it - it is queued with the
+    // home-screen top-ups and runs when the server has room. The feed and the Profile panel check at once.
+    if (platform === 'instagram' && req.query.badge === '1') {
+      if (instagramWantsProbe()) {
+        homeTopUps.add({ key: 'instagram sign-in check', what: 'instagram sign-in check', uses: 'instagram', log: (m) => req.log.info({ what: 'instagram-session' }, m), start: async () => (await ensureInstagramSession(), true), running: () => false });
+      }
+      return instagramSessionStatus(false, true);
+    }
     // recheck=1 is the panel's "Check again": a deliberate check of saved Instagram cookies goes past the probe pacing.
     return platform === 'youtube' ? youtubeSessionStatus() : platform === 'instagram' ? instagramSessionStatus(req.query.recheck === '1') : platform === 'facebook' ? facebookSessionStatus(req.query.recheck === '1') : sessionProbe();
   });

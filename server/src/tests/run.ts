@@ -197,7 +197,11 @@ avc720.m3u8
   console.log('\n== 1e. Live TV: encryption, tokens, playlist rewriting, redaction');
   useEphemeralLiveTvKey();
   const blob = encryptJson({ password: 'hunter2' });
-  check('encrypt / decrypt round trip; tampering fails', decryptJson<{ password: string }>(blob)?.password === 'hunter2' && decryptText(blob.slice(0, -2) + 'xx') === undefined && !blob.includes('hunter2'));
+  // tampered in the middle: the last characters of the encoded text can carry unused bits (or already
+  // be "xx"), which made a changed ending decrypt all the same once in a while (failed 1 run in ~8)
+  const mid = Math.floor(blob.length / 2);
+  const tampered = blob.slice(0, mid) + (blob[mid] === 'A' ? 'B' : 'A') + blob.slice(mid + 1);
+  check('encrypt / decrypt round trip; tampering fails', decryptJson<{ password: string }>(blob)?.password === 'hunter2' && decryptText(tampered) === undefined && !blob.includes('hunter2'));
   check('random IV for stored blobs, deterministic for tokens', encryptText('a') !== encryptText('a') && encryptText('a', true) === encryptText('a', true));
   const tok = mintToken('http://h.example/live/u/p/1.ts');
   check('segment token round trip, bad token refused', readToken(tok) === 'http://h.example/live/u/p/1.ts' && readToken('v1.x.y.z') === undefined && !/u\/p/.test(tok));
