@@ -8,17 +8,13 @@
  */
 import type { Platform, SessionStatus } from '../../../shared/types';
 import { api } from '../api';
+import { startAppUpdates } from '../appUpdate';
 import { PLATFORMS, rememberApp, type PlatformDef, type ToolApp } from '../platforms';
 import { watchServer, type ServerWord } from '../serverStatus';
 
-// The pages and their scripts come from this device from the second visit on (public/sw.js).
-if ('serviceWorker' in navigator && window.isSecureContext) {
-  navigator.serviceWorker.register('/sw.js').catch((e) => console.warn('[home] service worker not registered', e));
-  // shown from the cache while the network was slow, and a newer home screen has arrived since (a deploy)
-  navigator.serviceWorker.addEventListener('message', (e: MessageEvent) => {
-    if ((e.data as { type?: string } | null)?.type === 'page-updated') location.reload();
-  });
-}
+// The app opens from the copy on this device and looks for a newer version each time it is opened
+// (public/sw.js, src/appUpdate.ts). A newer home screen loads at once - unless an app is being opened.
+startAppUpdates({ canReload: () => !opening });
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const e = document.getElementById(id);

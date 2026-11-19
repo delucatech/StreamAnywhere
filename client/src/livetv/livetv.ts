@@ -16,6 +16,7 @@ import type { LiveTvChannel, LiveTvCodec, LiveTvPrefs, LiveTvPreset, LiveTvProgr
 import { HEALTH_AMEND_MS, pushTry, rateStream, ratingRank, type StreamRating } from '../../../shared/livetvHealth';
 import { codecBadge, codecLabel, decodes, detectDecoders, knownDecoders } from './codecs';
 import { api, ApiError } from '../api';
+import { startAppUpdates } from '../appUpdate';
 import { rememberApp } from '../platforms';
 import { watchServer, type ServerWord } from '../serverStatus';
 import { LiveTvPlayer } from './player';
@@ -23,13 +24,10 @@ import { LiveTvPlayer } from './player';
 (window as unknown as { streamAnywhereStarted: boolean }).streamAnywhereStarted = true;
 rememberApp('livetv');
 
-// Shown from the service worker's cache while the network was slow, and a newer page has arrived
-// since (a deploy): reloaded, unless a channel is being watched (then the next open gets it).
-if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.addEventListener('message', (e: MessageEvent) => {
-    if ((e.data as { type?: string } | null)?.type === 'page-updated' && !player.isOpen) location.reload();
-  });
-}
+// The page opens from the copy on this device and looks for a newer version each time it is opened
+// (public/sw.js, src/appUpdate.ts). A newer page loads at once, unless a channel is being watched
+// (then the next open gets it). `player` is created further down: asked only when an answer comes.
+startAppUpdates({ canReload: () => !player.isOpen });
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const e = document.getElementById(id);

@@ -15,6 +15,7 @@
  * into a <video> otherwise (sinks.ts).
  */
 import QRCode from 'qrcode';
+import { startAppUpdates } from '../appUpdate';
 import { IPHONE_HOTSPOT_ADDRESS, isRoomCode, MIRROR_LOCAL_PORT, normalizeRoomCode, type MirrorConfig, type MirrorPairInfo } from '../../../shared/mirror';
 import { createSink, mseAvailable, webCodecsAvailable, type MediaSink } from './sinks';
 import { MirrorWatcher, type WatchStatus } from './watch';
@@ -66,6 +67,11 @@ let wakeLock: { release(): Promise<void> } | undefined;
 let hudTimer = 0;
 let statsTimer = 0;
 let lastStatus: WatchStatus | undefined;
+
+// The server's page opens from the copy on this device and looks for a newer version each time it
+// is opened (public/sw.js, src/appUpdate.ts); a newer page loads at once, but not under a phone's
+// picture. The page the phone serves on its hotspot (plain http) has no service worker.
+if (!LOCAL) startAppUpdates({ canReload: () => lastStatus?.state !== 'live' });
 let config: MirrorConfig | undefined;
 /** The picture has shown in this watcher's life: a short reconnect keeps the player, not the lobby */
 let wasLive = false;

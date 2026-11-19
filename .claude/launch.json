@@ -56,6 +56,24 @@
       "port": 8790
     },
     {
+      "name": "app-alt-noauth",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": [
+        "/c",
+        "set SERVE_CLIENT=1&& set APP_PASSWORD_HASH=off&& npm run dev -w server -- --port 8790"
+      ],
+      "port": 8790
+    },
+    {
+      "name": "app-alt",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": [
+        "/c",
+        "set SERVE_CLIENT=1&& npm run dev -w server -- --port 8790"
+      ],
+      "port": 8790
+    },
+    {
       "name": "client-alt",
       "runtimeExecutable": "npm",
       "runtimeArgs": [

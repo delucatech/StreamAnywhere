@@ -42,6 +42,7 @@
  */
 import type { FeedAuthor, FeedItem, FeedSource, FollowState, LibraryEntry, LoginMode, MediaFormat, SessionInputRequest, SessionStatus } from '../../../shared/types';
 import { api, ApiError, apiUrl } from '../api';
+import { startAppUpdates } from '../appUpdate';
 import { pressed } from '../busy';
 import type { MediaPrefix } from '../media/demuxer';
 import { canSaveFiles, hasIndexedDb } from '../library/capabilities';
@@ -62,8 +63,6 @@ document.title = `${P.name} – StreamAnywhere`;
 document.body.classList.add(`platform-${P.id}`);
 document.documentElement.style.setProperty('--accent', P.accent);
 document.documentElement.style.setProperty('--accent-2', P.accent2);
-// The page and its scripts come from this device from the second open on (public/sw.js).
-if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('/sw.js').catch((e) => console.warn('[feed] service worker not registered', e));
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const el = document.getElementById(id);
@@ -3026,11 +3025,10 @@ function syncOverlayPause(): void {
 }
 document.addEventListener('visibilitychange', syncOverlayPause);
 
-// The service worker showed this page from its cache while the network was slow, and a newer page
-// has arrived since (a deploy): take it now while nothing is lost – only before playback started.
-navigator.serviceWorker?.addEventListener('message', (e: MessageEvent) => {
-  if ((e.data as { type?: string } | null)?.type === 'page-updated' && !state.started && !leaving) location.reload();
-});
+// The page opens from the copy on this device and looks for a newer version each time it is opened
+// (public/sw.js, src/appUpdate.ts). A newer page is taken at once while nothing is lost - only
+// before playback started; after that it loads at the next open.
+startAppUpdates({ canReload: () => !state.started && !leaving });
 
 // ---------- boot ----------
 // The feed must not wait for the session check (it may launch a browser on the server): start with

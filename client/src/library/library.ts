@@ -12,6 +12,7 @@
  */
 import type { LibraryEntry, LibraryOption, LibraryOptionsResponse, LibraryState } from '../../../shared/types';
 import { api, ApiError, apiUrl } from '../api';
+import { startAppUpdates } from '../appUpdate';
 import { PLATFORMS, rememberApp } from '../platforms';
 import { canPickDestination, canSaveFiles, canShareFiles, hasIndexedDb, isIOS, isTesla, persistenceNote, requestPersistence, storageInfo } from './capabilities';
 import * as db from './db';
@@ -1111,9 +1112,10 @@ document.addEventListener('visibilitychange', () => {
 // a second tab (or the player) changed the local store: check again when this tab is used
 window.addEventListener('focus', () => void refreshLocal());
 
-if ('serviceWorker' in navigator && window.isSecureContext) {
-  navigator.serviceWorker.register('/sw.js').catch((e) => console.warn('[library] service worker not registered', e));
-}
+// The page opens from the copy on this device and looks for a newer version each time it is opened
+// (public/sw.js, src/appUpdate.ts). A newer page loads at once, but never under a video that is
+// playing or a download that is running: those get it at the next open.
+startAppUpdates({ canReload: () => !leaving && !theater.isOpen && !dl.allTasks().some((t) => dl.isRunning(t)) });
 
 void (async () => {
   // the mirror first (instant, and all there is offline), the server right after

@@ -367,6 +367,46 @@ server. The page has a web-app manifest, so it can be added to a phone's or tabl
 and runs full screen. Platforms are declared once in `client/src/platforms.ts` (name, colours, icon,
 categories); the feed page reads `?platform=` and labels, colours and routes itself accordingly.
 
+## Installed app (PWA): opens from the device, updates in the background
+
+Since 2026-11-19 the app is installed on the device like a downloaded app (`client/public/sw.js`,
+`client/src/appUpdate.ts`, the `app-version` plugin in `client/vite.config.ts`). Before that the
+pages came from the network first and the device's copy was only a fallback.
+
+- **The build writes `/app-version.json`**: a version (a hash of the pages, the content-hashed
+  script and style names and the public files) and the list of every file of that build.
+- **The device holds one whole version** in one cache (`sa-app-v5`): the five app pages (home,
+  feed, library, livetv, mirror), all scripts and styles, the icons, and the version file it came
+  from. A page is answered from that copy **at once, without asking the network**, so opening the
+  app does not wait for the server and works with no connection at all.
+- **Every opening checks for a newer version.** "Opened" is a page load, a return from the
+  browser's back/forward cache, or the page becoming visible again (the installed app brought back
+  to the front, the car's screen woken). The worker fetches `/app-version.json`; a different
+  version is downloaded in the background — scripts first, then all pages together, the version
+  file last — and only then does the device switch to it. A download that fails half way leaves
+  the version in use untouched. The scripts of the previous version stay (a page still open may
+  need them); older ones are removed.
+- **A page whose newer copy is ready reloads into it**, unless something would be lost: the feed
+  after playback started, Live TV while a channel is open, the library while a video plays or a
+  download runs, Mirror under a live picture. Those say "A new version of the app is ready" and
+  get it at the next opening.
+- **No answer from the server**: the page (opened from the device's copy) shows
+  "Could not reach the server. Reconnecting…" while it tries again after 5, 10 and 20 s, then
+  "Could not connect to the server…" for a few seconds, and keeps trying quietly every 30 s (and at
+  once when the browser reports a connection). "Connected again." when the server is back.
+- **What an update never touches**: saved videos and the feed's media cache (IndexedDB), settings
+  (localStorage), the sign-in cookie. Channels, favorites and the library list live on the server.
+- **What still needs the server**: feeds, Live TV, sign-ins, comments, messages. Only the Video
+  Library's downloaded videos play with no connection.
+- **Site password**: a signed-out device still opens its saved copy of the page; the check (or
+  the first API call) then sends it to `/login`.
+- **Development**: the Vite dev server has no version file, so the worker keeps and answers
+  nothing there. To try the installed behaviour locally, build the client and run the server with
+  `SERVE_CLIENT=1` (launch configuration `app-alt-noauth`, port 8790).
+- Cache lookups ignore `Vary`: the server's CORS plugin answers everything with `Vary: Origin`,
+  and module scripts are requested with an `Origin` header while the worker's downloads are not —
+  a plain `match()` missed every script and an offline page stayed empty.
+
 ## Video Library
 
 The **Library** icon on the home screen opens `library.html` (the Video Downloader grew into it;
@@ -431,7 +471,8 @@ recorded size (`verifyVideos`, run on every load), so a store the browser evicte
 again*, never a stale "available". `downloads.ts` runs the tasks (progress, cancel, retry, quota
 check before a download, `QuotaExceededError` cleaned up). `capabilities.ts` decides per browser
 which actions are offered (Tesla: no file saving; iPhone: Files app and the share sheet; Chromium:
-destination picker). `sw.js` caches the page and its built assets so the library opens offline.
+destination picker). The service worker keeps the page and its scripts on the device, so the library
+opens offline (see *Installed app* below).
 
 **Player** (`client/src/library/player.ts`): the feed's `FeedPlayer` on a canvas, unchanged — WebCodecs
 (mp4box demux → `VideoDecoder` / `AudioDecoder` → canvas 2D + Web Audio) or the hidden-`<video>`
