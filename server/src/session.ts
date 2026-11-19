@@ -220,6 +220,58 @@ export function sessionSupported(): { ok: boolean; reason?: string; executable?:
   return { ok: true, executable: exe };
 }
 
+/**
+ * The headless browsers run at low CPU priority on Linux. The free VM has a fraction of a core:
+ * while Chromium started and loaded a page (85 s for Instagram's sign-in check, 2026-11-19) the
+ * server's own timers ran up to 18 s late and health answers took 6-42 s - the pages said the
+ * server did not answer. `nice` only matters when processes compete: an idle server leaves the
+ * browser all the CPU, a busy one gets its answers out first.
+ *
+ * puppeteer puts its own flags before ours, so the command cannot be "nice ... chromium" in the
+ * arguments: a two-line wrapper script is written once and launched in the browser's place.
+ * BROWSER_NICE sets the niceness (default 15; 0 turns it off). The plain executable is used
+ * wherever this does not apply or the script cannot be written.
+ */
+export function niceWrapperScript(exe: string, niceness: number): string {
+  // inside double quotes the shell still reads " $ ` and \ : each gets a backslash
+  const quoted = exe.replace(/["$`\\]/g, (ch) => '\\' + ch);
+  return ['#!/bin/sh', '# written by StreamAnywhere (session.ts): Chromium at low CPU priority', `exec nice -n ${niceness} "${quoted}" "$@"`, ''].join('\n');
+}
+let nicedFor: { exe: string; wrapper: string } | undefined;
+let niceBroken = false;
+export function headlessExecutable(exe: string): string {
+  if (process.platform !== 'linux' || niceBroken) return exe;
+  const niceness = process.env.BROWSER_NICE === undefined ? 15 : Math.max(0, Math.min(19, Math.round(Number(process.env.BROWSER_NICE)) || 0));
+  if (!niceness) return exe;
+  if (nicedFor?.exe === exe && fs.existsSync(nicedFor.wrapper)) return nicedFor.wrapper;
+  try {
+    const wrapper = path.join(os.tmpdir(), `streamanywhere-browser-nice-${process.getuid?.() ?? 0}.sh`);
+    fs.writeFileSync(wrapper, niceWrapperScript(exe, niceness), { mode: 0o755 });
+    fs.chmodSync(wrapper, 0o755);
+    nicedFor = { exe, wrapper };
+    return wrapper;
+  } catch {
+    return exe;
+  }
+}
+
+/**
+ * Launches a headless browser through the low-priority wrapper; when that start fails, once more
+ * with the browser itself - and the wrapper is left alone for the rest of this process (it was
+ * never run on anything but the VM: a start that fails because of it must not cost the feature).
+ */
+export async function launchHeadless<T>(exe: string, launch: (executablePath: string) => Promise<T>, note: (msg: string) => void): Promise<T> {
+  const command = headlessExecutable(exe);
+  if (command === exe) return launch(exe);
+  try {
+    return await launch(command);
+  } catch (e) {
+    niceBroken = true;
+    note(`the browser did not start at low priority (${(e as Error).message.split(/\r?\n/)[0]}); starting it the plain way`);
+    return launch(exe);
+  }
+}
+
 function profileExists(): boolean {
   return fs.existsSync(path.join(PROFILE_DIR, 'Default')) || fs.existsSync(path.join(PROFILE_DIR, 'Local State'));
 }
@@ -266,17 +318,20 @@ async function launchOnce(headless: boolean): Promise<Browser> {
   // Linux servers: /dev/shm is tiny on small VMs; a service user has no sandboxed user namespace.
   if (process.platform === 'linux') args.push('--disable-dev-shm-usage');
   if (process.platform === 'linux' && (process.getuid?.() === 0 || /^(1|true|yes)$/i.test(process.env.BROWSER_NO_SANDBOX || ''))) args.push('--no-sandbox');
-  return p.launch({
-    executablePath: sup.executable,
-    headless: headless ? 'new' : false,
-    userDataDir: PROFILE_DIR,
-    defaultViewport: headless ? { width: 1280, height: 900 } : null,
-    args,
-    ignoreDefaultArgs: ['--enable-automation'],
-    // Cold starts on a 0.25-vCPU VM took >20 s; puppeteer's default is 30 s.
-    timeout: 90_000,
-    protocolTimeout: 45_000,
-  });
+  const start = (executablePath: string | undefined) =>
+    p.launch({
+      executablePath,
+      headless: headless ? 'new' : false,
+      userDataDir: PROFILE_DIR,
+      defaultViewport: headless ? { width: 1280, height: 900 } : null,
+      args,
+      ignoreDefaultArgs: ['--enable-automation'],
+      // Cold starts on a 0.25-vCPU VM took >20 s; puppeteer's default is 30 s.
+      timeout: 90_000,
+      protocolTimeout: 45_000,
+    });
+  // the headless one at low CPU priority (launchHeadless); the sign-in window as it is
+  return headless && sup.executable ? launchHeadless(sup.executable, start, (m) => console.warn('[tiktok-browser] ' + m)) : start(sup.executable);
 }
 
 /** UA without "HeadlessChrome" and no media downloads (the viewer's browser fetches the videos itself). */

@@ -36,7 +36,7 @@ import { INSTAGRAM_CATEGORIES } from '../../shared/types';
 import { config } from './config';
 import { defaultExpiry, registerMedia } from './mediaStore';
 import { clearProgress, setProgress } from './progress';
-import { parkHeadlessBrowser, sessionSupported } from './session';
+import { launchHeadless, parkHeadlessBrowser, sessionSupported } from './session';
 import type { ParsedCookie } from './youtubeSession';
 
 type Browser = import('puppeteer-core').Browser;
@@ -395,7 +395,9 @@ async function launchBrowser(): Promise<Browser> {
   const args = ['--no-first-run', '--no-default-browser-check', '--disable-blink-features=AutomationControlled', '--mute-audio', '--window-size=1280,900', '--disable-gpu', '--disable-extensions', '--disable-background-networking', '--disable-sync', '--renderer-process-limit=2'];
   if (process.platform === 'linux') args.push('--disable-dev-shm-usage');
   if (process.platform === 'linux' && (process.getuid?.() === 0 || /^(1|true|yes)$/i.test(process.env.BROWSER_NO_SANDBOX || ''))) args.push('--no-sandbox');
-  return p.launch({ executablePath: sup.executable, headless: 'new', userDataDir: PROFILE_DIR, defaultViewport: { width: 1280, height: 900 }, args, ignoreDefaultArgs: ['--enable-automation'], timeout: 90_000, protocolTimeout: 60_000 });
+  const start = (executablePath: string | undefined) => p.launch({ executablePath, headless: 'new', userDataDir: PROFILE_DIR, defaultViewport: { width: 1280, height: 900 }, args, ignoreDefaultArgs: ['--enable-automation'], timeout: 90_000, protocolTimeout: 60_000 });
+  // at low CPU priority, so the server keeps answering while the browser starts and loads (session.ts launchHeadless)
+  return sup.executable ? launchHeadless(sup.executable, start, (m) => note(m)) : start(sup.executable);
 }
 
 async function getBrowser(): Promise<Browser> {

@@ -45,6 +45,7 @@ import { initTimescales, initVideoCodec, mintToken, pickVariant, playlistSegment
 import { normalizeXtreamServer, xtreamLiveUrl } from '../livetvXtream';
 import { LIVETV_PRESETS } from '../livetvPresets';
 import { createTopUpQueue } from '../homeTopUps';
+import { headlessExecutable, niceWrapperScript } from '../session';
 import { pushTry, rateStream, ratingRank } from '../../../shared/livetvHealth';
 import { cancelInboxReads, CancelledError, cancelReads, countOf, inboxReadsInFlight, readsInFlight, sleep as cancellableSleep, tracked as trackedRead } from '../social';
 
@@ -1242,6 +1243,12 @@ async function homeTopUpChecks(): Promise<void> {
   busyUntil = 0;
   const st = q.stats();
   check('the queue is empty afterwards', st.queued.length === 0 && st.running === undefined, st);
+
+  // the headless browsers' low-priority wrapper (session.ts)
+  const script = niceWrapperScript('/usr/bin/chromium', 15);
+  check('the browser wrapper execs nice with the browser and its arguments', script.split(String.fromCharCode(10))[0] === '#!/bin/sh' && script.includes('exec nice -n 15 "/usr/bin/chromium" "$@"'), script);
+  check('a path with shell characters is escaped in the wrapper', niceWrapperScript('/opt/my "odd" $dir/chrome', 10).includes('"/opt/my ' + String.fromCharCode(92) + '"odd' + String.fromCharCode(92) + '" ' + String.fromCharCode(92) + '$dir/chrome"'));
+  check('other systems launch the browser itself', process.platform === 'linux' || headlessExecutable('C:/x/chrome.exe') === 'C:/x/chrome.exe');
 }
 
 (async () => {
