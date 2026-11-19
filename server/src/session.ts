@@ -2112,13 +2112,18 @@ function startForYouPump(): void {
  * Nothing when the sign-in is not confirmed (no probe, no browser start for a home screen visit).
  */
 export function forYouWarm(log: (m: string) => void): boolean {
-  if (s.state !== 'logged_in' || s.pending.length >= 8) return false;
+  if (!forYouWantsWarm()) return false;
   feedLog = wrapLog(log);
   forYouAskedAt = Date.now();
   void feedPage()
     .then(() => startForYouPump())
     .catch((e) => log(`For You: warm-up could not open the page (${(e as Error).message})`));
   return true;
+}
+
+/** forYouWarm would load the page: the sign-in is confirmed and few items are pending. Starts nothing. */
+export function forYouWantsWarm(): boolean {
+  return s.state === 'logged_in' && s.pending.length < 8;
 }
 
 /** The home screen filling a device's saved feed: what is ready (pending items, else earlier videos), starting nothing. */

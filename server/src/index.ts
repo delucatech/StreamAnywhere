@@ -19,7 +19,7 @@ import { logStream, recentLog } from './logbuf';
 import { defaultExpiry, mediaCount, registerMedia } from './mediaStore';
 import { hostAllowed } from './ssrf';
 import { EXPLORE_DEFAULT_CATEGORY, FeedError, fetchExploreFeed, normalizeExploreOptions, type ExploreResult } from './feed';
-import { cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouCheap, forYouPutBack, forYouQuick, forYouStock, forYouWarm, headlessRunning, logout, rememberLog, workState, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
+import { cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouCheap, forYouPutBack, forYouQuick, forYouStock, forYouWantsWarm, forYouWarm, headlessRunning, logout, rememberLog, workState, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
 import { Reservoir, type ReservoirStats } from './reservoir';
 import { hasBatch, reviveItems, slimItems } from './lastBatch';
 import { invalidateJobs, jobStats, sharedJob } from './jobs';
@@ -32,6 +32,7 @@ import { setYouTubeSessionLogger, shutdownYouTubeSession, youtubeCancelLogin, yo
 import { exploreFacebook, facebookCategory, facebookStats, FacebookError, forYouFacebook, isFacebookUrl, profileFacebook, resolveFacebook, searchFacebook, setFacebookLogger } from './facebook';
 import { flushLiveTv, liveTvBusy, liveTvStats, registerLiveTv, setLiveTvLogger } from './livetv';
 import { serverPressure } from './pressure';
+import { createTopUpQueue, type TopUpJob } from './homeTopUps';
 import { ensureFacebookSession, facebookCancelLogin, facebookLogout, facebookMaySignIn, facebookSessionLog, facebookSessionLost, facebookSessionStatus, facebookSignedIn, facebookStartLogin, FacebookSessionError, setFacebookSessionLogger, shutdownFacebookSession } from './facebookSession';
 
 /** After the browser path rescued an explore request, prefer it for a while (datacenter IPs). */
@@ -306,6 +307,27 @@ export async function buildServer() {
     return out;
   };
 
+  /**
+   * Home-screen top-ups run one at a time and only when the machine has room (homeTopUps.ts): this
+   * says what is in a job's way. Anything the server is doing for a viewer comes first, and so does
+   * another platform's headless browser while it is open - two of them do not fit in the VM's 1 GB.
+   */
+  const noRoomForTopUp = (job: TopUpJob): string | undefined => {
+    const p = serverPressure();
+    if (p.pressure) return `the server is under pressure: ${p.reason || 'little memory left'}`;
+    const busy = serverBusy().filter((b) => !(job.uses === 'instagram' && b === 'the Instagram browser is open'));
+    if (busy.length) return busy[0];
+    const stocks: [string, Record<string, ReservoirStats>][] = [
+      ['YouTube', { ...youtubeStock(), ...(youtubeForYou ? { foryou: youtubeForYou.stats } : {}) }],
+      ['Instagram', { ...instagramStock(), ...(instagramForYou ? { foryou: instagramForYou.stats } : {}) }],
+      ['Facebook', { ...facebookStock(), ...(facebookForYou ? { foryou: facebookForYou.stats } : {}) }],
+    ];
+    for (const [name, stock] of stocks) if (Object.values(stock).some((st) => st.filling)) return `loading ${name} videos`;
+    if (job.uses !== 'tiktok' && headlessRunning()) return "TikTok's browser is open";
+    return undefined;
+  };
+  const homeTopUps = createTopUpQueue({ noRoom: noRoomForTopUp });
+
   app.get('/api/health', async (): Promise<HealthResponse> => {
     const p = serverPressure();
     return {
@@ -511,15 +533,16 @@ export async function buildServer() {
     };
     /**
      * A home screen request (warm, or a prefetch that found nothing fresh): top the feed up in the
-     * background when the server has served it before. `gate` is the sign-in check some platforms
-     * need first (awaited in the background, never by the home screen).
+     * background when the server has served it before - queued, one feed at a time and only when
+     * the machine has room (homeTopUps.ts; all platforms at once froze the VM on 2026-11-19).
+     * `gate` is the sign-in check some platforms need first (it may start a browser: part of the
+     * queued job, never awaited by the home screen).
      */
-    const homeScreen = (reservoir: Reservoir, what: string, gate?: () => Promise<boolean>): FeedResponse | undefined => {
+    const homeScreen = (reservoir: Reservoir, what: string, gate?: () => Promise<boolean>, uses?: TopUpJob['uses']): FeedResponse | undefined => {
       if (!warm && !prefetch) return undefined;
       const r = prefetch ? reservoir.takeCheap(count) : undefined;
-      if (!r || r.stale) {
-        if (gate) void gate().then((ok) => ok && reservoir.warmIfKnown() && log(`${what}: topping up for the home screen`), () => undefined);
-        else if (reservoir.warmIfKnown()) log(`${what}: topping up for the home screen`);
+      if ((!r || r.stale) && reservoir.wantsWarm()) {
+        homeTopUps.add({ key: what, what, uses, log, start: async () => (gate ? await gate() : true) && reservoir.warmIfKnown(), running: () => reservoir.busy });
       }
       return served(r, what);
     };
@@ -528,7 +551,7 @@ export async function buildServer() {
         const cat = instagramCategory(b.category);
         const reservoir = source === 'foryou' ? instagramForYouReservoir(log) : instagramReservoir(cat.id, log);
         const what = source === 'foryou' ? 'instagram foryou' : `instagram explore ${cat.label}`;
-        if (warm || prefetch) return instagramMaySignIn() ? homeScreen(reservoir, what, ensureInstagramSession)! : served(undefined, what);
+        if (warm || prefetch) return instagramMaySignIn() ? homeScreen(reservoir, what, ensureInstagramSession, 'instagram')! : served(undefined, what);
         // A viewer with nothing on screen does not wait for the sign-in check (a browser start on the
         // server): earlier videos go out now, and the check plus a fill run meanwhile.
         const quickBatch = quick && instagramMaySignIn() ? reservoir.takeStale(count) : undefined;
@@ -583,7 +606,9 @@ export async function buildServer() {
       }
       if (warm || prefetch) {
         const r = prefetch ? forYouCheap(count) : undefined;
-        if ((!r || r.stale) && forYouWarm(log)) log('foryou: the page goes on loading for the home screen');
+        if ((!r || r.stale) && forYouWantsWarm()) {
+          homeTopUps.add({ key: 'foryou', what: 'foryou', uses: 'tiktok', log, start: () => forYouWarm(log), running: () => forYouStock().pumping || workState().busy });
+        }
         return served(r, 'foryou');
       }
       if (quick) {
@@ -1066,7 +1091,7 @@ export async function buildServer() {
     return reply.code(200).headers({ 'content-type': f.mime, 'cache-control': 'public, max-age=31536000, immutable' }).send(fs.createReadStream(f.path));
   });
 
-  app.get('/api/stats', async () => ({ downloads: downloaderStats(), library: libraryStats(), imports: importStats(), livetv: liveTvStats(), mediaRecords: mediaCount(), exploreStock: exploreStock(), youtubeStock: youtubeStock(), youtubeForYouStock: youtubeForYou?.stats, instagramStock: instagramStock(), instagramForYouStock: instagramForYou?.stats, instagram: instagramStats(), facebookStock: facebookStock(), facebookForYouStock: facebookForYou?.stats, facebook: facebookStats(), forYouStock: forYouStock(), mirror: mirrorStats(), jobs: jobStats(), workPage: workState(), uptimeSec: Math.round(process.uptime()) }));
+  app.get('/api/stats', async () => ({ downloads: downloaderStats(), library: libraryStats(), imports: importStats(), livetv: liveTvStats(), mediaRecords: mediaCount(), exploreStock: exploreStock(), youtubeStock: youtubeStock(), youtubeForYouStock: youtubeForYou?.stats, instagramStock: instagramStock(), instagramForYouStock: instagramForYou?.stats, instagram: instagramStats(), facebookStock: facebookStock(), facebookForYouStock: facebookForYou?.stats, facebook: facebookStats(), forYouStock: forYouStock(), mirror: mirrorStats(), jobs: jobStats(), workPage: workState(), homeTopUps: homeTopUps.stats(), uptimeSec: Math.round(process.uptime()) }));
 
   if (config.serveClient) {
     const dist = findUp(path.join('client', 'dist')) || findUp(path.join('client', 'dist'), process.cwd()) || path.resolve('client', 'dist');

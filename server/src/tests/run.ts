@@ -44,6 +44,7 @@ import { redactUrl } from '../livetvHttp';
 import { initTimescales, initVideoCodec, mintToken, pickVariant, playlistSegments, readToken, remuxArgs, rewritePlaylist, segmentStartSec } from '../livetvStream';
 import { normalizeXtreamServer, xtreamLiveUrl } from '../livetvXtream';
 import { LIVETV_PRESETS } from '../livetvPresets';
+import { createTopUpQueue } from '../homeTopUps';
 import { pushTry, rateStream, ratingRank } from '../../../shared/livetvHealth';
 import { cancelInboxReads, CancelledError, cancelReads, countOf, inboxReadsInFlight, readsInFlight, sleep as cancellableSleep, tracked as trackedRead } from '../social';
 
@@ -1183,9 +1184,66 @@ async function inboxCancelChecks(): Promise<void> {
   check('"1.2K" / "45" / "3M" / "" as counts', countOf('1.2K') === 1200 && countOf('45') === 45 && countOf('3M') === 3_000_000 && countOf('') === undefined && countOf('4d ago') === undefined);
 }
 
+/** Home-screen top-ups (homeTopUps.ts): one at a time, only with room, dropped when the server stays busy. */
+async function homeTopUpChecks(): Promise<void> {
+  console.log('\n== Home-screen top-ups ==');
+  let clock = 0;
+  const sleep = async (ms: number): Promise<void> => {
+    clock += ms;
+    await Promise.resolve();
+  };
+  const seen: string[] = [];
+  let busyUntil = 0;
+  const running = new Map<string, number>();
+  const q = createTopUpQueue({ noRoom: (job) => (clock < busyUntil ? 'a viewer is watching' : job.uses !== 'tiktok' && running.has('tiktok') ? 'TikTok open' : undefined), sleep, now: () => clock, patienceMs: 60_000, runMs: 30_000, pollMs: 1000, settleMs: 1000 });
+  const job = (what: string, runFor: number, wanted = true, uses?: 'tiktok' | 'instagram') => ({
+    key: what,
+    what,
+    uses,
+    log: (m: string) => seen.push(m),
+    start: () => {
+      if (!wanted) return false;
+      seen.push(`start ${what} @${clock} with ${[...running.keys()].join(',') || 'nothing'} running`);
+      running.set(what, clock + runFor);
+      return true;
+    },
+    running: () => {
+      if ((running.get(what) ?? 0) > clock) return true;
+      running.delete(what);
+      return false;
+    },
+  });
+  check('a top-up is queued', q.add(job('a', 5000)) === true);
+  check('the same feed is not queued twice', q.add(job('a', 5000)) === false);
+  q.add(job('b', 5000));
+  q.add(job('nothing-to-do', 5000, false));
+  q.add(job('c', 5000));
+  await q.idle();
+  const starts = seen.filter((m) => m.startsWith('start '));
+  check('three top-ups ran, the one with nothing to do did not', starts.length === 3 && q.stats().started === 3, starts);
+  check('each started alone, after the one before it had finished', starts.every((m) => m.endsWith('with nothing running')), starts);
+
+  seen.length = 0;
+  busyUntil = clock + 20_000;
+  q.add(job('waits', 1000));
+  await q.idle();
+  check('a top-up waits while the server is busy and starts when there is room', seen.some((m) => m.includes('waits (a viewer is watching)')) && seen.some((m) => m.startsWith('start waits')) && clock >= busyUntil, seen);
+
+  seen.length = 0;
+  busyUntil = clock + 10 * 60_000;
+  q.add(job('dropped', 1000));
+  q.add(job('after', 1000));
+  await q.idle();
+  check('a top-up is dropped when the server stays busy past its patience', seen.some((m) => m.includes('dropped: home') || m.includes('home screen top-up dropped')) && !seen.some((m) => m.startsWith('start dropped')) && q.stats().dropped >= 1, seen);
+  busyUntil = 0;
+  const st = q.stats();
+  check('the queue is empty afterwards', st.queued.length === 0 && st.running === undefined, st);
+}
+
 (async () => {
   await offline();
   await inboxCancelChecks();
+  await homeTopUpChecks();
   await liveTvChecks();
   await downloaderChecks();
   if (skipNetwork) console.log('\n(network checks skipped: SKIP_NETWORK=1)');

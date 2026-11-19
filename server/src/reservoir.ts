@@ -229,6 +229,17 @@ export class Reservoir {
     void this.fill(true);
   }
 
+  /** warmIfKnown would plan a top-up: the feed was served before and its stock is low. Starts nothing. */
+  wantsWarm(): boolean {
+    this.prune();
+    return !!this.opt.persistKey && this.stock.length < this.opt.low && hasBatch(this.opt.persistKey);
+  }
+
+  /** A fill is running, or planned for a moment from now */
+  get busy(): boolean {
+    return Boolean(this.filling || this.fillTimer);
+  }
+
   /**
    * The home screen: a feed this server has served before (somebody uses it) whose stock is low is
    * topped up in the background, as if a viewer were watching – with the usual pauses between
@@ -236,8 +247,7 @@ export class Reservoir {
    * was planned.
    */
   warmIfKnown(): boolean {
-    this.prune();
-    if (!this.opt.persistKey || this.stock.length >= this.opt.low || !hasBatch(this.opt.persistKey)) return false;
+    if (!this.wantsWarm()) return false;
     this.lastTakeAt = this.opt.now();
     this.scheduleFill();
     return true;

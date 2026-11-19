@@ -336,8 +336,16 @@ function wantedFeed(p: PlatformDef): { source: 'foryou' | 'explore'; category: n
     return { source: 'foryou', category: p.defaultCategory };
   }
 }
-async function prefetchFeeds(): Promise<void> {
+async function prefetchFeeds(tries = 0): Promise<void> {
   if (document.hidden) return;
+  // Not while the server is starved or not answering: these requests ask it for background work
+  // (it queues that one feed at a time, but a machine that is already struggling gets none). Asked
+  // again a minute later, a few times.
+  const w = server.last();
+  if (w.failed || !w.status || w.status.pressure) {
+    if (tries < 5) window.setTimeout(() => void prefetchFeeds(tries + 1), 60_000);
+    return;
+  }
   for (const p of PLATFORMS) {
     const stamp = `streamanywhere.prefetched.${p.id}`;
     try {
