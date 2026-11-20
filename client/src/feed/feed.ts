@@ -1177,9 +1177,14 @@ const wantsForYou = (): boolean => prefs.pick !== 'user' || prefs.source === 'fo
 
 async function refreshSession(announce = false, recheck = false): Promise<SessionStatus | undefined> {
   try {
+    const answer = await api.session(P.id, recheck);
+    // What the page knew right before this answer - read after the wait, not before it: two checks
+    // can overlap (the 2 s poll against a server that takes longer to answer), and both would see
+    // "signing in" -> "signed in" and both restart the feed (the second restart then dropped the
+    // first one's videos and the page stayed empty: seen on the VM right after a deploy, 2026-11-20).
     const prev = state.session?.state;
     const prevProbing = Boolean(state.session?.probing);
-    state.session = await api.session(P.id, recheck);
+    state.session = answer;
     sessionPollFailures = 0;
     rememberSignedIn(state.session);
     if (state.session.state === 'logged_in') {
@@ -1807,9 +1812,16 @@ async function loadMore(): Promise<number> {
   startLoadingStatus();
   let added = 0;
   let before = 0;
+  // The feed was restarted (another tab, a sign-in) while this batch was on its way: the batch is
+  // for the old feed and is dropped, and the new feed - whose own request was refused while this one
+  // was running - is asked for now. Without that nothing would ever ask, and the page stays empty.
+  let superseded = false;
   try {
     const r = await fetchBatch();
-    if (gen !== state.generation) return 0;
+    if (gen !== state.generation) {
+      superseded = true;
+      return 0;
+    }
     before = state.entries.length;
     // Fresh videos behind stale ones (the server's earlier videos, a saved feed): right after the
     // video in view, so the viewer sees them next instead of after every stale one.
@@ -1829,7 +1841,10 @@ async function loadMore(): Promise<number> {
     if (!state.entries.length && state.emptyBatches >= 3) showEmpty(r.warnings[0] || 'The feed returned no playable videos. Try again or pick another category.');
     if (state.active < 0 && state.entries.length) setActive(0);
   } catch (e) {
-    if (gen !== state.generation) return 0;
+    if (gen !== state.generation) {
+      superseded = true;
+      return 0;
+    }
     state.emptyBatches++;
     const msg = errMsg(e);
     const body = e instanceof ApiError ? (e.body as { code?: unknown } | undefined) : undefined;
@@ -1859,6 +1874,7 @@ async function loadMore(): Promise<number> {
   } finally {
     state.loading = false;
     hideLoading();
+    if (superseded) scheduleMoreIfNeeded();
   }
   if (added && state.wantNext) {
     state.wantNext = false;
