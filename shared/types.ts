@@ -129,6 +129,12 @@ export interface HealthResponse {
   ytdlpDaemon?: { enabled: boolean; python?: string; running: number; busy: number; version?: string };
   /** Merges YouTube's separate video and audio files (the Video Downloader) */
   ffmpeg?: { available: boolean; path?: string; version?: string; error?: string };
+  /**
+   * YouTube search (server/src/youtubeSearch.ts): `direct` = YouTube's web API, `ytdlp` = forced
+   * off (YOUTUBE_SEARCH=ytdlp). `fallback` counts searches the direct path could not answer since
+   * the start (yt-dlp answered them); `lastFallback` says why. Missing on an older build.
+   */
+  youtubeSearch?: { mode: 'direct' | 'ytdlp'; clientVersion: string; direct: number; fallback: number; lastFallback?: { at: string; reason: string } };
   resolver: string;
   proxyAllowedHosts: string[];
   uptimeSec: number;

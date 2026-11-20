@@ -1,7 +1,8 @@
 /**
  * YouTube through yt-dlp (guest for Shorts, search and channels; the saved cookies for the account):
  *
- *  - search:   `ytsearch<N>:<query>` with --flat-playlist (about 3-4 s a page of 20).
+ *  - search:   YouTube's web API directly (youtubeSearch.ts, under a second a page); yt-dlp's
+ *              `ytsearch<N>:<query>` with --flat-playlist (about 3-4 s a page of 20) when that fails.
  *  - explore:  the Shorts tab of a hashtag page (youtube.com/hashtag/<tag>/shorts): vertical videos,
  *              about 30 per page in under 3 s. YouTube's Trending page is gone (redirects home).
  *  - channel:  youtube.com/@handle/videos, the same flat listing.
@@ -18,6 +19,7 @@ import type { FeedItem, MediaFormat, ResolveResponse, SearchResponse, YouTubeCat
 import { YOUTUBE_CATEGORIES } from '../../shared/types';
 import { defaultExpiry, registerMedia } from './mediaStore';
 import { ytdlpInfo } from './ytdlp';
+import { directSearchEnabled, noteDirect, noteFallback, searchDirect } from './youtubeSearch';
 
 /**
  * Listings keep a long limit (a page of a busy hashtag can take a while on the e2-micro). A single
@@ -126,8 +128,30 @@ async function listFlat(target: (n: number) => string, offset: number, count: nu
   return { items, hasMore: entries.length >= count };
 }
 
+/**
+ * A page of search results: straight from YouTube's web API (youtubeSearch.ts, under a second),
+ * else - that path failed, or YOUTUBE_SEARCH=ytdlp - through yt-dlp as before. `offset` is what the
+ * previous page answered (offset + PAGE); the direct path reads it as a page number.
+ */
 export async function searchYouTube(q: string, offset: number, log: (m: string) => void): Promise<SearchResponse> {
   const t0 = Date.now();
+  if (directSearchEnabled()) {
+    try {
+      const r = await searchDirect(q, offset, PAGE, log);
+      const items: FeedItem[] = [];
+      for (const e of r.entries) {
+        const it = entryToFeedItem(e);
+        if (it && !items.some((x) => x.id === it.id)) items.push(it);
+      }
+      noteDirect();
+      log(`search "${q}" [${offset}]: ${items.length} videos direct, ${r.requests} request(s), ${Date.now() - t0} ms`);
+      return { q, items, users: [], hasMore: r.hasMore, offset: offset + PAGE, warnings: [], elapsedMs: Date.now() - t0 };
+    } catch (e) {
+      const reason = (e as Error).message || String(e);
+      noteFallback(reason);
+      log(`search "${q}" [${offset}]: direct search failed after ${Date.now() - t0} ms (${reason.slice(0, 160)}); asking yt-dlp`);
+    }
+  }
   const r = await listFlat((n) => `ytsearch${n}:${q}`, offset, PAGE, log);
   return { q, items: r.items, users: [], hasMore: r.hasMore, offset: offset + PAGE, warnings: [], elapsedMs: Date.now() - t0 };
 }

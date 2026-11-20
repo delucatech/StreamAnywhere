@@ -6,6 +6,7 @@
  *  3. Proxy Range relay against a public CORS-enabled MP4 (network)
  *  4. Live TikTok resolution + cookie / CORS behaviour of each URL kind (network, TIKTOK_TEST_URL)
  *  5. Concurrent yt-dlp lookups through the warm daemons (network, skipped without yt-dlp)
+ *  5b/5c. YouTube direct search: parsing and pages (offline), a real search and the yt-dlp fallback (network)
  *
  * Network checks are skipped (not failed) when SKIP_NETWORK=1.
  */
@@ -14,7 +15,8 @@ import { mirrorChecks } from './mirror';
 import { hostAllowed, ipIsPrivate, assertSafeUpstream } from '../ssrf';
 import { parseTikTokUrl } from '../tiktok';
 import { isTikTokAd, itemToFeedItem } from '../feed';
-import { entryToFeedItem, isYouTubeUrl, pickAudio, youTubeVideoId } from '../youtube';
+import { entryToFeedItem, isYouTubeUrl, pickAudio, searchYouTube, youTubeVideoId } from '../youtube';
+import { clientVersionFromPage, directSearchEnabled, parseDuration, parseSearchAnswer, parseViews, searchDirect, SearchLayoutError, setSearchTransport, videoRendererToEntry, VIDEOS_ONLY, youtubeSearchStatus, type SearchTransport } from '../youtubeSearch';
 import { accountFromMenu, parseCookiesText, sapisidHash, toNetscape, YouTubeSessionError } from '../youtubeSession';
 import { accountFromAnswer, bodyHint, collectCodes, embedToFeedItem, handleFromQuery, instagramCode, isInstagramUrl, parseCount, parseProfileMeta, planExploreFill, sentAway, uaMetadata, urlExpiry } from '../instagram';
 import { cleanUserAgent, cookiesLookSignedIn, InstagramSessionError, parseInstagramCookies } from '../instagramSession';
@@ -1112,6 +1114,173 @@ async function network(): Promise<void> {
  * Lookups that arrive together each get a daemon of their own (or wait for one): before 2026-10-14
  * they could all land on the same idle daemon and all but the last never settled.
  */
+/** A videoRenderer shaped like the ones youtubei/v1/search returned on 2026-11-20 (trimmed). */
+function ytVideo(id: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    videoRenderer: {
+      videoId: id,
+      title: { runs: [{ text: `Video ${id}` }] },
+      ownerText: { runs: [{ text: 'ElectricBikeReview.com', navigationEndpoint: { browseEndpoint: { browseId: 'UCcJGe_WM6xKnB_J8ynIYx2A', canonicalBaseUrl: '/@ElectricBikeReview' } } }] },
+      lengthText: { simpleText: '51:20' },
+      viewCountText: { simpleText: '139,516 views' },
+      publishedTimeText: { simpleText: '3 months ago' },
+      thumbnail: {
+        thumbnails: [
+          { url: `https://i.ytimg.com/vi/${id}/hq720.jpg?sqp=-oaymwEcCOgCEMoBSFXyq4qpAw4IARUAAIhCGAFwAcABBg==&rs=AOn4CLDA&usqp=CBQ`, width: 360, height: 202 },
+          { url: `https://i.ytimg.com/vi/${id}/hq720.jpg?sqp=-oaymwEcCNAFEJQDSFXyq4qpAw4IARUAAIhCGAFwAcABBg==&rs=AOn4CLD6&usqp=CBQ`, width: 720, height: 404 },
+        ],
+      },
+      badges: [{ metadataBadgeRenderer: { style: 'BADGE_STYLE_TYPE_SIMPLE', label: '4K' } }],
+      thumbnailOverlays: [{ thumbnailOverlayTimeStatusRenderer: { style: 'DEFAULT', text: { simpleText: '51:20' } } }],
+      ...extra,
+    },
+  };
+}
+const ytFirstPage = (items: unknown[], token?: string): unknown => ({
+  responseContext: { visitorData: 'CgtWSVNJVE9SLUlE' },
+  contents: { twoColumnSearchResultsRenderer: { primaryContents: { sectionListRenderer: { contents: [{ itemSectionRenderer: { contents: items } }, ...(token ? [{ continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token } } } }] : [])] } } } },
+});
+const ytNextPage = (items: unknown[], token?: string): unknown => ({
+  onResponseReceivedCommands: [{ appendContinuationItemsAction: { continuationItems: [{ itemSectionRenderer: { contents: items } }, ...(token ? [{ continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token } } } }] : [])] } }],
+});
+const ytIds = (prefix: string, n: number): string[] => Array.from({ length: n }, (_, i) => `${prefix}${String(i).padStart(11 - prefix.length, '0')}`);
+
+async function youtubeSearchOfflineChecks(): Promise<void> {
+  console.log('\n== 5b. YouTube direct search (offline)');
+  check('durations', parseDuration('51:20') === 3080 && parseDuration('1:02:03') === 3723 && parseDuration('0:07') === 7 && parseDuration('LIVE') === undefined && parseDuration(undefined) === undefined);
+  check('view counts', parseViews('139,516 views') === 139516 && parseViews('1 view') === 1 && parseViews('No views') === 0 && parseViews('') === undefined);
+  const e0 = videoRendererToEntry(ytVideo('jgZkBxnn0K0').videoRenderer);
+  check('videoRenderer -> the flat entry yt-dlp would give', e0?.id === 'jgZkBxnn0K0' && e0.title === 'Video jgZkBxnn0K0' && e0.channel === 'ElectricBikeReview.com' && e0.channel_id === 'UCcJGe_WM6xKnB_J8ynIYx2A' && e0.uploader_id === '@ElectricBikeReview' && e0.duration === 3080 && e0.view_count === 139516 && e0.live_status === undefined && e0.thumbnails.length === 2, e0);
+  check('thumbnail URLs lose usqp= and keep their signature', e0?.thumbnails[1].url === 'https://i.ytimg.com/vi/jgZkBxnn0K0/hq720.jpg?sqp=-oaymwEcCNAFEJQDSFXyq4qpAw4IARUAAIhCGAFwAcABBg==&rs=AOn4CLD6', e0?.thumbnails[1].url);
+  const item = e0 && entryToFeedItem(e0);
+  check('the entry becomes the same feed item as a yt-dlp one', Boolean(item) && item!.canonicalUrl === 'https://www.youtube.com/watch?v=jgZkBxnn0K0' && item!.author.uniqueId === 'ElectricBikeReview' && item!.author.nickname === 'ElectricBikeReview.com' && item!.author.id === 'UCcJGe_WM6xKnB_J8ynIYx2A' && item!.duration === 3080 && item!.stats.plays === 139516 && item!.cover!.includes('hq720.jpg') && item!.cover!.includes('CNAFEJQD') && item!.formats.length === 0, item);
+  const liveE = videoRendererToEntry(ytVideo('LiveLiveLiv', { badges: [{ metadataBadgeRenderer: { style: 'BADGE_STYLE_TYPE_LIVE_NOW' } }], lengthText: undefined }).videoRenderer);
+  const soonE = videoRendererToEntry(ytVideo('SoonSoonSoo', { upcomingEventData: { startTime: '1795300000' } }).videoRenderer);
+  check('live and upcoming results are marked (and dropped like yt-dlp ones)', liveE?.live_status === 'is_live' && soonE?.live_status === 'is_upcoming' && entryToFeedItem(liveE!) === undefined && entryToFeedItem(soonE!) === undefined);
+  check('an encoded @handle is decoded', videoRendererToEntry(ytVideo('jgZkBxnn0K0', { ownerText: { runs: [{ text: 'X', navigationEndpoint: { browseEndpoint: { browseId: 'UCx', canonicalBaseUrl: '/@%E3%81%82' } } }] } }).videoRenderer)?.uploader_id === '@あ');
+  check('a renderer without a valid id is skipped', videoRendererToEntry({ videoId: 'short' }) === undefined && videoRendererToEntry(undefined) === undefined);
+
+  const p1 = parseSearchAnswer(ytFirstPage([ytVideo('aaaaaaaaaaa'), ytVideo('bbbbbbbbbbb'), ytVideo('aaaaaaaaaaa')], 'TOKEN-2'));
+  check('first page: videos in order, repeats dropped, token and visitor id kept', p1.entries.map((e) => e.id).join(',') === 'aaaaaaaaaaa,bbbbbbbbbbb' && p1.token === 'TOKEN-2' && p1.visitorData === 'CgtWSVNJVE9SLUlE', p1);
+  const p2 = parseSearchAnswer(ytNextPage([ytVideo('ccccccccccc')]));
+  check('continuation page: videos read, no token at the end', p2.entries.length === 1 && p2.entries[0].id === 'ccccccccccc' && p2.token === undefined, p2);
+  check('an empty result list is not an error', parseSearchAnswer(ytFirstPage([])).entries.length === 0);
+  const layoutError = (json: unknown): boolean => {
+    try {
+      parseSearchAnswer(json);
+      return false;
+    } catch (e) {
+      return e instanceof SearchLayoutError;
+    }
+  };
+  check('an answer without a result list is a layout error (yt-dlp answers instead)', layoutError({ responseContext: {} }) && layoutError(null));
+  check('videos only in an unknown renderer are a layout error, not "no results"', layoutError(ytFirstPage([{ lockupViewModel: { contentId: 'x', rendererContext: { commandContext: { onTap: { watchEndpoint: { videoId: 'jgZkBxnn0K0' } } } } } }])));
+
+  // pages over a scripted YouTube: 20, then 5 (2 of them repeats), then 19, then the end
+  const pages = [ytFirstPage(ytIds('a', 20).map((id) => ytVideo(id)), 'T2'), ytNextPage([...ytIds('a', 2), ...ytIds('b', 3)].map((id) => ytVideo(id)), 'T3'), ytNextPage(ytIds('c', 19).map((id) => ytVideo(id)), 'T4'), ytNextPage([])];
+  const sent: { body: Record<string, unknown>; visitor?: string }[] = [];
+  const scripted: SearchTransport = async (body, _v, visitor) => {
+    sent.push({ body, visitor });
+    const i = body.continuation === undefined ? 0 : Number(String(body.continuation).slice(1)) - 1;
+    return pages[i];
+  };
+  setSearchTransport(scripted);
+  const noLog = (): void => undefined;
+  const s0 = await searchDirect('Test Query', 0, 20, noLog);
+  check('page 0: one request with the query and the Videos filter', s0.entries.length === 20 && s0.hasMore && s0.requests === 1 && sent[0].body.query === 'Test Query' && sent[0].body.params === VIDEOS_ONLY && sent[0].visitor === undefined, { n: s0.entries.length, req: s0.requests });
+  const s1 = await searchDirect('test query', 20, 20, noLog);
+  const s1Ids = s1.entries.map((e) => e.id);
+  check('page 1: continuations until 20 new videos, repeats of page 0 skipped, visitor id sent', s1.entries.length === 20 && s1.hasMore && s1.requests === 2 && !s1Ids.some((id) => id.startsWith('a')) && s1Ids.join(',').startsWith('b0000000000,b0000000001,b0000000002,c0000000000') && sent[1].body.continuation === 'T2' && sent[2].body.continuation === 'T3' && sent[1].visitor === 'CgtWSVNJVE9SLUlE', { n: s1.entries.length, req: s1.requests, ids: s1Ids.slice(0, 4) });
+  const again = await searchDirect('test query', 20, 20, noLog);
+  check('a page already fetched is answered without a request', again.requests === 0 && again.entries.length === 20);
+  const s2 = await searchDirect('test query', 40, 20, noLog);
+  const s2Ids = s2.entries.map((e) => e.id);
+  check('the videos page 1 had no room for start page 2, then the results end', s2Ids.join(',') === 'c0000000017,c0000000018' && !s2.hasMore && s2.requests === 1, { ids: s2Ids, s2: { hasMore: s2.hasMore, requests: s2.requests } });
+  const s3 = await searchDirect('test query', 60, 20, noLog);
+  check('past the end: nothing more, and no request', s3.entries.length === 0 && !s3.hasMore && s3.requests === 0, s3);
+  setSearchTransport(async () => ytFirstPage([]));
+  const none = await searchDirect('nothing at all', 0, 20, noLog);
+  check('a query without results: an empty page, nothing more', none.entries.length === 0 && !none.hasMore && none.requests === 1, none);
+
+  sent.length = 0;
+  setSearchTransport(async (body) => {
+    sent.push({ body });
+    return body.continuation === undefined ? pages[0] : pages[1];
+  });
+  const cold = await searchDirect('cold start', 20, 20, noLog);
+  check('page 1 asked first (after a restart) walks from page 0', cold.entries.length > 0 && sent[0].body.query === 'cold start' && sent.length >= 2, { sent: sent.length });
+
+  let calls = 0;
+  setSearchTransport(async () => {
+    calls++;
+    if (calls === 1) throw new Error('YouTube search answered 503');
+    return pages[0];
+  });
+  let threw = false;
+  try {
+    await searchDirect('flaky', 0, 20, noLog);
+  } catch {
+    threw = true;
+  }
+  const retry = await searchDirect('flaky', 0, 20, noLog);
+  check('a failed request throws, and the next try starts clean', threw && retry.entries.length === 20, { threw, n: retry.entries.length });
+
+  setSearchTransport(scripted);
+  const both = await Promise.all([searchDirect('together', 0, 20, noLog), searchDirect('together', 20, 20, noLog)]);
+  check('two pages of one query asked at once are fetched in turn', both[0].entries.length === 20 && both[1].entries.length > 0 && !both[1].entries.some((e) => both[0].entries.some((x) => x.id === e.id)));
+
+  check('client version read from a youtube.com page', clientVersionFromPage('..."INNERTUBE_CLIENT_VERSION":"2.20261118.01.00","INNERTUBE_CLIENT_NAME":"WEB"...') === '2.20261118.01.00' && clientVersionFromPage('<html></html>') === undefined);
+  const prev = process.env.YOUTUBE_SEARCH;
+  process.env.YOUTUBE_SEARCH = 'ytdlp';
+  const off = !directSearchEnabled() && youtubeSearchStatus().mode === 'ytdlp';
+  if (prev === undefined) delete process.env.YOUTUBE_SEARCH;
+  else process.env.YOUTUBE_SEARCH = prev;
+  check('YOUTUBE_SEARCH=ytdlp switches the direct path off', off && directSearchEnabled() === (prev === undefined || !/^ytdlp$/i.test(prev)));
+  setSearchTransport(undefined);
+}
+
+async function youtubeSearchNetworkChecks(): Promise<void> {
+  console.log('\n== 5c. YouTube search, live');
+  const logs: string[] = [];
+  const log = (m: string): void => {
+    logs.push(m);
+  };
+  const failed = (e: unknown): undefined => {
+    logs.push(`threw: ${(e as Error).message}`);
+    return undefined;
+  };
+  const before = youtubeSearchStatus();
+  const t0 = Date.now();
+  const r0 = await searchYouTube('electric bikes review', 0, log).catch(failed);
+  const ms0 = Date.now() - t0;
+  const after = youtubeSearchStatus();
+  const usedDirect = after.direct === before.direct + 1 && after.fallback === before.fallback;
+  const items0 = r0?.items || [];
+  check('a real search is answered by the direct path', usedDirect && items0.length >= 10, { ms: ms0, items: items0.length, logs, status: after });
+  const first = items0[0];
+  check('its results carry what the feed shows (title, channel, duration, views, cover)', Boolean(first?.desc && first.author.nickname && first.author.id && first.duration && first.stats.plays !== undefined && first.cover?.startsWith('https://i.ytimg.com/')), first);
+  check('the first page took under 5 s', ms0 < 5000, ms0);
+  const t1 = Date.now();
+  const r1 = await searchYouTube('electric bikes review', r0?.offset ?? 20, log).catch(failed);
+  const items1 = r1?.items || [];
+  const fresh = items1.filter((it) => !items0.some((x) => x.id === it.id));
+  check('"more" brings only new videos', fresh.length >= 10 && fresh.length === items1.length, { ms: Date.now() - t1, items: items1.length, fresh: fresh.length });
+
+  if (!(await detectYtDlp()).available) {
+    console.log('(fallback check skipped: no yt-dlp on this machine)');
+    return;
+  }
+  setSearchTransport(async () => {
+    throw new Error('simulated: YouTube changed something');
+  });
+  const fb0 = youtubeSearchStatus().fallback;
+  const t2 = Date.now();
+  const rf = await searchYouTube('sourdough starter tips', 0, log).catch(failed);
+  setSearchTransport(undefined);
+  const st = youtubeSearchStatus();
+  check('when the direct path fails, yt-dlp still answers the search', (rf?.items.length || 0) >= 10 && st.fallback === fb0 + 1 && Boolean(st.lastFallback?.reason.includes('simulated')), { ms: Date.now() - t2, items: rf?.items.length, status: st, logs: logs.slice(-2) });
+}
+
 async function ytdlpChecks(): Promise<void> {
   console.log('\n== 5. yt-dlp lookups at the same time');
   if (!(await detectYtDlp()).available) {
@@ -1253,6 +1422,7 @@ async function homeTopUpChecks(): Promise<void> {
 
 (async () => {
   await offline();
+  await youtubeSearchOfflineChecks();
   await inboxCancelChecks();
   await homeTopUpChecks();
   await liveTvChecks();
@@ -1260,6 +1430,7 @@ async function homeTopUpChecks(): Promise<void> {
   if (skipNetwork) console.log('\n(network checks skipped: SKIP_NETWORK=1)');
   else {
     await network();
+    await youtubeSearchNetworkChecks();
     await ytdlpChecks();
   }
   console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : failures + ' CHECK(S) FAILED'}`);

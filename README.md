@@ -746,7 +746,12 @@ Measured 2026-10-12 (dev machine and the GCP VM; the VM's IP is not bot-checked 
 - **Explore** = the Shorts tab of a hashtag page (`youtube.com/hashtag/<tag>/shorts`, 30 vertical
   videos in under 3 s); the chips are hashtags and "All" rotates through them. YouTube's Trending
   page no longer exists (it redirects home).
-- **Search** = `yt-dlp "ytsearchN:…"` (3–4 s a page of 20). Channels (`@handle/videos`) back the
+- **Search** = YouTube's own web API (`youtubei/v1/search`, the call youtube.com's search page
+  makes) straight from the server: under a second a page of 20, no Python or browser involved
+  ([`server/src/youtubeSearch.ts`](server/src/youtubeSearch.ts)). When that fails (an error, or a
+  layout the parser no longer reads) the same search goes to `yt-dlp "ytsearchN:…"` (3–4 s a page
+  of 20) and `/api/health` → `youtubeSearch` counts it (`fallback`, `lastFallback`).
+  `YOUTUBE_SEARCH=ytdlp` sends every search to yt-dlp. Channels (`@handle/videos`) back the
   Profile button. Everything is guest access; YouTube sign-in / a personal feed comes later.
 - **Playback**: YouTube gives guests no muxed format (the 360p one needs a PO token and answers
   403), so each video is resolved (`yt-dlp -j`, cached an hour) to an H.264 video-only file (up
