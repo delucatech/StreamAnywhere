@@ -20,6 +20,7 @@ import { YOUTUBE_CATEGORIES } from '../../shared/types';
 import { defaultExpiry, registerMedia } from './mediaStore';
 import { ytdlpInfo } from './ytdlp';
 import { directSearchEnabled, noteDirect, noteFallback, searchDirect } from './youtubeSearch';
+import { tvHomeFeed } from './youtubeTv';
 
 /**
  * Listings keep a long limit (a page of a busy hashtag can take a while on the e2-micro). A single
@@ -169,6 +170,23 @@ export async function exploreYouTube(tag: string, page: number, count: number, l
  */
 export async function recommendedYouTube(offset: number, count: number, cookieFile: string, log: (m: string) => void): Promise<{ items: FeedItem[]; hasMore: boolean }> {
   return listFlat(() => 'https://www.youtube.com/feed/recommended', offset, count, log, cookieFile);
+}
+
+/**
+ * The signed-in account's recommendations through the code sign-in: the home feed of YouTube's TV
+ * API (youtubeTv.ts), plain HTTPS, about 0.4 s a request. Throws TvAuthError when Google no longer
+ * accepts the sign-in.
+ */
+export async function recommendedYouTubeTv(count: number, log: (m: string) => void): Promise<{ items: FeedItem[]; hasMore: boolean }> {
+  const t0 = Date.now();
+  const r = await tvHomeFeed(count, log);
+  const items: FeedItem[] = [];
+  for (const e of r.entries) {
+    const it = entryToFeedItem(e);
+    if (it && !items.some((x) => x.id === it.id)) items.push(it);
+  }
+  log(`home feed (code sign-in): ${r.entries.length} entries, ${items.length} videos, ${r.requests} request(s), ${Date.now() - t0} ms`);
+  return { items, hasMore: true };
 }
 
 /** A channel's videos (its /videos tab; Shorts live on /shorts and are listed when /videos is empty). */

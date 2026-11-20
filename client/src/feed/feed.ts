@@ -131,6 +131,8 @@ const el = {
   sessionQr: $('sessionQr'),
   sessionQrImg: $<HTMLImageElement>('sessionQrImg'),
   sessionQrHint: $('sessionQrHint'),
+  sessionUserCode: $('sessionUserCode'),
+  sessionCookiesToggle: $<HTMLButtonElement>('sessionCookiesToggle'),
   sessionCode: $<HTMLFormElement>('sessionCode'),
   sessionCodeText: $<HTMLInputElement>('sessionCodeText'),
   sessionCodeSend: $<HTMLButtonElement>('sessionCodeSend'),
@@ -628,7 +630,17 @@ el.sessionRefresh.addEventListener('click', () =>
     { label: 'Checking' },
   ),
 );
-el.sessionLogin.addEventListener('click', () => pressed(el.sessionLogin, () => startLogin('qr'), { label: 'Starting' }));
+/** The panel's main sign-in: TikTok's QR code, or (YouTube) a code approved at Google. */
+const MAIN_LOGIN: LoginMode = P.codeSignIn ? 'code' : 'qr';
+if (P.codeSignIn) el.sessionLogin.textContent = 'Sign in with a code';
+el.sessionLogin.addEventListener('click', () => pressed(el.sessionLogin, () => startLogin(MAIN_LOGIN), { label: 'Starting' }));
+/** Code sign-in platforms keep the cookie form folded away until asked for. */
+let cookiesOpen = false;
+el.sessionCookiesToggle.addEventListener('click', () => {
+  cookiesOpen = !cookiesOpen;
+  renderSession();
+  if (cookiesOpen) el.sessionCookiesText.focus();
+});
 el.sessionLoginWindow.addEventListener('click', () => pressed(el.sessionLoginWindow, () => startLogin('window'), { label: 'Opening' }));
 el.sessionLoginWindow.title = `Opens ${P.name}'s sign-in page in a visible browser window on the machine that runs the server`;
 // Cookie sign-in (YouTube, Instagram): the pasted text (or the chosen file's text) goes to the server, which checks it with the site.
@@ -674,7 +686,7 @@ el.sessionRestart.addEventListener('click', () =>
     el.sessionRestart,
     async () => {
       await cancelLogin(true);
-      await startLogin('qr');
+      await startLogin(MAIN_LOGIN);
     },
     { label: 'Restarting' },
   ),
@@ -965,7 +977,9 @@ function renderSession(): void {
     lines.push('For You needs the Node server (npm run dev / npm start) on a machine with Chrome or Edge. The Explore feed works everywhere.');
   } else if (s.state === 'logged_in' && cookieSignIn) {
     lines.push(`<b>Signed in as @${esc(s.username || '?')}</b>${s.nickname && s.nickname !== s.username ? ` (${esc(s.nickname)})` : ''}`);
-    lines.push(`Your ${esc(P.tabs.foryou)} feed is ${esc(P.name)}'s own recommendations for this account. Sign out deletes the saved cookies on the server.`);
+    lines.push(
+      `Your ${esc(P.tabs.foryou)} feed is ${esc(P.name)}'s own recommendations for this account. ${s.via === 'code' ? 'Sign out removes the sign-in from the server and withdraws it at Google.' : 'Sign out deletes the saved cookies on the server.'}`,
+    );
     if (s.notice) lines.push(`<span style="color:var(--muted)">${esc(s.notice)}</span>`);
   } else if (s.state === 'logged_in') {
     lines.push(`<b>Signed in as @${esc(s.username || '?')}</b>${s.nickname && s.nickname !== s.username ? ` (${esc(s.nickname)})` : ''}`);
@@ -973,6 +987,9 @@ function renderSession(): void {
   } else if (s.state === 'login_pending' && s.loginMode === 'qr' && s.qrState === 'verify' && s.verifyStep === 'code') {
     lines.push('<b>Almost there – enter the code TikTok e-mailed you.</b>');
     lines.push(esc(s.message || ''));
+  } else if (s.state === 'login_pending' && s.loginMode === 'code') {
+    lines.push('<b>Approve the sign-in on your phone or computer.</b>');
+    lines.push(`Scan the QR code with your phone's camera and check that Google shows the same code, or open ${esc(codeSite(s))} on any device and type the code. Then choose your ${esc(P.name)} account and press Allow. This page updates by itself.`);
   } else if (s.state === 'login_pending' && s.loginMode === 'qr') {
     lines.push('<b>Scan to sign in.</b>');
     lines.push('In the TikTok app: Profile → ☰ menu → My QR code → scan icon (or point the in-app camera at this code), then confirm. The code refreshes by itself; this page updates automatically.');
@@ -993,13 +1010,19 @@ function renderSession(): void {
     if (s.error) lines.push(`<span style="color:var(--err)">${esc(s.error)}</span>`);
   }
   el.sessionText.innerHTML = lines.filter(Boolean).join('\n');
-  const showQr = s.state === 'login_pending' && s.loginMode === 'qr';
+  const codeLogin = s.state === 'login_pending' && s.loginMode === 'code';
+  const showQr = s.state === 'login_pending' && (s.loginMode === 'qr' || codeLogin);
   el.sessionQr.classList.toggle('hidden', !showQr);
+  el.sessionUserCode.classList.toggle('hidden', !codeLogin);
+  if (codeLogin) {
+    el.sessionUserCode.innerHTML = `<b>${esc(s.code || '')}</b><span>${esc(codeSite(s))}</span>`;
+    void drawCodeQr(s);
+  }
   if (showQr) {
     el.sessionNotice.textContent = s.notice || '';
     el.sessionNotice.classList.toggle('hidden', !s.notice);
     const live = s.qrState === 'verify' && Boolean(s.pageShot);
-    const img = (live ? s.pageShot : s.qr || s.pageShot) || '';
+    const img = codeLogin ? (codeQr?.link === codeLink(s) ? codeQr.img : '') : (live ? s.pageShot : s.qr || s.pageShot) || '';
     if (img && el.sessionQrImg.src !== img) el.sessionQrImg.src = img;
     el.sessionQrImg.classList.toggle('page-shot', live || (!s.qr && Boolean(s.pageShot)));
     const codeStep = s.qrState === 'verify' && s.verifyStep === 'code';
@@ -1019,20 +1042,24 @@ function renderSession(): void {
       if (!s.verifyResult || s.verifyResult.state === 'rejected') el.sessionCodeText.focus();
     }
     if (!img) el.sessionQrImg.removeAttribute('src');
-    qrExpiresAt = s.qr && !live ? s.qrExpiresAt || 0 : 0;
+    qrExpiresAt = codeLogin ? s.codeExpiresAt || 0 : s.qr && !live ? s.qrExpiresAt || 0 : 0;
     renderQrHint(s);
   }
   const idle = s.supported && s.state !== 'logged_in' && s.state !== 'login_pending';
   const locked = showQr && s.qrState === 'verify' && s.verifyStep === 'code';
-  el.sessionLogin.classList.toggle('hidden', !idle || cookieSignIn);
+  const codeFirst = Boolean(P.codeSignIn);
+  el.sessionLogin.classList.toggle('hidden', !idle || (cookieSignIn && !codeFirst) || Boolean(s.probing && codeFirst));
   el.sessionLoginWindow.classList.toggle('hidden', !idle);
-  el.sessionCookies.classList.toggle('hidden', !(idle && cookieSignIn && !s.probing));
+  el.sessionCookiesToggle.classList.toggle('hidden', !(idle && codeFirst && !s.probing));
+  el.sessionCookiesToggle.textContent = cookiesOpen ? 'Hide the cookie sign-in' : 'Use browser cookies instead';
+  el.sessionCookies.classList.toggle('hidden', !(idle && cookieSignIn && !s.probing && (!codeFirst || cookiesOpen)));
   if (!(idle && cookieSignIn)) el.sessionCookiesResult.classList.add('hidden');
   // "Sign out" only when there is a session to end; while a sign-in is pending the button is "Cancel".
   // In the code step only Cancel remains (Cancel forgets the attempt; "Sign in" then starts from zero).
   el.sessionLogout.classList.toggle('hidden', s.state !== 'logged_in');
   el.sessionCancel.classList.toggle('hidden', s.state !== 'login_pending');
-  el.sessionRestart.classList.toggle('hidden', !(s.state === 'login_pending' && s.loginMode === 'qr') || locked);
+  el.sessionRestart.classList.toggle('hidden', !(s.state === 'login_pending' && (s.loginMode === 'qr' || s.loginMode === 'code')) || locked);
+  el.sessionRestart.title = codeLogin ? 'Cancel this code and get a new one' : 'Cancel this attempt and load a fresh QR code';
   el.sessionRefresh.classList.toggle('hidden', locked);
   el.sessionClose.classList.toggle('hidden', locked);
   el.session.querySelector('.session-inner')?.classList.toggle('locked', locked);
@@ -1069,9 +1096,36 @@ function renderCodeStep(s: SessionStatus): void {
   el.sessionCodeMeta.textContent = `${s.codeSentAt ? (sentMin < 1 ? 'Code sent just now' : `Code sent ${sentMin} min ago`) : 'Waiting for the code'}${until ? ` · this page waits until ${until.toLocaleDateString(undefined, { weekday: 'short' })} ${until.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}` : ''}`;
   el.sessionCodeResend.disabled = el.sessionCodeResend.classList.contains('busy');
 }
+/** Where a code sign-in is approved, as people type it ("google.com/device"). */
+const codeSite = (s: SessionStatus): string => (s.codeUrl || 'https://www.google.com/device').replace(/^https?:\/\/(www\.)?/, '');
+/** The address the QR code carries: Google's page with the code already filled in. */
+const codeLink = (s: SessionStatus): string => `${s.codeUrl || 'https://www.google.com/device'}?user_code=${encodeURIComponent(s.code || '')}`;
+let codeQr: { link: string; img: string } | undefined;
+let codeQrDrawing = '';
+/** Draws the QR code of a pending code sign-in (the QR library loads only now) and shows it. */
+async function drawCodeQr(s: SessionStatus): Promise<void> {
+  const link = codeLink(s);
+  if (!s.code || codeQr?.link === link || codeQrDrawing === link) return;
+  codeQrDrawing = link;
+  try {
+    const QRCode = (await import('qrcode')).default;
+    codeQr = { link, img: await QRCode.toDataURL(link, { margin: 0, width: 480, errorCorrectionLevel: 'M' }) };
+    if (state.session?.loginMode === 'code' && state.session.code === s.code) renderSession();
+  } catch (e) {
+    // Without the picture the code and the address are still on the screen.
+    console.warn('QR code could not be drawn', e);
+  } finally {
+    codeQrDrawing = '';
+  }
+}
+
 let qrExpiresAt = 0;
 function renderQrHint(s: SessionStatus): void {
   const left = qrExpiresAt ? Math.max(0, Math.round((qrExpiresAt - Date.now()) / 1000)) : 0;
+  if (s.loginMode === 'code') {
+    el.sessionQrHint.textContent = left > 0 ? `Waiting for your approval – the code is good for ${left >= 120 ? `${Math.round(left / 60)} more minutes` : `${left} s`}` : 'The code ran out – "Start over" gives a new one';
+    return;
+  }
   el.sessionQrHint.textContent =
     s.qrState === 'verify'
       ? s.verifyStep === 'code'
@@ -1188,7 +1242,9 @@ function pollSession(): void {
 async function startLogin(mode: LoginMode, cookies?: string): Promise<void> {
   el.sessionLogin.disabled = el.sessionLoginWindow.disabled = true;
   if (mode === 'cookies') showCookiesResult('wait', `Checking the cookies with ${P.name}…`);
-  else el.sessionText.innerHTML = mode === 'qr' ? '<b>Starting TikTok on the server…</b>\nThis can take up to a minute the first time (the browser has to start).' : '<b>Opening the sign-in window on the server…</b>';
+  else
+    el.sessionText.innerHTML =
+      mode === 'qr' ? '<b>Starting TikTok on the server…</b>\nThis can take up to a minute the first time (the browser has to start).' : mode === 'code' ? '<b>Asking Google for a sign-in code…</b>' : '<b>Opening the sign-in window on the server…</b>';
   try {
     const prev = state.session?.state;
     state.session = await api.sessionLogin(mode, P.id, cookies);
@@ -1253,7 +1309,7 @@ async function cancelLogin(quiet = false): Promise<void> {
   try {
     state.session = await api.sessionCancel(P.id);
     renderSession();
-    if (!quiet) toast('Sign-in cancelled – "Sign in with QR code" starts over');
+    if (!quiet) toast(`Sign-in cancelled – "${el.sessionLogin.textContent || 'Sign in'}" starts over`);
   } catch (e) {
     toast(`Cancel failed: ${errMsg(e)}`, true);
     renderSession();
@@ -1264,7 +1320,12 @@ async function cancelLogin(quiet = false): Promise<void> {
 
 async function signOut(cancelOnly = false): Promise<void> {
   el.sessionLogout.disabled = el.sessionCancel.disabled = true;
-  el.sessionText.innerHTML = P.signIn === 'cookies' ? '<b>Signing out…</b>\nDeleting the saved cookies on the server.' : '<b>Signing out…</b>\nClosing the browser session on the server (a few seconds).';
+  el.sessionText.innerHTML =
+    state.session?.via === 'code'
+      ? '<b>Signing out…</b>\nRemoving the sign-in from the server and withdrawing it at Google.'
+      : P.signIn === 'cookies'
+        ? '<b>Signing out…</b>\nDeleting the saved cookies on the server.'
+        : '<b>Signing out…</b>\nClosing the browser session on the server (a few seconds).';
   try {
     state.session = await api.sessionLogout(P.id);
     rememberSignedIn(state.session);

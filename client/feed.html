@@ -218,7 +218,9 @@
                 <button id="sessionCodeResend" class="btn ghost small" type="button" title="Ask TikTok to e-mail a new code (the old one stops working)">Resend code</button>
               </div>
             </form>
-            <img id="sessionQrImg" alt="TikTok login QR code" draggable="false" />
+            <img id="sessionQrImg" alt="Sign-in QR code" draggable="false" />
+            <!-- Code sign-in (YouTube): the code to confirm on the Google page, and where to type it without the QR code -->
+            <div id="sessionUserCode" class="session-user-code hidden" aria-live="polite"></div>
             <div id="sessionQrHint" class="session-qr-hint"></div>
             <button id="sessionManualToggle" class="btn ghost small hidden" type="button">Having trouble? Show manual controls</button>
             <div id="sessionInput" class="session-manual hidden">
@@ -250,6 +252,7 @@
           </form>
           <div class="session-actions">
             <button id="sessionLogin" class="btn primary" type="button">Sign in with QR code</button>
+            <button id="sessionCookiesToggle" class="btn hidden" type="button">Use browser cookies instead</button>
             <button id="sessionLoginWindow" class="btn" type="button" title="Opens the sign-in page in a visible browser window on the machine that runs the server">Open sign-in window on server</button>
             <button id="sessionRefresh" class="btn" type="button">Check again</button>
             <button id="sessionRestart" class="btn hidden" type="button" title="Cancel this attempt and load a fresh QR code">Start over</button>

@@ -559,8 +559,10 @@ export type SessionState = 'unsupported' | 'none' | 'login_pending' | 'logged_in
 
 /** 'qr' = TikTok's QR login rendered by a headless page and shown in the feed page (works on servers
  *  without a display); 'window' = a visible browser window on the server machine (every platform);
- *  'cookies' = YouTube / Instagram / Facebook: the cookies of a browser that is signed in, pasted or uploaded (works everywhere). */
-export type LoginMode = 'qr' | 'window' | 'cookies';
+ *  'cookies' = YouTube / Instagram / Facebook: the cookies of a browser that is signed in, pasted or uploaded (works everywhere);
+ *  'code' = YouTube: Google's sign-in for TVs - the server shows a code (and the page a QR code of it) that the
+ *  viewer approves on a phone or computer with the Google account (works everywhere, nothing to export). */
+export type LoginMode = 'qr' | 'window' | 'cookies' | 'code';
 
 export interface SessionLoginRequest {
   /** Which platform to sign in to (default tiktok) */
@@ -607,6 +609,14 @@ export interface SessionStatus {
   probing?: boolean;
   /** While login_pending: which flow is running */
   loginMode?: LoginMode;
+  /** While a code sign-in (YouTube) is pending: the code to approve, where (https://www.google.com/device;
+   *  `codeUrl?user_code=<code>` opens it with the code filled in - that is what the QR code carries), and
+   *  the ms epoch when the code runs out */
+  code?: string;
+  codeUrl?: string;
+  codeExpiresAt?: number;
+  /** YouTube, signed in: what the sign-in is - a code approved at Google, or browser cookies */
+  via?: 'code' | 'cookies';
   /** While a QR login is pending: the current QR code as a data: URL (PNG), refreshed as TikTok rotates it */
   qr?: string;
   /** 'verify' = the phone confirmed but TikTok wants an extra identity verification inside the server's

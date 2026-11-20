@@ -972,6 +972,22 @@ button {
   padding: 0;
   image-rendering: auto;
 }
+/* Code sign-in (YouTube): the code in letters big enough to compare across a room (the car's screen) */
+.session-user-code {
+  text-align: center;
+  line-height: 1.35;
+}
+.session-user-code b {
+  display: block;
+  font-size: 34px;
+  letter-spacing: 0.12em;
+  font-variant-numeric: tabular-nums;
+  user-select: all;
+}
+.session-user-code span {
+  color: var(--muted);
+  font-size: 14px;
+}
 /* Live view of the server's sign-in page while TikTok asks for a verification there: clickable */
 .session-qr img.live {
   cursor: crosshair;

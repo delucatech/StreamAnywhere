@@ -32,6 +32,9 @@ export interface PlatformDef {
   social: boolean;
   /** How the sign-in panel's main button works: TikTok's QR code, or pasted/uploaded cookies (YouTube, Instagram) */
   signIn: 'qr' | 'cookies';
+  /** The platform also signs in with a code approved on a phone or computer (YouTube: Google's sign-in for TVs);
+   *  it is then the panel's main button and the cookie form moves behind "Use browser cookies instead" */
+  codeSignIn?: boolean;
   /** What the sign-in panel says before a sign-in */
   signInHint: string;
   /** The platform serves nobody who is signed out (Instagram): the feed waits for a sign-in */
@@ -77,7 +80,8 @@ export const PLATFORMS: PlatformDef[] = [
     tabs: { explore: 'Shorts', foryou: 'For You' },
     social: false,
     signIn: 'cookies',
-    signInHint: 'Sign in with the cookies of a browser that is signed in to YouTube: paste a cookies.txt export below (or choose the file). The server checks them with YouTube and keeps only the youtube.com ones.',
+    codeSignIn: true,
+    signInHint: '"Sign in with a code" shows a code and a QR code here: scan it with your phone (or open google.com/device on any device), choose your YouTube account and press Allow.',
     loginRequired: false,
     cookieSite: 'youtube.com',
     signInWindowOwner: 'Google',

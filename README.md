@@ -30,7 +30,7 @@ Windows 10 (see **Test results** for exactly what was measured):
 | H.265 TikTok variants through WebCodecs | **Browser-dependent** – fails cleanly where `VideoDecoder.isConfigSupported` says no |
 | **Feed page** (`feed.html`): TikTok-style vertical stream, Explore feed without sign-in | **Working** (Node server and IIS handler) |
 | Feed page: personal **For You** feed after signing in to TikTok (QR code or window) | **Working mechanism** (signed-out test; QR rendered and refreshed); needs the Node server + Chrome/Edge/Chromium on that machine – see **Feed** |
-| **YouTube sign-in**: paste/upload the cookies of a signed-in browser (or a sign-in window on the server machine); **For You** = the account's recommendations | **Working mechanism** (built 2026-10-13; verified signed-out: cookie parsing, YouTube's account check, rejection paths. The signed-in feed itself awaits a real account) – see **YouTube** |
+| **YouTube sign-in**: a code approved on a phone or computer (QR code / google.com/device), or the cookies of a signed-in browser; **For You** = the account's recommendations | **Working** with a code (2026-11-20, real account on the dev PC: account named, home feed listed, sign-out withdrawn at Google). Cookies: working mechanism (built 2026-10-13; verified signed-out only) – see **YouTube** |
 | **Mirror** (built 2026-10-21): an iPhone's screen (ReplayKit broadcast extension) on the Tesla's browser, three ways: the phone's own page on its hotspot, a WebRTC direct link, the server's relay; WebCodecs or MSE on the viewer; a desktop sender page too | **Working** on the PC (relay, direct link, both decoders, with the desktop sender; 26 relay checks). The phone app exists twice: **.NET MAUI** (`mobileapp/`, compiles for iOS on Windows, hotspot + relay paths) and Swift (`mirror/ios/`, adds the WebRTC direct link); neither has **run on a phone yet** (needs a Mac to deploy) – see [mobileapp/README.md](mobileapp/README.md) |
 | **Launcher** (`home.html`, the landing page): iPad-style icons that open each platform like an app | **Working** |
 | **YouTube, guest mode**: Shorts by hashtag, search, channels; picture + sound as two files played in sync | **Working** (Node server with yt-dlp) – see **YouTube** |
@@ -111,7 +111,8 @@ Configuration is optional. Copy `.env.example` to `server/.env` (or repo-root `.
 | `SERVE_CLIENT` | `false` | serve `client/dist` from the server (production) |
 | `BROWSER_PATH` | *(auto-detect)* | Chrome/Edge executable used for TikTok sign-in / For You (feed page) |
 | `TIKTOK_PROFILE_DIR` | `~/.streamanywhere/tiktok-profile` | browser profile that keeps the TikTok session (treat like a password) |
-| `YOUTUBE_COOKIES_FILE` | `~/.streamanywhere/youtube-cookies.txt` | the YouTube sign-in: a Netscape cookies.txt yt-dlp reads and refreshes (treat like a password) |
+| `YOUTUBE_COOKIES_FILE` | `~/.streamanywhere/youtube-cookies.txt` | the YouTube cookie sign-in: a Netscape cookies.txt yt-dlp reads and refreshes (treat like a password) |
+| `YOUTUBE_OAUTH_FILE` | `~/.streamanywhere/youtube-oauth.json` | the YouTube code sign-in ("Sign in with a code"): Google's sign-in for TVs, renewed by the server (treat like a password) |
 | `YOUTUBE_PROFILE_DIR` | `~/.streamanywhere/youtube-profile` | browser profile of the YouTube sign-in *window* (deleted at sign-out) |
 | `INSTAGRAM_COOKIES_FILE` | `~/.streamanywhere/instagram-cookies.txt` | the Instagram sign-in (Netscape cookies.txt; treat like a password); `…cookies.meta.json` next to it keeps the User-Agent the cookies came from |
 | `INSTAGRAM_PROFILE_DIR` / `INSTAGRAM_LOGIN_PROFILE_DIR` | `~/.streamanywhere/instagram-profile` / `…-login-profile` | profile of the headless Instagram browser / of the sign-in *window* (both deleted at sign-out) |
@@ -800,10 +801,22 @@ Measured 2026-10-12 (dev machine and the GCP VM; the VM's IP is not bot-checked 
 
 ### YouTube sign-in (For You)
 
-Google refuses sign-ins from automated browsers, the TV-code flow (youtube.com/activate) hands out
-OAuth tokens that YouTube stopped honouring for yt-dlp in 2024, and the VM has no display for a
-Google window - so the YouTube sign-in is the way yt-dlp documents: **the cookies of a browser
-that is signed in**. Profile → the panel offers:
+Two kinds of sign-in; either one makes the server "signed in". Profile → the panel offers:
+
+- **Sign in with a code** (the main button, built 2026-11-20): Google's sign-in for TVs. The server
+  asks Google for a code and the panel shows it with a QR code; scan it with a phone (Google opens
+  on "does this code match?") or open `google.com/device` on any device and type it, choose the
+  YouTube account, press Allow. The page updates by itself; a code is good for 30 minutes. Nothing
+  is exported from a browser and it works on the VM. **For You** is then the account's home feed
+  from YouTube's TV API (`youtubei/v1/browse`, plain HTTPS, about 0.4 s a request - see
+  `server/src/youtubeTv.ts` for the measured shapes). The sign-in lives in
+  `~/.streamanywhere/youtube-oauth.json` (`YOUTUBE_OAUTH_FILE`; treat like a password), renews
+  itself, and **Sign out** deletes it and withdraws it at Google. The Google account lists it under
+  "Third-party apps & services" as YouTube on TV. Limit: yt-dlp cannot use this sign-in (it dropped
+  it in 2024), so a video YouTube refuses to a guest (age gate) still needs the cookies below.
+- **Use browser cookies instead**: the cookies of a browser that is signed in - the way yt-dlp
+  documents (Google refuses sign-ins from automated browsers, and the VM has no display for a
+  Google window):
 
 - **Paste / choose cookies.txt**: on a computer, sign in at youtube.com in a *private window*,
   export the cookies with a cookie-export extension ("Get cookies.txt LOCALLY" for Chrome/Edge,

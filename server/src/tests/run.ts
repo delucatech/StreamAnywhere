@@ -18,6 +18,7 @@ import { isTikTokAd, itemToFeedItem } from '../feed';
 import { entryToFeedItem, isYouTubeUrl, pickAudio, searchYouTube, youTubeVideoId } from '../youtube';
 import { clientVersionFromPage, directSearchEnabled, parseDuration, parseSearchAnswer, parseViews, searchDirect, SearchLayoutError, setSearchTransport, videoRendererToEntry, VIDEOS_ONLY, youtubeSearchStatus, type SearchTransport } from '../youtubeSearch';
 import { accountFromMenu, parseCookiesText, sapisidHash, toNetscape, YouTubeSessionError } from '../youtubeSession';
+import { accountFromAccountsList, parseCompactViews, parseTvFeed, pollCode, requestCode, setTvTransport, tileToEntry, tvAccount, TvAuthError, tvClientFromPage, tvForget, tvHomeFeed, TvLayoutError, tvSignedIn, type TvTransport } from '../youtubeTv';
 import { accountFromAnswer, bodyHint, collectCodes, embedToFeedItem, handleFromQuery, instagramCode, isInstagramUrl, parseCount, parseProfileMeta, planExploreFill, sentAway, uaMetadata, urlExpiry } from '../instagram';
 import { cleanUserAgent, cookiesLookSignedIn, InstagramSessionError, parseInstagramCookies } from '../instagramSession';
 import { FACEBOOK_CATEGORIES, INSTAGRAM_CATEGORIES } from '../../../shared/types';
@@ -1239,6 +1240,123 @@ async function youtubeSearchOfflineChecks(): Promise<void> {
   setSearchTransport(undefined);
 }
 
+// ---- YouTube code sign-in (youtubeTv.ts): the shapes measured 2026-11-20 with a real account
+const tvTile = (id: string, extra: Record<string, unknown> = {}): { tileRenderer: Record<string, unknown> } => ({
+  tileRenderer: {
+    style: 'TILE_STYLE_YTLR_DEFAULT',
+    header: { tileHeaderRenderer: { thumbnail: { thumbnails: [{ url: `https://i.ytimg.com/vi/${id}/hqdefault.jpg?sqp=-oaymwEVCMACELQB&rs=AOn4`, width: 320, height: 180 }] }, thumbnailOverlays: [{ thumbnailOverlayTimeStatusRenderer: { text: { simpleText: '11:36' }, style: 'DEFAULT' } }] } },
+    metadata: {
+      tileMetadataRenderer: {
+        title: { simpleText: `Video ${id}` },
+        lines: [{ lineRenderer: { items: [{ lineItemRenderer: { text: { runs: [{ text: 'Some Channel' }] } } }] } }, { lineRenderer: { items: [{ lineItemRenderer: { text: { simpleText: '24K views' } } }, { lineItemRenderer: { text: { simpleText: '•' } } }, { lineItemRenderer: { text: { simpleText: '4 months ago' } } }] } }],
+      },
+    },
+    onSelectCommand: { clickTrackingParams: 'x', watchEndpoint: { videoId: id } },
+    contentId: id,
+    contentType: 'TILE_CONTENT_TYPE_VIDEO',
+    ...extra,
+  },
+});
+const tvShelf = (items: unknown[]): unknown => ({ shelfRenderer: { content: { horizontalListRenderer: { items, continuations: [{ nextContinuationData: { continuation: 'SHELF-MORE' } }] } } } });
+const tvFirst = (shelves: unknown[], token?: string): unknown => ({ contents: { tvBrowseRenderer: { content: { tvSurfaceContentRenderer: { content: { sectionListRenderer: { contents: shelves, ...(token ? { continuations: [{ nextContinuationData: { continuation: token } }] } : {}) } } } } } } });
+const tvMore = (shelves: unknown[], token?: string): unknown => ({ continuationContents: { sectionListContinuation: { contents: shelves, ...(token ? { continuations: [{ nextContinuationData: { continuation: token } }] } : {}) } } });
+
+async function youtubeTvOfflineChecks(): Promise<void> {
+  console.log('\n== 5d. YouTube code sign-in (offline)');
+  const page = '<html>..."INNERTUBE_CLIENT_NAME":"TVHTML5","INNERTUBE_CLIENT_VERSION":"7.20261118.19.00"...;var x={clientId:"111-tv.apps.googleusercontent.com",u:"tv-secret-0001"};var y={clientId:"222-other.apps.googleusercontent.com",u:"other-secret-02"}</html>';
+  const c = tvClientFromPage(page);
+  check('the TV client is the first id/secret pair of youtube.com/tv', c?.clientId === '111-tv.apps.googleusercontent.com' && c.clientSecret === 'tv-secret-0001' && c.clientVersion === '7.20261118.19.00' && tvClientFromPage('<html></html>') === undefined, c);
+  check('compact view counts', parseCompactViews('24K views') === 24000 && parseCompactViews('1.2M views') === 1200000 && parseCompactViews('411 views') === 411 && parseCompactViews('1 view') === 1 && parseCompactViews('4K watching') === undefined && parseCompactViews('4 months ago') === undefined);
+  const e0 = tileToEntry(tvTile('COiRELUI-to').tileRenderer);
+  check('a video tile -> the flat entry', e0?.id === 'COiRELUI-to' && e0.title === 'Video COiRELUI-to' && e0.channel === 'Some Channel' && e0.duration === 696 && e0.view_count === 24000 && e0.live_status === undefined && e0.thumbnails.length === 1, e0);
+  const short = tileToEntry(tvTile('_HijB-vwuIc', { style: 'TILE_STYLE_YTLR_SHORTS', contentType: 'TILE_CONTENT_TYPE_SHORTS', onSelectCommand: { reelWatchEndpoint: { videoId: '_HijB-vwuIc' } }, metadata: { tileMetadataRenderer: { title: { simpleText: 'A Short' } } }, header: { tileHeaderRenderer: { thumbnail: { thumbnails: [{ url: 'https://i.ytimg.com/vi/_HijB-vwuIc/oar2.jpg', width: 405, height: 720 }] } } } }).tileRenderer);
+  check('a Shorts tile is a video too (no channel line, no length)', short?.id === '_HijB-vwuIc' && short.title === 'A Short' && short.channel === undefined && short.duration === undefined && entryToFeedItem(short)?.cover === 'https://i.ytimg.com/vi/_HijB-vwuIc/oar2.jpg', short);
+  const show = tileToEntry(tvTile('ESvls8ZUg58', { onSelectCommand: { browseEndpoint: { browseId: 'VLPL123' } } }).tileRenderer);
+  const liveT = tileToEntry(tvTile('YNdaOUe_ahE', { header: { tileHeaderRenderer: { thumbnailOverlays: [{ thumbnailOverlayResumePlaybackRenderer: {} }, { thumbnailOverlayTimeStatusRenderer: { text: { simpleText: 'LIVE' }, style: 'LIVE' } }] } } }).tileRenderer);
+  check('shows and films are skipped, live streams are marked (and dropped)', show === undefined && liveT?.live_status === 'is_live' && entryToFeedItem(liveT!) === undefined, { show, liveT });
+  const first = parseTvFeed(tvFirst([{ adSlotRenderer: { fulfillmentContent: tvTile('AdAdAdAdAdA') } }, tvShelf([{ adSlotRenderer: { x: tvTile('AdAdAdAdAd2') } }, tvTile('aaaaaaaaaa1'), tvTile('aaaaaaaaaa2')]), tvShelf([tvTile('aaaaaaaaaa2'), tvTile('aaaaaaaaaa3'), tvTile('ShowShowSho', { onSelectCommand: { browseEndpoint: {} } })])], 'PAGE-2'));
+  check('a home answer: videos once each, ads and shows left out, the list\'s own "more" token', first.entries.map((e) => e.id).join() === 'aaaaaaaaaa1,aaaaaaaaaa2,aaaaaaaaaa3' && first.token === 'PAGE-2', first);
+  const more = parseTvFeed(tvMore([tvShelf([tvTile('bbbbbbbbbb1')])]));
+  check('a "load more" answer, and the end of the feed', more.entries.length === 1 && more.token === undefined);
+  let layout = false;
+  try {
+    parseTvFeed({ contents: { somethingNew: {} } });
+  } catch (e) {
+    layout = e instanceof TvLayoutError;
+  }
+  check('an unknown layout is an error, not an empty feed', layout);
+  check('a guest answer (a sign-in nudge, no videos) is an empty feed', parseTvFeed(tvFirst([{ shelfRenderer: { content: { feedNudgeRenderer: {} } } }])).entries.length === 0);
+  const acc = accountFromAccountsList({ contents: [{ accountSectionListRenderer: { contents: [{ accountItemSectionRenderer: { contents: [{ accountItem: { accountName: { simpleText: 'Other' }, isSelected: false } }, { accountItem: { accountName: { simpleText: 'Mario' }, channelHandle: { simpleText: '@mario' }, isSelected: true, accountPhoto: { thumbnails: [{ url: 'https://yt3.ggpht.com/small' }, { url: 'https://yt3.ggpht.com/big' }] } } }] } }] } }] });
+  check('the account is the identity the code was approved for', acc?.name === 'Mario' && acc.handle === 'mario' && acc.avatar === 'https://yt3.ggpht.com/big' && accountFromAccountsList({ contents: [] }) === undefined, acc);
+
+  // The whole flow against a scripted Google/YouTube.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-tv-'));
+  const prevFiles = [process.env.YOUTUBE_OAUTH_FILE, process.env.YOUTUBE_TV_CLIENT_FILE];
+  process.env.YOUTUBE_OAUTH_FILE = path.join(dir, 'oauth.json');
+  process.env.YOUTUBE_TV_CLIENT_FILE = path.join(dir, 'client.json');
+  const calls: { url: string; body: any; auth?: string }[] = [];
+  let approved = false;
+  let access = 'access-1';
+  let refreshOk = true;
+  let revoked = '';
+  const feeds: unknown[] = [];
+  const scripted: TvTransport = async (url, body, headers) => {
+    calls.push({ url, body, auth: headers.authorization });
+    const ok = (j: unknown) => ({ status: 200, text: JSON.stringify(j) });
+    if (url === 'https://www.youtube.com/tv') return { status: 200, text: page };
+    if (url.endsWith('/o/oauth2/device/code')) return ok({ device_code: 'DEVICE', user_code: 'ABCD-EFGH', expires_in: 1800, interval: 5, verification_url: 'https://www.google.com/device' });
+    if (url.endsWith('/o/oauth2/token')) {
+      const b = body as any;
+      if (b.grant_type === 'refresh_token') return refreshOk ? ((access = 'access-2'), ok({ access_token: access, expires_in: 3600 })) : { status: 400, text: JSON.stringify({ error: 'invalid_grant' }) };
+      return approved ? ok({ access_token: access, refresh_token: 'REFRESH', expires_in: 3600 }) : ok({ error: 'authorization_pending' });
+    }
+    if (url.includes('/o/oauth2/revoke')) return (revoked = url), ok({});
+    if (headers.authorization !== `Bearer ${access}`) return { status: 401, text: '{}' };
+    if (url.includes('/account/accounts_list')) return ok({ contents: [{ accountSectionListRenderer: { contents: [{ accountItemSectionRenderer: { contents: [{ accountItem: { accountName: { simpleText: 'Mario' }, channelHandle: { simpleText: '@mario' }, isSelected: true } }] } }] } }] });
+    if (url.includes('/browse')) return ok(feeds.shift() ?? tvMore([]));
+    return { status: 404, text: '' };
+  };
+  setTvTransport(scripted);
+  const noLog = (): void => undefined;
+  try {
+    check('nobody is signed in at the start', !tvSignedIn() && (await tvAccount(noLog)).loggedIn === false);
+    const pending = await requestCode(noLog);
+    const reqBody = calls.find((x) => x.url.endsWith('/device/code'))?.body;
+    check('a code is asked for with the client of the TV page', pending.userCode === 'ABCD-EFGH' && pending.url === 'https://www.google.com/device' && pending.intervalMs === 5000 && pending.expiresAt > Date.now() + 29 * 60 * 1000 && reqBody.client_id === '111-tv.apps.googleusercontent.com' && typeof reqBody.device_id === 'string', { pending, reqBody });
+    check('not approved yet -> pending, nothing saved', (await pollCode(pending)) === 'pending' && !tvSignedIn());
+    approved = true;
+    check('approved -> the sign-in is saved (private file)', (await pollCode(pending)) === 'approved' && tvSignedIn() && JSON.parse(fs.readFileSync(process.env.YOUTUBE_OAUTH_FILE, 'utf8')).refreshToken === 'REFRESH');
+    const who = await tvAccount(noLog);
+    check('YouTube names the account', who.ok && who.loggedIn && who.handle === 'mario' && who.name === 'Mario', who);
+    feeds.push(tvFirst([tvShelf([tvTile('aaaaaaaaaa1'), tvTile('aaaaaaaaaa2')])], 'P2'), tvMore([tvShelf([tvTile('aaaaaaaaaa2'), tvTile('bbbbbbbbbb1')])], 'P3'), tvMore([tvShelf([tvTile('cccccccccc1')])], 'P4'));
+    const f1 = await tvHomeFeed(3, noLog);
+    const browse = calls.filter((x) => x.url.includes('/browse'));
+    check('a fill walks "load more" until it has enough new videos', f1.entries.map((e) => e.id).join() === 'aaaaaaaaaa1,aaaaaaaaaa2,bbbbbbbbbb1' && f1.requests === 2 && browse[0].body.browseId === 'FEtopics' && browse[1].body.continuation === 'P2' && browse[0].body.context.client.clientName === 'TVHTML5', f1);
+    const f2 = await tvHomeFeed(3, noLog);
+    check('the next fill continues where the last one stopped', f2.entries.map((e) => e.id).join() === 'cccccccccc1' && calls.filter((x) => x.url.includes('/browse'))[2].body.continuation === 'P3', f2);
+    access = 'rotated-at-google'; // the saved access token stops working: a 401, then a refresh
+    feeds.push(tvFirst([tvShelf([tvTile('dddddddddd1')])]));
+    const before = calls.filter((x) => (x.body as any)?.grant_type === 'refresh_token').length;
+    const f3 = await tvHomeFeed(1, noLog).catch((e) => e);
+    const refreshes = calls.filter((x) => (x.body as any)?.grant_type === 'refresh_token').length - before;
+    check('a refused access token is renewed once and the call repeated', !(f3 instanceof Error) && f3.entries.length === 1 && refreshes === 1 && access === 'access-2', f3);
+    access = 'rotated-again';
+    refreshOk = false;
+    const dead = await tvHomeFeed(1, noLog).catch((e) => e);
+    const whoDead = await tvAccount(noLog);
+    check('a sign-in Google dropped is an auth error, and the account check says signed out', dead instanceof TvAuthError && whoDead.ok && !whoDead.loggedIn, { dead: String(dead), whoDead });
+    await tvForget(true, noLog);
+    check('sign out deletes the file and withdraws the sign-in at Google', !tvSignedIn() && !fs.existsSync(process.env.YOUTUBE_OAUTH_FILE) && revoked.includes('token=REFRESH'), revoked);
+  } finally {
+    setTvTransport(undefined);
+    if (prevFiles[0] === undefined) delete process.env.YOUTUBE_OAUTH_FILE;
+    else process.env.YOUTUBE_OAUTH_FILE = prevFiles[0];
+    if (prevFiles[1] === undefined) delete process.env.YOUTUBE_TV_CLIENT_FILE;
+    else process.env.YOUTUBE_TV_CLIENT_FILE = prevFiles[1];
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 async function youtubeSearchNetworkChecks(): Promise<void> {
   console.log('\n== 5c. YouTube search, live');
   const logs: string[] = [];
@@ -1423,6 +1541,7 @@ async function homeTopUpChecks(): Promise<void> {
 (async () => {
   await offline();
   await youtubeSearchOfflineChecks();
+  await youtubeTvOfflineChecks();
   await inboxCancelChecks();
   await homeTopUpChecks();
   await liveTvChecks();

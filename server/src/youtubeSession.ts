@@ -1,13 +1,20 @@
 /**
- * YouTube sign-in: the cookies of a browser that is signed in to youtube.com, handed to yt-dlp.
+ * YouTube sign-in. Two kinds, either one makes the server "signed in":
  *
- * Why cookies and not a scripted sign-in: Google refuses sign-ins from automated browsers ("this
- * browser or app may not be secure"), the TV-code flow (youtube.com/activate) yields OAuth tokens
- * that YouTube began rejecting for yt-dlp in late 2024 (yt-dlp removed its OAuth support), and a
- * datacenter IP has no display for a Google sign-in window. A cookies.txt export from the viewer's
- * own browser is the way yt-dlp documents, and it needs nothing on the server but the file.
+ *  - a CODE approved on a phone or computer (youtubeTv.ts): Google's sign-in for TVs. The server
+ *    shows a code and a QR code, the viewer approves it with the Google account, and the account's
+ *    home feed is then read from YouTube's TV API. This is the easy way and the one the panel offers
+ *    first; it works on a server without a display and needs nothing from a browser.
+ *  - the COOKIES of a browser that is signed in to youtube.com, handed to yt-dlp. yt-dlp cannot use
+ *    the code sign-in (it dropped that in 2024), so cookies are what lets it fetch a video that
+ *    YouTube refuses to a guest (age gate), and they list the feed when no code sign-in is saved.
  *
- * Two ways in (POST /api/session/login {platform:'youtube'}):
+ * A scripted Google sign-in is not possible: Google refuses sign-ins from automated browsers ("this
+ * browser or app may not be secure"), and a datacenter IP has no display for a sign-in window.
+ *
+ * Ways in (POST /api/session/login {platform:'youtube'}):
+ *  - mode 'code': the server asks Google for a code (valid 30 minutes) and waits for the approval;
+ *    the status carries the code and the address to open (the page draws the QR code).
  *  - mode 'cookies': the text of a cookies.txt (Netscape format; a JSON export of a cookie
  *    extension and a raw `Cookie:` header line are accepted too). Only youtube.com / google.com
  *    cookies are kept, the file is verified against YouTube's own account menu at once, and the
@@ -28,6 +35,7 @@ import * as path from 'node:path';
 import type { LoginMode, SessionStatus } from '../../shared/types';
 import { config } from './config';
 import { findBrowserExecutable } from './session';
+import { pollCode, requestCode, tvAccount, tvForget, tvSavedAt, tvSignedIn, type CodePoll, type PendingCode } from './youtubeTv';
 import { detectYtDlp } from './ytdlp';
 
 type Browser = import('puppeteer-core').Browser;
@@ -264,6 +272,10 @@ interface State {
   checkedAt?: number;
   /** When the current cookies were saved (shown to the user) */
   savedAt?: number;
+  /** What the sign-in is: a code approved at Google (youtubeTv.ts), or the cookie file */
+  via?: 'code' | 'cookies';
+  /** While a code sign-in waits for the approval */
+  code?: PendingCode;
 }
 
 const s: State = { state: 'none' };
@@ -305,14 +317,25 @@ export function youtubeCookieFile(): string | undefined {
 
 export const youtubeSignedIn = (): boolean => s.state === 'logged_in';
 
+/**
+ * Where the account's feed comes from: 'code' = YouTube's TV API with the approved sign-in,
+ * 'cookies' = yt-dlp with the cookie file; undefined = nobody is signed in.
+ */
+export function youtubeSignInKind(): 'code' | 'cookies' | undefined {
+  if (s.state === 'error') return undefined;
+  return tvSignedIn() ? 'code' : fileExists() ? 'cookies' : undefined;
+}
+
 function saveCookies(cookies: ParsedCookie[]): void {
   fs.mkdirSync(path.dirname(COOKIE_FILE), { recursive: true });
   fs.writeFileSync(COOKIE_FILE, toNetscape(cookies), { mode: 0o600 });
   s.savedAt = Date.now();
 }
 
-function markLoggedIn(acc: AccountCheck, how: string): void {
+function markLoggedIn(acc: AccountCheck, how: string, via: 'code' | 'cookies' = 'cookies'): void {
   s.state = 'logged_in';
+  s.via = via;
+  s.code = undefined;
   s.username = acc.handle || acc.name || 'youtube';
   s.nickname = acc.name;
   s.avatar = acc.avatar;
@@ -334,6 +357,7 @@ function forget(reason: string | undefined, deleteFile: boolean): void {
   s.state = 'none';
   s.username = s.nickname = s.avatar = undefined;
   s.loginMode = undefined;
+  s.via = undefined;
   s.error = reason;
   s.checkedAt = undefined;
   probed = true;
@@ -344,13 +368,32 @@ function forget(reason: string | undefined, deleteFile: boolean): void {
  * answer ends the probing: YouTube's "signed in" or "signed out"; a network failure is retried later.
  */
 export async function verifySaved(force = false): Promise<AccountCheck | undefined> {
+  if (!force && s.state === 'logged_in' && Date.now() - (s.checkedAt || 0) < RECHECK_MS && (tvSignedIn() || fileExists())) return { ok: true, loggedIn: true, name: s.nickname, handle: s.username, avatar: s.avatar };
+  let codeLost: string | undefined;
+  if (tvSignedIn()) {
+    // The code sign-in first: it is what the feed uses when both kinds are saved.
+    const tv = await tvAccount(log);
+    if (!tv.ok) {
+      probeTries++;
+      probeRetryAt = Date.now() + 30_000;
+      log(`account check failed (${tv.error}); the saved sign-in is kept and checked again later`);
+      return tv;
+    }
+    if (tv.loggedIn) {
+      markLoggedIn(tv, 'saved code sign-in', 'code');
+      return tv;
+    }
+    log(`Google no longer accepts the saved code sign-in (${tv.error}); deleting it`);
+    await tvForget(false, log);
+    codeLost = 'Google no longer accepts the saved sign-in (it was removed from the Google account, or it expired). Sign in again with a new code.';
+  }
   const cookies = savedCookies();
   if (!cookies) {
-    if (s.state === 'logged_in') forget('The saved YouTube cookies are gone from the server.', false);
+    if (codeLost) forget(codeLost, false);
+    else if (s.state === 'logged_in') forget('The saved YouTube sign-in is gone from the server.', false);
     probed = true;
-    return undefined;
+    return codeLost ? { ok: true, loggedIn: false, error: codeLost } : undefined;
   }
-  if (!force && s.state === 'logged_in' && Date.now() - (s.checkedAt || 0) < RECHECK_MS) return { ok: true, loggedIn: true, name: s.nickname, handle: s.username, avatar: s.avatar };
   const acc = await checkAccount(cookies);
   if (!acc.ok) {
     probeTries++;
@@ -366,8 +409,10 @@ export async function verifySaved(force = false): Promise<AccountCheck | undefin
   return acc;
 }
 
+const anySaved = (): boolean => fileExists() || tvSignedIn();
+
 function startProbe(): void {
-  if (probe || probed || !fileExists() || Date.now() < probeRetryAt || probeTries >= 20) return;
+  if (probe || probed || !anySaved() || Date.now() < probeRetryAt || probeTries >= 20) return;
   probe = verifySaved(true)
     .then(() => undefined, (e) => log('probe error: ' + (e as Error).message))
     .finally(() => (probe = undefined));
@@ -380,15 +425,23 @@ export async function youtubeSessionStatus(): Promise<SessionStatus> {
   if (s.state === 'none') startProbe();
   const base: SessionStatus = { platform: 'youtube', supported: true, state: s.state, username: s.username, nickname: s.nickname, avatar: s.avatar, error: s.error, browser: 'yt-dlp ' + (yt.version || '') };
   if (s.state === 'none') {
-    const pending = Boolean(probe) || (fileExists() && !probed);
+    const pending = Boolean(probe) || (anySaved() && !probed);
     base.probing = pending;
-    base.message = pending ? 'Saved YouTube cookies exist; checking them with YouTube…' : fileExists() ? 'Saved YouTube cookies exist, but YouTube could not be reached to check them ("Check again").' : 'Not signed in.';
+    base.message = pending ? 'A saved YouTube sign-in exists; checking it with YouTube…' : anySaved() ? 'A saved YouTube sign-in exists, but YouTube could not be reached to check it ("Check again").' : 'Not signed in.';
+  } else if (s.state === 'login_pending' && s.loginMode === 'code' && s.code) {
+    base.loginMode = 'code';
+    base.code = s.code.userCode;
+    base.codeUrl = s.code.url;
+    base.codeExpiresAt = s.code.expiresAt;
+    base.message = `Open ${s.code.url.replace(/^https:\/\/(www\.)?/, '')} on your phone or computer, enter the code ${s.code.userCode}, choose your YouTube account and press Allow.`;
   } else if (s.state === 'login_pending') {
     base.loginMode = s.loginMode;
     base.message = 'Finish signing in to Google inside the window that opened on the server machine. The window closes by itself once YouTube reports the account.';
   } else if (s.state === 'logged_in') {
+    base.via = s.via;
     base.message = `Signed in as ${s.username ? '@' + s.username : s.nickname || '?'}`;
-    if (s.savedAt) base.notice = `Cookies saved ${new Date(s.savedAt).toLocaleString()}`;
+    const at = s.via === 'code' ? tvSavedAt() : s.savedAt;
+    if (at) base.notice = `${s.via === 'code' ? 'Signed in with a code' : 'Cookies saved'} ${new Date(at).toLocaleString()}`;
   }
   return base;
 }
@@ -400,9 +453,12 @@ export async function youtubeStartLogin(mode: LoginMode, cookiesText: string | u
   feedLog = rawLog;
   if (!(await detectYtDlp()).available) throw new YouTubeSessionError('yt-dlp is not available on this server', 503);
   if (s.state === 'login_pending' && s.loginBrowser?.isConnected()) return youtubeSessionStatus();
+  if (s.state === 'login_pending' && s.loginMode === 'code' && s.code && mode === 'code') return youtubeSessionStatus();
   if (probe) await probe.catch(() => undefined);
+  if (mode === 'code') return startCodeLogin();
+  stopCodeLogin();
   if (mode === 'window') return startWindowLogin();
-  if (mode !== 'cookies' && !cookiesText) throw new YouTubeSessionError('YouTube has no QR sign-in: paste the cookies of a signed-in browser, or open the sign-in window on the server machine.', 400);
+  if (mode !== 'cookies' && !cookiesText) throw new YouTubeSessionError('Sign in to YouTube with a code, with the cookies of a signed-in browser, or in the sign-in window on the server machine.', 400);
   const { cookies, warnings } = parseCookiesText(cookiesText || '');
   log(`cookies received: ${cookies.length} kept${warnings.length ? ' (' + warnings.join('; ') + ')' : ''}`);
   const acc = await checkAccount(cookies);
@@ -413,7 +469,9 @@ export async function youtubeStartLogin(mode: LoginMode, cookiesText: string | u
   }
   await closeLoginBrowser();
   saveCookies(cookies);
-  markLoggedIn(acc, 'pasted cookies');
+  // A code sign-in saved earlier stays what the feed uses; the cookies then serve yt-dlp only.
+  if (tvSignedIn() && s.state === 'logged_in' && s.via === 'code') log('cookies saved next to the code sign-in (yt-dlp uses them for videos YouTube refuses to a guest)');
+  else markLoggedIn(acc, 'pasted cookies');
   const st = await youtubeSessionStatus();
   if (warnings.length) st.notice = warnings.join('; ');
   return st;
@@ -423,6 +481,84 @@ async function closeLoginBrowser(): Promise<void> {
   const b = s.loginBrowser;
   s.loginBrowser = undefined;
   if (b) await b.close().catch(() => undefined);
+}
+
+/** Stops waiting for a code's approval (the code itself simply runs out at Google). */
+function stopCodeLogin(): void {
+  if (!s.code) return;
+  s.code = undefined;
+  if (s.state === 'login_pending' && s.loginMode === 'code') {
+    s.state = s.via ? 'logged_in' : 'none';
+    s.loginMode = undefined;
+  }
+}
+
+/**
+ * Sign-in with a code: Google gives a code, the status shows it (and the page a QR code of it), and
+ * this waits - asking Google every few seconds, as it prescribes - until the viewer approved it on a
+ * phone or computer, refused it, or the code ran out (30 minutes).
+ */
+async function startCodeLogin(): Promise<SessionStatus> {
+  await closeLoginBrowser();
+  let pending: PendingCode;
+  try {
+    pending = await requestCode(log);
+  } catch (e) {
+    const msg = (e as Error).message;
+    log('no sign-in code: ' + msg);
+    throw new YouTubeSessionError(`Google did not give a sign-in code (${msg}); try again in a moment`, 502);
+  }
+  s.state = 'login_pending';
+  s.loginMode = 'code';
+  s.error = undefined;
+  s.loginStartedAt = Date.now();
+  s.code = pending;
+  log(`sign-in code issued, valid ${Math.round((pending.expiresAt - Date.now()) / 60000)} min; waiting for the approval`);
+  const fail = (reason: string): void => {
+    if (s.code !== pending) return;
+    s.code = undefined;
+    s.state = s.via ? 'logged_in' : 'none';
+    s.loginMode = undefined;
+    s.error = reason;
+    log('code sign-in ended: ' + reason);
+  };
+  void (async () => {
+    let wait = pending.intervalMs;
+    let errors = 0;
+    while (s.code === pending) {
+      await new Promise((r) => setTimeout(r, wait));
+      if (s.code !== pending) return;
+      if (Date.now() > pending.expiresAt) return fail('The code ran out before it was approved. "Sign in with a code" gives a new one.');
+      let answer: CodePoll;
+      try {
+        answer = await pollCode(pending);
+        errors = 0;
+      } catch (e) {
+        // A network blip: the code is still good, keep asking.
+        if (++errors === 1 || errors % 12 === 0) log(`waiting for the approval: ${(e as Error).message}`);
+        continue;
+      }
+      if (answer === 'pending') continue;
+      if (answer === 'slow_down') {
+        wait += 2000;
+        continue;
+      }
+      if (answer === 'denied') return fail('The sign-in was refused on the Google page. "Sign in with a code" starts over.');
+      if (answer === 'expired') return fail('The code ran out before it was approved. "Sign in with a code" gives a new one.');
+      // Approved: the sign-in is saved; ask YouTube who it is.
+      let acc = await tvAccount(log);
+      if (!acc.ok) acc = await tvAccount(log);
+      if (acc.ok && !acc.loggedIn) {
+        await tvForget(false, log);
+        return fail(`Google approved the code, but YouTube does not accept the sign-in (${acc.error}).`);
+      }
+      // YouTube could not be asked for the name right now: signed in all the same, the name follows at the next check.
+      markLoggedIn(acc.loggedIn ? acc : { ok: true, loggedIn: true }, 'code approved', 'code');
+      if (!acc.loggedIn) s.checkedAt = 0;
+      return;
+    }
+  })();
+  return youtubeSessionStatus();
 }
 
 /** A visible Chrome/Edge on the server machine (needs a desktop): the user signs in, we take the cookies. */
@@ -517,6 +653,7 @@ async function startWindowLogin(): Promise<SessionStatus> {
 /** Ends a pending window sign-in; a saved sign-in (if any) stays. */
 export async function youtubeCancelLogin(): Promise<SessionStatus> {
   await closeLoginBrowser();
+  stopCodeLogin();
   if (s.state === 'login_pending') {
     s.state = 'none';
     s.loginMode = undefined;
@@ -525,9 +662,12 @@ export async function youtubeCancelLogin(): Promise<SessionStatus> {
   return youtubeSessionStatus();
 }
 
-/** Deletes the cookie file and the window profile: the sign-in is gone from the server. */
+/** Deletes the code sign-in (withdrawn at Google), the cookie file and the window profile: the sign-in is gone from the server. */
 export async function youtubeLogout(): Promise<SessionStatus> {
   await closeLoginBrowser();
+  stopCodeLogin();
+  // Withdrawn at Google too: a sign-out must not leave a working sign-in behind.
+  await tvForget(true, log);
   forget(undefined, true);
   try {
     fs.rmSync(PROFILE_DIR, { recursive: true, force: true });
@@ -535,7 +675,7 @@ export async function youtubeLogout(): Promise<SessionStatus> {
     /* ignore */
   }
   s.savedAt = undefined;
-  log('signed out (cookies deleted)');
+  log('signed out (the saved sign-in is deleted)');
   return youtubeSessionStatus();
 }
 
@@ -551,5 +691,6 @@ export async function youtubeSessionLost(): Promise<string | undefined> {
 }
 
 export async function shutdownYouTubeSession(): Promise<void> {
+  s.code = undefined;
   await closeLoginBrowser();
 }

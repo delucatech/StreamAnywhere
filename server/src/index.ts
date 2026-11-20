@@ -25,11 +25,12 @@ import { hasBatch, reviveItems, slimItems } from './lastBatch';
 import { invalidateJobs, jobStats, sharedJob } from './jobs';
 import { getProgress } from './progress';
 import { cancelInboxReads, cancelReads, commentsDebug, conversation, fetchComments, fetchProfile, followUser, inbox, inboxDebug, isCancelled, searchTikTok, sendMessage, SocialError } from './social';
-import { channelVideos, exploreYouTube, isYouTubeUrl, recommendedYouTube, resolveYouTube, searchYouTube, youTubeCategory, YouTubeError } from './youtube';
+import { channelVideos, exploreYouTube, isYouTubeUrl, recommendedYouTube, recommendedYouTubeTv, resolveYouTube, searchYouTube, youTubeCategory, YouTubeError } from './youtube';
 import { youtubeSearchStatus } from './youtubeSearch';
 import { exploreInstagram, forYouInstagram, instagramCategory, instagramStats, InstagramError, isInstagramUrl, pauseInstagramPages, profileInstagram, resolveInstagram, searchInstagram, setInstagramLogger, shutdownInstagram } from './instagram';
 import { instagramCancelLogin, instagramLogout, instagramMaySignIn, instagramSessionLog, ensureInstagramSession, instagramSessionLost, instagramSessionStatus, instagramSignedIn, instagramWantsProbe, instagramStartLogin, InstagramSessionError, setInstagramSessionLogger, shutdownInstagramSession } from './instagramSession';
-import { setYouTubeSessionLogger, shutdownYouTubeSession, youtubeCancelLogin, youtubeCookieFile, youtubeLogout, youtubeSessionLog, youtubeSessionLost, youtubeSessionStatus, youtubeStartLogin, YouTubeSessionError } from './youtubeSession';
+import { setYouTubeSessionLogger, shutdownYouTubeSession, youtubeCancelLogin, youtubeCookieFile, youtubeLogout, youtubeSessionLog, youtubeSessionLost, youtubeSessionStatus, youtubeSignInKind, youtubeStartLogin, YouTubeSessionError } from './youtubeSession';
+import { TvAuthError } from './youtubeTv';
 import { exploreFacebook, facebookCategory, facebookStats, FacebookError, forYouFacebook, isFacebookUrl, profileFacebook, resolveFacebook, searchFacebook, setFacebookLogger } from './facebook';
 import { flushLiveTv, liveTvBusy, liveTvStats, registerLiveTv, setLiveTvLogger } from './livetv';
 import { serverPressure } from './pressure';
@@ -128,9 +129,10 @@ function youtubeReservoir(categoryId: number, log: (m: string) => void): Reservo
 export const youtubeStock = (): Record<string, ReservoirStats> => Object.fromEntries([...youtubeReservoirs].map(([k, v]) => [String(k), v.stats]));
 
 /**
- * The signed-in account's YouTube feed (youtube.com/feed/recommended through the saved cookies),
- * stocked like the others. Each fill walks a different "load more" page of the home feed (YouTube
- * re-samples the recommendations on every load, so the pages differ between fills as well).
+ * The signed-in account's YouTube feed, stocked like the others: the home feed of YouTube's TV API
+ * when the account signed in with a code (each fill continues the previous one's "load more"), else
+ * youtube.com/feed/recommended through the saved cookies (each fill walks a different "load more"
+ * page; YouTube re-samples the recommendations on every load, so the pages differ between fills).
  */
 let youtubeForYou: Reservoir | undefined;
 function youtubeForYouReservoir(log: (m: string) => void): Reservoir {
@@ -138,7 +140,18 @@ function youtubeForYouReservoir(log: (m: string) => void): Reservoir {
     youtubeForYou = new Reservoir(
       'youtube foryou',
       async ({ count, index }) => {
-        const file = youtubeCookieFile();
+        if (youtubeSignInKind() === 'code') {
+          try {
+            const tv = await recommendedYouTubeTv(count, log);
+            return { items: tv.items, warnings: tv.items.length ? [] : ['YouTube returned no recommendations this time'] };
+          } catch (e) {
+            if (!(e instanceof TvAuthError)) throw e;
+            // Google dropped the code sign-in: the check forgets it; saved cookies (if any) take over below.
+            const lost = await youtubeSessionLost();
+            if (!youtubeSignInKind()) throw new FeedError(`Not signed in to YouTube any more: ${lost || (e as Error).message}`, 'youtube_not_signed_in', 401);
+          }
+        }
+        const file = youtubeSignInKind() === 'cookies' ? youtubeCookieFile() : undefined;
         if (!file) throw new FeedError('Not signed in to YouTube: sign in from Profile to see your For You feed.', 'youtube_not_signed_in', 401);
         const res = await recommendedYouTube((index % 3) * count, count, file, log);
         if (!res.items.length) {
@@ -585,7 +598,7 @@ export async function buildServer() {
       }
       if (platform === 'youtube') {
         if (source === 'foryou') {
-          if (!youtubeCookieFile()) {
+          if (!youtubeSignInKind()) {
             if (warm || prefetch) return served(undefined, 'youtube foryou');
             throw new FeedError('Not signed in to YouTube: sign in from Profile to see your For You feed.', 'youtube_not_signed_in', 401);
           }
@@ -866,7 +879,9 @@ export async function buildServer() {
         return await instagramStartLogin(mode, typeof req.body?.cookies === 'string' ? req.body.cookies : undefined, (m) => req.log.info({ what: 'instagram-session' }, m), req.headers['user-agent']);
       }
       if (platform === 'youtube') {
-        const mode = req.body?.mode === 'window' ? 'window' : 'cookies';
+        const mode = req.body?.mode === 'window' ? 'window' : req.body?.mode === 'code' ? 'code' : 'cookies';
+        // A new sign-in may be another account: its feed starts from an empty stock.
+        if (mode === 'code') youtubeForYou = undefined;
         return await youtubeStartLogin(mode, typeof req.body?.cookies === 'string' ? req.body.cookies : undefined, (m) => req.log.info({ what: 'youtube-session' }, m));
       }
       if (platform === 'facebook') {
