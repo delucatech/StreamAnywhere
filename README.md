@@ -208,6 +208,31 @@ curl -fsSL https://raw.githubusercontent.com/delucatech/StreamAnywhere/main/depl
    latest `main`. (The same command also works once over SSH with `sudo`.)
 3. Open `https://<that host>/feed.html` → Sign in → Sign in with QR code → scan with the app.
 
+**Updates without a Reset** (step 6 of the script, added 2026-11-20). Two systemd timers. Both run
+at `Nice=19` with idle I/O. Both wait until `/api/health` reports no `server.pressure` and an empty
+`server.busy`, and they share one lock (`/run/lock/streamanywhere-deploy.lock`) with each other and
+with the boot-time setup, so only one deploy or upgrade runs at a time on the e2-micro:
+
+- `streamanywhere-ytdlp-update.timer` is always on. Daily at 09:30 UTC (03:30 US Central, plus up
+  to 30 min random delay), it upgrades yt-dlp in the venv (`/opt/ytdlp`) and the zipapp
+  (`/usr/local/bin/yt-dlp`). It skips the run when the venv already has the latest GitHub release,
+  and waits up to 2 h for an idle server. It restarts `streamanywhere` only when a version changed,
+  and logs `old -> new` (`journalctl -u streamanywhere-ytdlp-update`).
+- `streamanywhere-autodeploy.timer` is opt-in. It checks `origin/<branch>` with `git ls-remote`
+  30 min after boot, then every 30 min. When the branch moved, it reruns the app part of the deploy
+  (fetch/reset, `npm ci`, build, restart) and nothing else. If `npm ci` or the build fails, it does
+  not restart and does not retry that commit; the next push or a Reset will. A change to
+  `setup-vm.sh` itself still needs a Reset, and the journal says so
+  (`journalctl -u streamanywhere-autodeploy`). To turn it on, set the instance metadata key
+  `auto-deploy` = `1` and Reset. Or put `AUTO_DEPLOY=1` in `/etc/streamanywhere.env`, then run
+  `sudo systemctl enable --now streamanywhere-autodeploy.timer`; that value is kept when the script
+  rewrites the file on the next boot. `auto-deploy` = `0` turns it off.
+
+The scripts are [`deploy/gcp/ytdlp-update.sh`](deploy/gcp/ytdlp-update.sh),
+[`deploy/gcp/auto-deploy.sh`](deploy/gcp/auto-deploy.sh) and [`deploy/gcp/lib.sh`](deploy/gcp/lib.sh).
+They are copied to `/usr/local/lib/streamanywhere/`, so a `git reset` cannot rewrite a script while
+it runs. `systemctl list-timers 'streamanywhere-*'` shows the next runs.
+
 **Stable address without a paid static IP:** the ephemeral IP changes when the VM is stopped and
 started. Create a free [DuckDNS](https://www.duckdns.org) subdomain, then add two instance
 metadata keys (*Edit → Metadata*): `duckdns-domain` = `yourname` and `duckdns-token` = your token,

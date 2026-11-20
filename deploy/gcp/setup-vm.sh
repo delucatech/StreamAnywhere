@@ -7,6 +7,8 @@
 #   3. clones/updates the repo into /opt/streamanywhere, installs deps, builds the client
 #   4. a systemd service "streamanywhere" running the Node server on 127.0.0.1:8787 as user "streamanywhere"
 #   5. Caddy in front of it: HTTPS on 443 for https://<VM-IP with dashes>.sslip.io (Let's Encrypt, no DNS setup)
+#   6. systemd timers that keep it current without a Reset: a daily yt-dlp upgrade, and (opt-in,
+#      auto-deploy=1) a redeploy whenever origin/<branch> moves
 #
 # Usage: as the instance's *startup script* (Compute Engine -> instance -> Edit -> Automation):
 #   #!/bin/bash
@@ -19,6 +21,8 @@
 #                   the host is then https://<domain>.duckdns.org; add a CNAME from your own domain if you like)
 #   client-origins  extra browser origins allowed to call the API (comma-separated)
 #   repo-url / branch
+#   auto-deploy     1 = redeploy the app on its own when the branch moves (checked every 30 min while the
+#                   server is idle); 0 = off. Unset keeps what /etc/streamanywhere.env has (AUTO_DEPLOY=...)
 set -euo pipefail
 
 meta() { curl -fsS -H 'Metadata-Flavor: Google' "http://169.254.169.254/computeMetadata/v1/instance/attributes/$1" 2>/dev/null || true; }
@@ -27,6 +31,11 @@ BRANCH="${BRANCH:-$(meta branch)}"; BRANCH="${BRANCH:-main}"
 CLIENT_ORIGINS="${CLIENT_ORIGINS:-$(meta client-origins)}"
 DUCKDNS_DOMAIN="${DUCKDNS_DOMAIN:-$(meta duckdns-domain)}"
 DUCKDNS_TOKEN="${DUCKDNS_TOKEN:-$(meta duckdns-token)}"
+# Env var, then metadata, then the value already in the env file (so AUTO_DEPLOY=1 written there by
+# hand survives this script rewriting the file on every boot), then off.
+AUTO_DEPLOY="${AUTO_DEPLOY:-$(meta auto-deploy)}"
+AUTO_DEPLOY="${AUTO_DEPLOY:-$(sed -n 's/^AUTO_DEPLOY=//p' /etc/streamanywhere.env 2>/dev/null | tail -1 || true)}"
+[ "$AUTO_DEPLOY" = 1 ] || AUTO_DEPLOY=0
 APP_DIR=/opt/streamanywhere
 APP_USER=streamanywhere
 EXTERNAL_IP="$(curl -fsS -H 'Metadata-Flavor: Google' 'http://169.254.169.254/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip' 2>/dev/null || curl -fsS https://api.ipify.org || echo '')"
@@ -37,6 +46,11 @@ echo "== setup $(date -Is): host=$PUBLIC_HOST ip=$EXTERNAL_IP branch=$BRANCH"
 
 if [ "$(id -u)" -ne 0 ]; then echo "run as root (sudo)"; exit 1; fi
 export DEBIAN_FRONTEND=noninteractive
+# The self-update timers (step 6) take the same lock, so a daily yt-dlp upgrade or an auto-deploy
+# never runs on top of this one (2026-11-20). Held until this script exits; waiting is better than
+# two npm builds on the e2-micro, but a stuck holder must not stop a Reset from deploying.
+exec 9>/run/lock/streamanywhere-deploy.lock
+flock -w 1800 9 || echo "WARN: the deploy lock stayed taken for 30 min; going on without it"
 
 echo "== 1. swap"
 if ! swapon --show | grep -q /swapfile; then
@@ -168,6 +182,8 @@ YTDLP_PATH=$YTDLP_BIN
 YTDLP_PYTHON=$YTDLP_PY
 ${FFMPEG_BIN:+FFMPEG_PATH=$FFMPEG_BIN}
 LOG_LEVEL=info
+DEPLOY_BRANCH=$BRANCH
+AUTO_DEPLOY=$AUTO_DEPLOY
 EOF
 chmod 640 /etc/streamanywhere.env; chown root:"$APP_USER" /etc/streamanywhere.env
 cat > /etc/systemd/system/streamanywhere.service <<EOF
@@ -205,6 +221,81 @@ $PUBLIC_HOST {
 EOF
 systemctl enable --now caddy >/dev/null
 systemctl reload caddy || systemctl restart caddy
+
+echo "== 6. updates on their own (yt-dlp daily; app on push when AUTO_DEPLOY=1)"
+# Added 2026-11-20: the server's code and yt-dlp changed only on a Reset, while YouTube breaks old
+# yt-dlp releases often and the client already deploys itself on every push. The scripts live in
+# deploy/gcp/ (ytdlp-update.sh, auto-deploy.sh, lib.sh) and are copied out of the checkout, since a
+# git reset during a run would rewrite a script bash is still reading. Both run at Nice=19 with idle
+# I/O, wait for /api/health to report no pressure and no work, and share the deploy lock above.
+LIB=/usr/local/lib/streamanywhere
+mkdir -p "$LIB"
+for f in lib.sh ytdlp-update.sh auto-deploy.sh; do
+  install -m 755 "$APP_DIR/deploy/gcp/$f" "$LIB/$f" || echo "WARN: could not install $f"
+done
+cat > /etc/systemd/system/streamanywhere-ytdlp-update.service <<EOF
+[Unit]
+Description=StreamAnywhere: upgrade yt-dlp, restart the server if the version changed
+After=network-online.target streamanywhere.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$LIB/ytdlp-update.sh
+Nice=19
+IOSchedulingClass=idle
+# Up to 1 h for the lock plus 2 h waiting for an idle server.
+TimeoutStartSec=4h
+EOF
+# 09:30 UTC = 03:30 US Central, when nobody is driving; no Persistent=: a boot already upgrades.
+cat > /etc/systemd/system/streamanywhere-ytdlp-update.timer <<EOF
+[Unit]
+Description=StreamAnywhere: daily yt-dlp upgrade
+
+[Timer]
+OnCalendar=*-*-* 09:30:00 UTC
+RandomizedDelaySec=30min
+
+[Install]
+WantedBy=timers.target
+EOF
+cat > /etc/systemd/system/streamanywhere-autodeploy.service <<EOF
+[Unit]
+Description=StreamAnywhere: redeploy the app when origin/$BRANCH moved (AUTO_DEPLOY=1)
+After=network-online.target streamanywhere.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$LIB/auto-deploy.sh
+Nice=19
+IOSchedulingClass=idle
+# npm ci + build take ~10 min on the e2-micro; far longer means it is stuck.
+TimeoutStartSec=45min
+EOF
+# First check 30 min after boot (this script just deployed), then 30 min after each run ends.
+cat > /etc/systemd/system/streamanywhere-autodeploy.timer <<EOF
+[Unit]
+Description=StreamAnywhere: check origin/$BRANCH every 30 min
+
+[Timer]
+OnBootSec=30min
+OnUnitInactiveSec=30min
+RandomizedDelaySec=2min
+
+[Install]
+WantedBy=timers.target
+EOF
+systemctl daemon-reload
+systemctl enable --now streamanywhere-ytdlp-update.timer >/dev/null 2>&1 || echo "WARN: could not enable the yt-dlp update timer"
+if [ "$AUTO_DEPLOY" = 1 ]; then
+  systemctl enable --now streamanywhere-autodeploy.timer >/dev/null 2>&1 || echo "WARN: could not enable the auto-deploy timer"
+  echo "auto-deploy: on (every 30 min while idle; journalctl -u streamanywhere-autodeploy)"
+else
+  systemctl disable --now streamanywhere-autodeploy.timer >/dev/null 2>&1 || true
+  echo "auto-deploy: off (metadata auto-deploy=1, or AUTO_DEPLOY=1 in /etc/streamanywhere.env, then Reset)"
+fi
+systemctl list-timers 'streamanywhere-*' --no-pager 2>/dev/null | head -4 || true
 
 sleep 3
 echo "== health: $(curl -fsS http://127.0.0.1:8787/api/health | head -c 120)"
