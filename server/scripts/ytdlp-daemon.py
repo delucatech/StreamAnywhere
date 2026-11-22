@@ -6,10 +6,15 @@ Importing yt_dlp costs ~1 s on a PC and ~11 s of CPU on the free e2-micro VM (me
 2026-10-12: a zipapp recompiles every module on each run), so spawning the CLI per request made
 every YouTube call 25-120 s there. This process pays that once.
 
+Hello:    {"id": 0, "ok": true, "version": "2026.10.26", "direct_client": {...} | null}
 Request:  {"id": 1, "url": "...", "flat": true, "playlist_items": "1-30", "noplaylist": false,
            "cookiefile": "/path/to/cookies.txt",
-           "extractor_args": {"youtube": {"player_client": ["..."]}}}
+           "extractor_args": {"youtube": {"skip": ["hls", "dash"]}}}
 Response: {"id": 1, "ok": true, "info": {...}}  or  {"id": 1, "ok": false, "error": "..."}
+
+direct_client is the YouTube player client this yt-dlp uses when it has no JavaScript runtime
+(name, numeric id, the request context): the server asks YouTube's player API with it directly
+(server/src/youtubePlayer.ts), so a daily yt-dlp upgrade also renews that request.
 
 The yt_dlp package comes from the running interpreter (pip / venv install); when the environment
 variable YTDLP_PATH names a zipapp (the GitHub release file), that file is put on sys.path instead.
@@ -31,6 +36,34 @@ def _import_yt_dlp():
         import yt_dlp  # noqa: F401
         return yt_dlp
     raise
+
+
+def _direct_client():
+    """
+    The player client yt-dlp falls back to without a JS runtime, when it is one that needs no
+    sign-in, no JS player and no PO token for its https formats; None otherwise (the server then
+    uses its built-in definition). Internal names of yt-dlp: any change there ends in None.
+    """
+    try:
+        from yt_dlp.extractor.youtube import _base
+        from yt_dlp.extractor.youtube._video import YoutubeIE
+
+        name = YoutubeIE._DEFAULT_JSLESS_CLIENTS[0]
+        c = _base.INNERTUBE_CLIENTS[name]
+        if c.get("REQUIRE_JS_PLAYER") or c.get("REQUIRE_AUTH"):
+            return None
+        policy = (c.get("GVS_PO_TOKEN_POLICY") or {}).get(_base.StreamingProtocol.HTTPS)
+        if policy is not None and getattr(policy, "required", False):
+            return None
+        client = {k: v for k, v in c["INNERTUBE_CONTEXT"]["client"].items() if isinstance(v, (str, int, float, bool))}
+        if not client.get("clientName") or not client.get("clientVersion"):
+            return None
+        out = {"name": name, "id": int(c["INNERTUBE_CONTEXT_CLIENT_NAME"]), "client": client}
+        if isinstance(c.get("PLAYER_PARAMS"), str):
+            out["params"] = c["PLAYER_PARAMS"]
+        return out
+    except Exception:  # noqa: BLE001
+        return None
 
 
 class _Quiet:
@@ -55,7 +88,7 @@ def main():
         out.write(json.dumps({"id": 0, "ok": False, "error": "cannot import yt_dlp: %s" % e}) + "\n")
         out.flush()
         return 1
-    out.write(json.dumps({"id": 0, "ok": True, "version": yt_dlp.version.__version__}) + "\n")
+    out.write(json.dumps({"id": 0, "ok": True, "version": yt_dlp.version.__version__, "direct_client": _direct_client()}) + "\n")
     out.flush()
     for line in sys.stdin:
         line = line.strip()
@@ -74,6 +107,8 @@ def main():
             "logger": _Quiet(),
             # the same formats the CLI gives us; no JS runtime is required for them (2026-10)
             "check_formats": False,
+            # a connection that stops answering ends by itself (yt-dlp's default is 20 s per read)
+            "socket_timeout": 12,
         }
         if req.get("flat"):
             opts["extract_flat"] = "in_playlist"

@@ -6,10 +6,12 @@
  *  - explore:  the Shorts tab of a hashtag page (youtube.com/hashtag/<tag>/shorts): vertical videos,
  *              about 30 per page in under 3 s. YouTube's Trending page is gone (redirects home).
  *  - channel:  youtube.com/@handle/videos, the same flat listing.
- *  - resolve:  `-j` for one video. YouTube hands guests no muxed format (the 360p one needs a PO
- *              token and answers 403), so the player gets two files: H.264 video (itag 160/133/134/
- *              135/136, 144p-720p) and AAC audio (itag 140), both fragmented MP4, both relayed by
- *              the proxy: googlevideo URLs are bound to the server's IP and carry no CORS header.
+ *  - resolve:  YouTube's player API directly (youtubePlayer.ts, about 0.2 s); yt-dlp's `-j` for
+ *              one video (2 s on a PC, 7-25 s on the e2-micro) when that fails. YouTube hands
+ *              guests no muxed format (the 360p one needs a PO token and answers 403), so the
+ *              player gets two files: H.264 video (itag 160/133/134/135/136, 144p-720p) and AAC
+ *              audio (itag 140), both fragmented MP4, both relayed by the proxy: googlevideo URLs
+ *              are bound to the server's IP and carry no CORS header.
  *  - foryou:   youtube.com/feed/recommended (the signed-in home feed) with the cookie file of the
  *              YouTube sign-in (youtubeSession.ts); a signed-out visitor gets an empty list there.
  *
@@ -19,19 +21,28 @@ import type { FeedItem, MediaFormat, ResolveResponse, SearchResponse, YouTubeCat
 import { YOUTUBE_CATEGORIES } from '../../shared/types';
 import { defaultExpiry, registerMedia } from './mediaStore';
 import { ytdlpInfo } from './ytdlp';
+import { directPlayerEnabled, notePlayerDirect, notePlayerFallback, playerInfoDirect } from './youtubePlayer';
 import { directSearchEnabled, noteDirect, noteFallback, searchDirect } from './youtubeSearch';
 import { tvHomeFeed } from './youtubeTv';
 
 /**
- * Listings keep a long limit (a page of a busy hashtag can take a while on the e2-micro). A single
- * video resolves in 1-5 s through a warm daemon (VM and PC, 2026-10), so its whole lookup (the wait
- * for a free daemon and the retry with the account's cookies included) gets 30 s: the viewer is
- * waiting on it, and the feed skips a video that fails.
+ * Listings keep a long limit (a page of a busy hashtag can take a while on the e2-micro).
+ *
+ * A single video: the viewer waits RESOLVE_TIMEOUT_MS for it, then the feed shows the failure and
+ * skips the video. The lookup itself (LOOKUP_TIMEOUT_MS: the direct request, then yt-dlp with its
+ * wait for a free daemon and the retry with the account's cookies) goes on after that and its
+ * answer is kept, so the same video asked again plays at once instead of starting over - and a
+ * slow yt-dlp run is no longer cut off just before it ends (ytdlp.ts STUCK_MS).
  */
 const LIST_TIMEOUT_MS = 150_000;
 const RESOLVE_TIMEOUT_MS = 30_000;
-/** The cookies retry is skipped when less than this is left of RESOLVE_TIMEOUT_MS. */
+const LOOKUP_TIMEOUT_MS = 75_000;
+/** The direct request gives way to yt-dlp after this long (it answers in 0.2 s when it answers). */
+const DIRECT_TIMEOUT_MS = 8_000;
+/** The cookies retry is skipped when less than this is left of LOOKUP_TIMEOUT_MS. */
 const RETRY_MIN_MS = 5_000;
+/** yt-dlp for one video: the manifests it would download and parse are never played here. */
+const VIDEO_EXTRACTOR_ARGS = { youtube: { skip: ['hls', 'dash'] } };
 
 export class YouTubeError extends Error {
   constructor(message: string, public readonly status = 502) {
@@ -223,13 +234,32 @@ export function pickAudio(formats: any[]): any | undefined {
   return aac.sort((a, b) => score(b) - score(a))[0];
 }
 
+/** `p`'s outcome, or `late()` thrown after `ms` (p itself goes on). */
+function within<T>(p: Promise<T>, ms: number, late: () => Error): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(late()), ms);
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
 /**
  * Resolves one video: metadata plus proxy URLs for the H.264 video files and the AAC audio file.
  * `cookieFile` (the YouTube sign-in) is used only when the guest extraction is refused (age gate,
  * private video of the account, "sign in to confirm you're not a bot"): the guest path is the
  * measured one, and it keeps the account's cookies out of every ordinary play.
+ *
+ * Rejects after `waitMs` with a 504 while the lookup goes on: its answer is kept for the next ask.
  */
-export async function resolveYouTube(inputUrl: string, log: (m: string) => void, cookieFile?: string): Promise<ResolveResponse> {
+export async function resolveYouTube(inputUrl: string, log: (m: string) => void, cookieFile?: string, waitMs = RESOLVE_TIMEOUT_MS): Promise<ResolveResponse> {
   const id = youTubeVideoId(inputUrl);
   if (!id) throw new YouTubeError('That is not a YouTube video URL', 400);
   const hit = cache.get(id);
@@ -237,37 +267,79 @@ export async function resolveYouTube(inputUrl: string, log: (m: string) => void,
   let p = inFlight.get(id);
   if (!p) {
     p = resolveUncached(id, inputUrl, log, cookieFile).finally(() => inFlight.delete(id));
+    // a lookup that fails after every caller stopped waiting is nobody's unhandled rejection
+    p.catch(() => undefined);
     inFlight.set(id, p);
   }
-  return p;
+  return within(p, waitMs, () => new YouTubeError(`YouTube took more than ${Math.round(waitMs / 1000)} s for this video; the lookup is still running on the server, so opening it again may play at once`, 504));
 }
 
+/** The picture-only H.264 files the player can take (plain https, up to MAX_HEIGHT). */
+const h264Files = (formats: any[]): any[] => formats.filter((f) => f.url && /^avc1/.test(f.vcodec || '') && (f.acodec === 'none' || !f.acodec) && f.protocol === 'https' && (f.height || 0) <= MAX_HEIGHT);
+
+/**
+ * YouTube's answer to the only player client that works without the player's JavaScript, for a
+ * video marked "made for kids" (measured 2026-11-22; yt-dlp names the same limit). Region blocks
+ * get the same words, so the note says what is known, not what the video is.
+ */
+const KIDS_NOTE = ' (YouTube answers this for videos marked "made for kids", which this server cannot play yet)';
+
 function classify(msg: string): YouTubeError {
+  if (/This video is not available\s*$/i.test(msg)) return new YouTubeError(msg + KIDS_NOTE, 404);
   if (/private|unavailable|not available|removed|does not exist|age/i.test(msg)) return new YouTubeError(msg, 404);
   if (/sign in|bot|captcha/i.test(msg)) return new YouTubeError(`YouTube refused the request from this server: ${msg}`, 503);
   return new YouTubeError(msg);
 }
 
-async function resolveUncached(id: string, inputUrl: string, log: (m: string) => void, cookieFile?: string): Promise<ResolveResponse> {
+/** The video's info through yt-dlp: as a guest, then (refused, and time left) with the account's cookies. */
+async function infoFromYtDlp(id: string, deadline: number, log: (m: string) => void, cookieFile?: string): Promise<any> {
   const t0 = Date.now();
-  const deadline = t0 + RESOLVE_TIMEOUT_MS;
-  let info: any;
+  const url = `https://www.youtube.com/watch?v=${id}`;
   try {
-    info = await ytdlpInfo({ url: `https://www.youtube.com/watch?v=${id}`, noplaylist: true }, RESOLVE_TIMEOUT_MS);
+    return await ytdlpInfo({ url, noplaylist: true, extractorArgs: VIDEO_EXTRACTOR_ARGS }, Math.max(1, deadline - t0));
   } catch (e) {
     const guestErr = classify((e as Error).message);
     log(`youtube ${id}: guest extraction failed after ${Date.now() - t0} ms (${guestErr.message.slice(0, 120)})`);
     if (!cookieFile || deadline - Date.now() < RETRY_MIN_MS) throw guestErr;
     log(`youtube ${id}: retrying with the account's cookies`);
     try {
-      info = await ytdlpInfo({ url: `https://www.youtube.com/watch?v=${id}`, noplaylist: true, cookieFile }, deadline - Date.now());
+      return await ytdlpInfo({ url, noplaylist: true, cookieFile, extractorArgs: VIDEO_EXTRACTOR_ARGS }, deadline - Date.now());
     } catch (e2) {
       throw classify((e2 as Error).message);
     }
   }
+}
+
+async function resolveUncached(id: string, inputUrl: string, log: (m: string) => void, cookieFile?: string): Promise<ResolveResponse> {
+  const t0 = Date.now();
+  const deadline = t0 + LOOKUP_TIMEOUT_MS;
+  const attempts: ResolveResponse['attempts'] = [];
+  let info: any;
+  let how = '';
+  if (directPlayerEnabled()) {
+    try {
+      const d = await within(playerInfoDirect(id, log), DIRECT_TIMEOUT_MS, () => new Error(`no answer in ${DIRECT_TIMEOUT_MS / 1000} s`));
+      if (!h264Files(d.info.formats).length) throw new Error(`no H.264 video format up to ${MAX_HEIGHT}p among its ${d.info.formats.length} formats`);
+      info = d.info;
+      how = `direct (${d.client}, ${d.requests} request${d.requests === 1 ? '' : 's'})`;
+      notePlayerDirect();
+      attempts.push({ resolver: 'native', ok: true, elapsedMs: Date.now() - t0 });
+    } catch (e) {
+      const reason = (e as Error).message || String(e);
+      notePlayerFallback(`${id}: ${reason}`);
+      attempts.push({ resolver: 'native', ok: false, error: reason, elapsedMs: Date.now() - t0 });
+      log(`youtube ${id}: the direct lookup failed after ${Date.now() - t0} ms (${reason.slice(0, 160)}); asking yt-dlp`);
+    }
+  }
+  if (!info) {
+    const t1 = Date.now();
+    info = await infoFromYtDlp(id, deadline, log, cookieFile);
+    how = 'yt-dlp';
+    attempts.push({ resolver: 'ytdlp', ok: true, elapsedMs: Date.now() - t1 });
+  }
   const all: any[] = Array.isArray(info.formats) ? info.formats : [];
   const warnings: string[] = [];
-  const videoOnly = all.filter((f) => f.url && /^avc1/.test(f.vcodec || '') && (f.acodec === 'none' || !f.acodec) && f.protocol === 'https' && (f.height || 0) <= MAX_HEIGHT);
+  const videoOnly = h264Files(all);
   if (!videoOnly.length) throw new YouTubeError(`No H.264 video format up to ${MAX_HEIGHT}p for ${id} (${all.length} formats)`);
   const audio = pickAudio(all);
   if (!audio) warnings.push('No AAC audio format: the video plays without sound');
@@ -305,7 +377,7 @@ async function resolveUncached(id: string, inputUrl: string, log: (m: string) =>
   });
   const resp: ResolveResponse = {
     source: 'youtube',
-    resolver: 'ytdlp',
+    resolver: how === 'yt-dlp' ? 'ytdlp' : 'native',
     id,
     inputUrl,
     canonicalUrl: `https://www.youtube.com/watch?v=${id}`,
@@ -318,9 +390,9 @@ async function resolveUncached(id: string, inputUrl: string, log: (m: string) =>
     formats,
     warnings,
     elapsedMs: Date.now() - t0,
-    attempts: [{ resolver: 'ytdlp', ok: true, elapsedMs: Date.now() - t0 }],
+    attempts,
   };
-  log(`youtube ${id}: ${formats.map((f) => f.id).join('/')} + audio ${audio?.format_id || 'none'}, ${resp.elapsedMs} ms`);
+  log(`youtube ${id}: ${formats.map((f) => f.id).join('/')} + audio ${audio?.format_id || 'none'}, ${how}, ${resp.elapsedMs} ms${resp.elapsedMs > RESOLVE_TIMEOUT_MS ? ' (after the viewer stopped waiting; kept for the next ask)' : ''}`);
   cache.set(id, { at: Date.now(), value: resp });
   if (cache.size > 500) for (const [k, v] of cache) if (Date.now() - v.at > CACHE_MS) cache.delete(k);
   return resp;

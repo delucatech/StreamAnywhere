@@ -781,11 +781,31 @@ Measured 2026-10-12 (dev machine and the GCP VM; the VM's IP is not bot-checked 
   `YOUTUBE_SEARCH=ytdlp` sends every search to yt-dlp. Channels (`@handle/videos`) back the
   Profile button. Everything is guest access; YouTube sign-in / a personal feed comes later.
 - **Playback**: YouTube gives guests no muxed format (the 360p one needs a PO token and answers
-  403), so each video is resolved (`yt-dlp -j`, cached an hour) to an H.264 video-only file (up
-  to 720p, `avc1` itags 160/133/134/135/136/298) plus an AAC audio file (itag 140, original
-  language, 128 kbps). Both are fragmented MP4 and both go through the proxy: `googlevideo.com`
-  URLs are bound to the server's IP and carry no CORS header. The WebCodecs renderer runs a
-  second demuxer for the sound file and syncs the picture to its audio clock (`LoadSource.audioUrl`).
+  403), so each video is resolved (cached an hour) to an H.264 video-only file (up to 720p,
+  `avc1` itags 160/133/134/135/136/298) plus an AAC audio file (itag 140, original language,
+  128 kbps). Both are fragmented MP4 and both go through the proxy: `googlevideo.com` URLs are
+  bound to the server's IP and carry no CORS header. The WebCodecs renderer runs a second demuxer
+  for the sound file and syncs the picture to its audio clock (`LoadSource.audioUrl`).
+- **Video lookup** = YouTube's player API (`youtubei/v1/player`) straight from the server
+  ([`server/src/youtubePlayer.ts`](server/src/youtubePlayer.ts)): the one request yt-dlp's
+  JS-less client (`visionos`) sends, 0.15–0.3 s and 16–32 KB per video (measured 2026-11-22),
+  plus YouTube's oEmbed endpoint for the channel's @handle. `yt-dlp -j` did the same in 2 s on a
+  PC but 7–25 s on the e2-micro (it also downloads and parses the 1 MB watch page and an HLS
+  manifest), and lookups that ran past the viewer's 30 s were the "yt-dlp timed out after 30 s"
+  on regular videos. The request needs a visitor id (without one YouTube answers "Sign in to
+  confirm you're not a bot"): the id that refusal hands back is accepted, kept, and replaced when
+  it wears out. The client definition is the one the installed yt-dlp reports, so the daily yt-dlp
+  upgrade renews it. Any failure (a refusal, an unplayable answer, a layout the parser does not
+  read) sends the video to yt-dlp as before, and `/api/health` → `youtubePlayer` counts it
+  (`fallback`, `lastFallback`); `YOUTUBE_PLAYER=ytdlp` sends every video to yt-dlp. A viewer
+  waits 30 s for a video; a lookup slower than that goes on (up to 75 s) and its answer is kept,
+  so opening the video again plays at once.
+- **Not playable: videos marked "made for kids"** (Blippi and the like). YouTube answers
+  "This video is not available" to the only client that works without the player's JavaScript
+  (measured 2026-11-22: `visionos` and `android_vr` refuse, `android` / `ios` answer with SABR
+  streams only, the web and TV clients hand out signed URLs). Playing them takes a JavaScript
+  runtime yt-dlp accepts on the server (Deno, or Node 22+; the VM has Node 20) and its
+  `web_embedded` client.
 - **Proxy chunking**: googlevideo throttles an open-ended request to ~50 KB/s but serves a bounded
   Range at full speed (10 MB in 0.3 s), so `chunked` media records are relayed in 4 MB chunks.
 - **Seeking in fragmented files**: mp4box only knows the fragments it has parsed, so a seek beyond

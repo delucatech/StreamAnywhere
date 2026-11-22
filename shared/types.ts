@@ -135,6 +135,13 @@ export interface HealthResponse {
    * the start (yt-dlp answered them); `lastFallback` says why. Missing on an older build.
    */
   youtubeSearch?: { mode: 'direct' | 'ytdlp'; clientVersion: string; direct: number; fallback: number; lastFallback?: { at: string; reason: string } };
+  /**
+   * YouTube video lookups (server/src/youtubePlayer.ts): `direct` = YouTube's player API asked as
+   * `client`, `ytdlp` = forced off (YOUTUBE_PLAYER=ytdlp). `fallback` counts videos the direct
+   * path could not answer since the start (yt-dlp was asked); `lastFallback` says why. Missing on
+   * an older build.
+   */
+  youtubePlayer?: { mode: 'direct' | 'ytdlp'; client: string; direct: number; fallback: number; lastFallback?: { at: string; reason: string } };
   resolver: string;
   proxyAllowedHosts: string[];
   uptimeSec: number;

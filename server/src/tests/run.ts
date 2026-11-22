@@ -7,6 +7,7 @@
  *  4. Live TikTok resolution + cookie / CORS behaviour of each URL kind (network, TIKTOK_TEST_URL)
  *  5. Concurrent yt-dlp lookups through the warm daemons (network, skipped without yt-dlp)
  *  5b/5c. YouTube direct search: parsing and pages (offline), a real search and the yt-dlp fallback (network)
+ *  5f/5g. YouTube direct video lookup: parsing, the visitor id, the viewer's wait (offline), a real video and the yt-dlp fallback (network)
  *
  * Network checks are skipped (not failed) when SKIP_NETWORK=1.
  */
@@ -15,7 +16,9 @@ import { mirrorChecks } from './mirror';
 import { hostAllowed, ipIsPrivate, assertSafeUpstream } from '../ssrf';
 import { parseTikTokUrl } from '../tiktok';
 import { isTikTokAd, itemToFeedItem } from '../feed';
-import { entryToFeedItem, isYouTubeUrl, pickAudio, searchYouTube, youTubeVideoId } from '../youtube';
+import { entryToFeedItem, isYouTubeUrl, pickAudio, resolveYouTube, searchYouTube, YouTubeError, youTubeVideoId } from '../youtube';
+import { BUILTIN_CLIENT, directPlayerEnabled, DirectPlayerError, isBotCheck, playability, playerAnswerToInfo, playerInfoDirect, playerRequestBody, setPlayerTransport, validClient, visitorFromPage, youtubePlayerStatus, type PlayerTransport } from '../youtubePlayer';
+import { getMedia } from '../mediaStore';
 import { clientVersionFromPage, directSearchEnabled, parseDuration, parseSearchAnswer, parseViews, searchDirect, SearchLayoutError, setSearchTransport, videoRendererToEntry, VIDEOS_ONLY, youtubeSearchStatus, type SearchTransport } from '../youtubeSearch';
 import { accountFromMenu, parseCookiesText, sapisidHash, toNetscape, YouTubeSessionError } from '../youtubeSession';
 import { accountFromAccountsList, parseCompactViews, parseTvFeed, pollCode, requestCode, setTvTransport, tileToEntry, tvAccount, TvAuthError, tvClientFromPage, tvForget, tvHomeFeed, TvLayoutError, tvSignedIn, type TvTransport } from '../youtubeTv';
@@ -1423,6 +1426,202 @@ async function youtubeSearchNetworkChecks(): Promise<void> {
   check('when the direct path fails, yt-dlp still answers the search', (rf?.items.length || 0) >= 10 && st.fallback === fb0 + 1 && Boolean(st.lastFallback?.reason.includes('simulated')), { ms: Date.now() - t2, items: rf?.items.length, status: st, logs: logs.slice(-2) });
 }
 
+// ---- YouTube's player API asked directly (youtubePlayer.ts): the shapes measured 2026-11-22
+const ytFmt = (itag: number, mimeType: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+  itag,
+  mimeType,
+  url: `https://rr1---sn-test.googlevideo.com/videoplayback?itag=${itag}&expire=1900000000&c=VISIONOS`,
+  bitrate: 1_000_000,
+  ...extra,
+});
+const ytSound = (lang: string, name: string, extra: Record<string, unknown> = {}): Record<string, unknown> =>
+  ytFmt(140, 'audio/mp4; codecs="mp4a.40.2"', { bitrate: 131_000, audioTrack: { displayName: name, id: `${lang}.3`, audioIsDefault: false }, ...extra });
+const ytPlayerAnswer = (id: string, formats: unknown[], extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+  responseContext: { visitorData: 'CgtFQ0hPRUQtSUQ' },
+  playabilityStatus: { status: 'OK' },
+  streamingData: { expiresInSeconds: '21540', adaptiveFormats: formats, hlsManifestUrl: 'https://manifest.googlevideo.com/x.m3u8' },
+  videoDetails: { videoId: id, title: `Video ${id}`, lengthSeconds: '883', channelId: 'UCcJGe_WM6xKnB_J8ynIYx2A', author: 'Jared Owen', thumbnail: { thumbnails: [{ url: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`, width: 480, height: 360 }] } },
+  ...extra,
+});
+const ytRefusal = (visitorData = 'CgtFQ0hPRUQtSUQ'): Record<string, unknown> => ({ responseContext: { visitorData }, playabilityStatus: { status: 'LOGIN_REQUIRED', reason: 'Sign in to confirm you’re not a bot' } });
+const ytUsualFormats = (): unknown[] => [
+  ytFmt(137, 'video/mp4; codecs="avc1.640028"', { width: 1920, height: 1080, fps: 30, bitrate: 5_515_824, averageBitrate: 4_100_000, qualityLabel: '1080p' }),
+  ytFmt(248, 'video/webm; codecs="vp9"', { width: 1920, height: 1080, fps: 30 }),
+  ytFmt(136, 'video/mp4; codecs="avc1.64001F"', { width: 1280, height: 720, fps: 30, bitrate: 3_303_531, averageBitrate: 1_817_000, qualityLabel: '720p' }),
+  ytFmt(298, 'video/mp4; codecs="avc1.4D4020"', { width: 1280, height: 720, fps: 60, averageBitrate: 2_751_000 }),
+  ytFmt(134, 'video/mp4; codecs="avc1.4D401E"', { width: 640, height: 360, fps: 30, averageBitrate: 355_000 }),
+  { itag: 135, mimeType: 'video/mp4; codecs="avc1.4D401F"', width: 854, height: 480, signatureCipher: 's=AAA&sp=sig&url=https%3A%2F%2Fx' },
+  ytFmt(133, 'video/mp4; codecs="avc1.4D4015"', { width: 426, height: 240, type: 'FORMAT_STREAM_TYPE_OTF' }),
+  ytFmt(139, 'audio/mp4; codecs="mp4a.40.5"', { bitrate: 57_000 }),
+  ytFmt(140, 'audio/mp4; codecs="mp4a.40.2"', { bitrate: 138_000 }),
+  ytFmt(140, 'audio/mp4; codecs="mp4a.40.2"', { bitrate: 138_000, isDrc: true }),
+  ytFmt(251, 'audio/webm; codecs="opus"', { bitrate: 160_000 }),
+];
+
+async function youtubePlayerOfflineChecks(): Promise<void> {
+  console.log('\n== 5f. YouTube direct video lookup (offline)');
+  const noLog = (): void => undefined;
+  const UA = 'TestAgent/1.0';
+  const info = playerAnswerToInfo(ytPlayerAnswer('aaaaaaaaaaa', ytUsualFormats()), 'aaaaaaaaaaa', UA);
+  const ids = info.formats.map((f) => f.format_id).join(',');
+  check('formats with a plain URL become yt-dlp-shaped entries; signed and on-the-fly ones are left out', ids === '137,248,136,298,134,139,140,140-drc,251', ids);
+  const f136 = info.formats.find((f) => f.format_id === '136');
+  check('a video format: codec, size, kbit/s from the average bitrate, the client user agent', f136?.vcodec === 'avc1.64001F' && f136.acodec === 'none' && f136.protocol === 'https' && f136.width === 1280 && f136.height === 720 && f136.tbr === 1817 && f136.http_headers['User-Agent'] === UA, f136);
+  const f140 = info.formats.find((f) => f.format_id === '140');
+  check('a sound format: codec, kbit/s, no picture', f140?.acodec === 'mp4a.40.2' && f140.vcodec === 'none' && f140.abr === 138 && f140.width === undefined, f140);
+  check('title, channel, duration, the largest picture size and the thumbnails are read', info.title === 'Video aaaaaaaaaaa' && info.channel === 'Jared Owen' && info.channel_id === 'UCcJGe_WM6xKnB_J8ynIYx2A' && info.duration === 883 && info.width === 1920 && info.height === 1080 && info.thumbnails.length === 1 && info.thumbnails[0].width === 480, info);
+  check('the plain AAC track is picked over the quiet (DRC) and the 48 kbit/s one', pickAudio(info.formats)?.format_id === '140');
+  const dubbed = playerAnswerToInfo(ytPlayerAnswer('aaaaaaaaaaa', [ytUsualFormats()[2], ytSound('ar', 'Arabic'), ytSound('en', 'English original', { audioTrack: { displayName: 'English original', id: 'en.4', audioIsDefault: true } }), ytSound('es-419', 'Spanish (Latin America)')]), 'aaaaaaaaaaa', UA);
+  const picked = pickAudio(dubbed.formats);
+  check('a dubbed video: the original track is picked, tracks are told apart by language', picked?.format_id === '140-en' && picked.format_note === 'English original (default)' && dubbed.formats.map((f) => f.format_id).join(',') === '136,140-ar,140-en,140-es-419', { picked, ids: dubbed.formats.map((f) => f.format_id) });
+
+  const failure = (json: unknown, id = 'aaaaaaaaaaa'): string => {
+    try {
+      playerAnswerToInfo(json, id, UA);
+      return 'no error';
+    } catch (e) {
+      return e instanceof DirectPlayerError ? `${e.kind}|${e.message}` : `other: ${e}`;
+    }
+  };
+  check('"made for kids" answer: unplayable, with YouTube\'s words', failure({ playabilityStatus: { status: 'UNPLAYABLE', reason: 'This video is not available' }, videoDetails: { videoId: 'aaaaaaaaaaa' } }) === 'unplayable|UNPLAYABLE: This video is not available');
+  check('a refusal is told apart from an unplayable video', failure(ytRefusal()).startsWith('refused|LOGIN_REQUIRED'));
+  check('an answer for another video (the placeholder YouTube serves a client it blocks) is not used', failure(ytPlayerAnswer('zzzzzzzzzzz', ytUsualFormats())).startsWith('unplayable|the answer is for another video'));
+  check('a live stream is left to the fallback', failure(ytPlayerAnswer('aaaaaaaaaaa', ytUsualFormats(), { videoDetails: { videoId: 'aaaaaaaaaaa', isLive: true } })).startsWith('unplayable|a live stream'));
+  check('answers this parser does not read are layout errors', failure({ responseContext: {} }).startsWith('layout|') && failure(null).startsWith('layout|') && failure({ playabilityStatus: { status: 'OK' }, streamingData: { serverAbrStreamingUrl: 'https://x' } }).startsWith('layout|no adaptiveFormats'));
+  check('only signed formats (a client that needs the player JavaScript): a layout error, not an empty video', failure(ytPlayerAnswer('aaaaaaaaaaa', [ytUsualFormats()[5]])) === 'layout|1 formats, none with a plain URL (signed or SABR only)');
+  check('the bot check is told apart from an age gate', isBotCheck(ytRefusal()) && !isBotCheck({ playabilityStatus: { status: 'LOGIN_REQUIRED', reason: 'Sign in to confirm your age' } }) && !isBotCheck(ytPlayerAnswer('aaaaaaaaaaa', [])) && playability({ playabilityStatus: { status: 'ERROR', messages: ['Gone'] } }).reason === 'Gone');
+  check('the visitor id of a youtube.com page', visitorFromPage('ytcfg.set({"VISITOR_DATA":"CgtQQUdFLVZJU0lUT1I%3D","X":1})') === 'CgtQQUdFLVZJU0lUT1I%3D' && visitorFromPage('<html></html>') === undefined);
+
+  const reported = { name: 'visionos', id: 101, client: { clientName: 'VISIONOS', clientVersion: '1.03', userAgent: 'UA', hl: 'en' }, params: null };
+  check("yt-dlp's client definition is accepted as its daemon reports it", validClient(reported)?.client.clientVersion === '1.03' && validClient(reported)?.params === undefined && validClient(BUILTIN_CLIENT) !== undefined);
+  check('anything else is refused (the built-in client is used)', validClient(undefined) === undefined && validClient(null) === undefined && validClient({ name: 'x', id: 1, client: { clientName: 'X' } }) === undefined && validClient({ name: 'x', id: '1', client: reported.client }) === undefined && validClient({ name: 'x', id: 1, client: { ...reported.client, nested: {} } }) === undefined);
+  const body = playerRequestBody('aaaaaaaaaaa', { ...BUILTIN_CLIENT, params: 'PP' }, 'VISITOR') as any;
+  check('the request: the client context with the visitor id, the video, the content checks', body.videoId === 'aaaaaaaaaaa' && body.context.client.clientName === 'VISIONOS' && body.context.client.visitorData === 'VISITOR' && body.context.client.hl === 'en' && body.params === 'PP' && body.contentCheckOk === true && body.playbackContext.contentPlaybackContext.html5Preference === 'HTML5_PREF_WANTS' && (playerRequestBody('aaaaaaaaaaa', BUILTIN_CLIENT, undefined) as any).context.client.visitorData === undefined, body);
+
+  // the visitor id: none at first (refused), the echoed one accepted and kept, a worn-out one replaced
+  const calls: { video: string; visitor?: string }[] = [];
+  let accepted = new Set(['CgtFQ0hPRUQtSUQ']);
+  let pages = 0;
+  const scripted: PlayerTransport = {
+    async player(video, _client, visitorId) {
+      calls.push({ video, visitor: visitorId });
+      return visitorId && accepted.has(visitorId) ? ytPlayerAnswer(video, ytUsualFormats()) : ytRefusal('CgtFQ0hPRUQtSUQ');
+    },
+    async embedPage() {
+      pages++;
+      return 'ytcfg.set({"VISITOR_DATA":"CgtQQUdFLVZJU0lUT1I"})';
+    },
+    async oembed(video) {
+      return { author_name: 'Jared Owen', author_url: video === 'ccccccccccc' ? 'https://www.youtube.com/channel/UCx' : 'https://www.youtube.com/@JaredOwen' };
+    },
+  };
+  setPlayerTransport(scripted);
+  try {
+    const d1 = await playerInfoDirect('aaaaaaaaaaa', noLog);
+    check('the first lookup: refused without a visitor id, accepted with the one the refusal carried', d1.requests === 2 && calls.length === 2 && calls[0].visitor === undefined && calls[1].visitor === 'CgtFQ0hPRUQtSUQ' && d1.info.formats.length === 9 && pages === 0, { calls, requests: d1.requests });
+    check("the channel's @handle comes from oEmbed", d1.info.uploader_url === 'https://www.youtube.com/@JaredOwen', d1.info.uploader_url);
+    const d2 = await playerInfoDirect('bbbbbbbbbbb', noLog);
+    check('the next lookup is one request with the kept visitor id', d2.requests === 1 && calls.length === 3 && calls[2].visitor === 'CgtFQ0hPRUQtSUQ');
+    accepted = new Set(['CgtQQUdFLVZJU0lUT1I']); // YouTube stops accepting the kept id, and hands back the same one
+    const d3 = await playerInfoDirect('ccccccccccc', noLog);
+    check("a worn-out visitor id is replaced by the embed page's", d3.requests === 2 && pages === 1 && calls[calls.length - 1].visitor === 'CgtQQUdFLVZJU0lUT1I' && d3.info.uploader_url === undefined, { calls: calls.slice(3), pages });
+    const d4 = await playerInfoDirect('ddddddddddd', noLog);
+    check('and the replacement is kept', d4.requests === 1 && calls[calls.length - 1].visitor === 'CgtQQUdFLVZJU0lUT1I');
+    accepted = new Set();
+    const refused = await playerInfoDirect('eeeeeeeeeee', noLog).catch((e) => e);
+    check('a refusal no visitor id lifts is reported as refused (yt-dlp is asked)', refused instanceof DirectPlayerError && refused.kind === 'refused', String(refused));
+    const sentSoFar = calls.length;
+    accepted = new Set(['CgtFQ0hPRUQtSUQ']);
+    const resting = await playerInfoDirect('eeeeeeeeeee', noLog).catch((e) => e);
+    check('after it the direct path rests: the next video is refused without a request', resting instanceof DirectPlayerError && resting.kind === 'refused' && /next direct try in 10 min/.test(resting.message) && calls.length === sentSoFar, String(resting));
+    setPlayerTransport(scripted);
+
+    // through the resolver: the answer the feed gets, without yt-dlp
+    const before = youtubePlayerStatus();
+    const r = await resolveYouTube('https://www.youtube.com/watch?v=fffffffffff', noLog);
+    const after = youtubePlayerStatus();
+    check('a resolved video: H.264 files up to 720p, best first, each with the sound file, from the proxy', r.resolver === 'native' && r.formats.map((f) => f.id).join(',') === '298,136,134' && r.formats.every((f) => f.codec === 'h264' && f.proxyUrl?.startsWith('/api/media/') && f.audioProxyUrl?.startsWith('/api/media/') && f.expiresAt === 1900000000 && f.upstreamHost === 'rr1---sn-test.googlevideo.com'), r.formats);
+    check('with the channel handle, title, duration and cover', r.author === 'JaredOwen' && r.title === 'Video fffffffffff' && r.duration === 883 && r.cover === 'https://i.ytimg.com/vi/fffffffffff/hqdefault.jpg' && r.attempts.length === 1 && r.attempts[0].resolver === 'native' && r.attempts[0].ok, r);
+    check('counted as a direct lookup in /api/health', after.mode === 'direct' && after.direct === before.direct + 1 && after.fallback === before.fallback && after.client.startsWith('visionos '), after);
+    const asked = calls.length;
+    const again = await resolveYouTube('https://youtu.be/fffffffffff', noLog);
+    check('the same video asked again within the hour costs no request', again === r && calls.length === asked);
+
+    // a lookup slower than the viewer's wait goes on, and its answer serves the next ask
+    const slow: PlayerTransport = { ...scripted, player: async (video, c, v) => (await cancellableSleep(120), scripted.player(video, c, v)) };
+    setPlayerTransport(slow);
+    const t0 = Date.now();
+    const late = await resolveYouTube('https://www.youtube.com/watch?v=ggggggggggg', noLog, undefined, 40).catch((e) => e);
+    const waited = Date.now() - t0;
+    check('a viewer waits only so long: a 504 that says the lookup goes on', late instanceof YouTubeError && late.status === 504 && /still running/.test(late.message) && waited < 110, { late: String(late), waited });
+    await cancellableSleep(400);
+    const t1 = Date.now();
+    const kept = await resolveYouTube('https://www.youtube.com/watch?v=ggggggggggg', noLog, undefined, 40).catch((e) => e);
+    check('the lookup finished meanwhile: asked again, the video is answered at once', !(kept instanceof Error) && kept.formats.length === 3 && Date.now() - t1 < 30, { kept: String(kept instanceof Error ? kept : kept.formats.length), ms: Date.now() - t1 });
+  } finally {
+    setPlayerTransport(undefined);
+  }
+  const prev = process.env.YOUTUBE_PLAYER;
+  process.env.YOUTUBE_PLAYER = 'ytdlp';
+  const off = !directPlayerEnabled() && youtubePlayerStatus().mode === 'ytdlp';
+  if (prev === undefined) delete process.env.YOUTUBE_PLAYER;
+  else process.env.YOUTUBE_PLAYER = prev;
+  check('YOUTUBE_PLAYER=ytdlp switches the direct lookup off', off);
+}
+
+async function youtubePlayerNetworkChecks(): Promise<void> {
+  console.log('\n== 5g. YouTube video lookup, live');
+  const logs: string[] = [];
+  const log = (m: string): void => {
+    logs.push(m);
+  };
+  const before = youtubePlayerStatus();
+  const t0 = Date.now();
+  const r = await resolveYouTube('https://www.youtube.com/watch?v=dQw4w9WgXcQ', log).catch((e) => e);
+  const ms = Date.now() - t0;
+  const after = youtubePlayerStatus();
+  const ok = !(r instanceof Error);
+  check('a real video is looked up by the direct path', ok && r.resolver === 'native' && after.direct === before.direct + 1 && after.fallback === before.fallback, { ms, r: ok ? r.formats.map((f: { id: string }) => f.id) : String(r), logs, status: after });
+  check('with H.264 files, a sound file, the channel handle and the duration', ok && r.formats.length >= 3 && r.formats.every((f: { codec: string; audioProxyUrl?: string }) => f.codec === 'h264' && f.audioProxyUrl) && Boolean(r.author) && !/\s/.test(r.author) && r.duration > 200, ok ? { author: r.author, duration: r.duration } : String(r));
+  check('in under 3 s', ms < 3000, ms);
+  if (ok) {
+    const first = await upstreamStatus(r.formats[0].mediaId);
+    check('and YouTube delivers the file it names (a ranged request answers 206)', first === 206, first);
+  }
+
+  if (!(await detectYtDlp()).available) {
+    console.log('(fallback check skipped: no yt-dlp on this machine)');
+    return;
+  }
+  setPlayerTransport({
+    player: async () => {
+      throw new Error('simulated: YouTube changed something');
+    },
+    embedPage: async () => '',
+    oembed: async () => ({}),
+  });
+  const fb0 = youtubePlayerStatus().fallback;
+  const t1 = Date.now();
+  const rf = await resolveYouTube('https://www.youtube.com/watch?v=jNQXAC9IVRw', log, undefined, 60_000).catch((e) => e);
+  setPlayerTransport(undefined);
+  const st = youtubePlayerStatus();
+  const okf = !(rf instanceof Error);
+  check('when the direct lookup fails, yt-dlp still answers the video', okf && rf.resolver === 'ytdlp' && rf.formats.length >= 1 && rf.attempts.length === 2 && !rf.attempts[0].ok && st.fallback === fb0 + 1 && Boolean(st.lastFallback?.reason.includes('simulated')), { ms: Date.now() - t1, r: okf ? rf.formats.length : String(rf), status: st, logs: logs.slice(-3) });
+}
+
+/** The upstream status of a registered media file for a small ranged request (what the proxy would get). */
+async function upstreamStatus(mediaId: string | undefined): Promise<number | string> {
+  const rec = mediaId ? getMedia(mediaId) : undefined;
+  if (!rec) return 'no such media record';
+  try {
+    const { res, status } = await openUpstream(rec.url, { headers: { ...rec.headers, range: 'bytes=0-65535' }, allowlist: ['*.googlevideo.com'], timeoutMs: 10_000 });
+    res.destroy();
+    return status;
+  } catch (e) {
+    return (e as Error).message;
+  }
+}
+
 async function ytdlpChecks(): Promise<void> {
   console.log('\n== 5. yt-dlp lookups at the same time');
   if (!(await detectYtDlp()).available) {
@@ -1565,6 +1764,7 @@ async function homeTopUpChecks(): Promise<void> {
 (async () => {
   await offline();
   await youtubeSearchOfflineChecks();
+  await youtubePlayerOfflineChecks();
   await youtubeTvOfflineChecks();
   await inboxCancelChecks();
   await homeTopUpChecks();
@@ -1574,6 +1774,7 @@ async function homeTopUpChecks(): Promise<void> {
   else {
     await network();
     await youtubeSearchNetworkChecks();
+    await youtubePlayerNetworkChecks();
     await ytdlpChecks();
   }
   console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : failures + ' CHECK(S) FAILED'}`);

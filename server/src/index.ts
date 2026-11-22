@@ -26,6 +26,7 @@ import { invalidateJobs, jobStats, sharedJob } from './jobs';
 import { getProgress } from './progress';
 import { cancelInboxReads, cancelReads, commentsDebug, conversation, fetchComments, fetchProfile, followUser, inbox, inboxDebug, isCancelled, searchTikTok, sendMessage, SocialError } from './social';
 import { channelVideos, exploreYouTube, isYouTubeUrl, recommendedYouTube, recommendedYouTubeTv, resolveYouTube, searchYouTube, youTubeCategory, YouTubeError } from './youtube';
+import { youtubePlayerStatus } from './youtubePlayer';
 import { youtubeSearchStatus } from './youtubeSearch';
 import { exploreInstagram, followInstagram, forYouInstagram, instagramCategory, instagramFollowStates, instagramStats, InstagramError, isInstagramUrl, pauseInstagramPages, profileInstagram, resolveInstagram, searchInstagram, setInstagramLogger, shutdownInstagram } from './instagram';
 import { instagramCancelLogin, instagramLogout, instagramMaySignIn, instagramSessionLog, ensureInstagramSession, instagramSessionLost, instagramSessionStatus, instagramSignedIn, instagramWantsProbe, instagramStartLogin, InstagramSessionError, setInstagramSessionLogger, shutdownInstagramSession } from './instagramSession';
@@ -351,6 +352,7 @@ export async function buildServer() {
       ytdlpDaemon: daemonStatus(),
       ffmpeg: await detectFfmpeg(),
       youtubeSearch: youtubeSearchStatus(),
+      youtubePlayer: youtubePlayerStatus(),
       resolver: config.resolver,
       proxyAllowedHosts: config.proxyAllowedHosts,
       uptimeSec: Math.round(process.uptime()),

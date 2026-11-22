@@ -165,16 +165,23 @@ export interface InfoRequest {
   noplaylist?: boolean;
   /** --cookies: a Netscape cookies.txt (the YouTube sign-in); yt-dlp writes rotated cookies back to it */
   cookieFile?: string;
+  /** --extractor-args, per extractor: {youtube: {skip: ['hls', 'dash']}} = "youtube:skip=hls,dash" */
+  extractorArgs?: Record<string, Record<string, string[]>>;
 }
 
 const DAEMONS = Math.max(1, Number(process.env.YTDLP_DAEMONS) || 2);
 /**
  * An extraction running this long is taken as stuck: its daemon is restarted. A caller whose own
  * deadline comes sooner (it waited in line, or wants a quick answer) gives up at that deadline,
- * but the extraction may finish within this limit and keep its warm daemon (a restart costs ~20 s
- * of CPU on the e2-micro).
+ * but the extraction may finish within this limit and keep its warm daemon.
+ *
+ * 60 s, not the 30 s a viewer waits for a video: on the e2-micro a video's extraction takes 7-25 s
+ * when the machine is busy (seen 2026-11-20..22), and restarting the daemon at 30 s threw away an
+ * extraction that was about to end and put a ~20 s Python start in front of the next one, which
+ * then ran past 30 s as well - every video failed for minutes. A read that hangs ends by itself
+ * (the daemon's socket_timeout).
  */
-const STUCK_MS = 30_000;
+const STUCK_MS = 60_000;
 const DAEMON_SCRIPT = findUp(path.join('server', 'scripts', 'ytdlp-daemon.py')) || findUp(path.join('server', 'scripts', 'ytdlp-daemon.py'), process.cwd());
 
 interface Pending {
@@ -243,7 +250,7 @@ class Daemon {
       });
       const rl = readline.createInterface({ input: proc.stdout! });
       rl.on('line', (line) => {
-        let msg: { id: number; ok: boolean; info?: unknown; error?: string; version?: string };
+        let msg: { id: number; ok: boolean; info?: unknown; error?: string; version?: string; direct_client?: unknown };
         try {
           msg = JSON.parse(line);
         } catch {
@@ -253,6 +260,7 @@ class Daemon {
           hello = true;
           if (msg.ok) {
             this.version = msg.version || '';
+            directClient = msg.direct_client ?? undefined;
             this.onLog(`daemon ready (${this.python.cmd}, yt-dlp ${this.version})`);
             resolve(true);
           } else {
@@ -301,6 +309,7 @@ class Daemon {
       const body: Record<string, unknown> = { id, url: req.url, flat: Boolean(req.flat), noplaylist: Boolean(req.noplaylist) };
       if (req.playlistItems) body.playlist_items = req.playlistItems;
       if (req.cookieFile) body.cookiefile = req.cookieFile;
+      if (req.extractorArgs) body.extractor_args = req.extractorArgs;
       this.proc.stdin!.write(JSON.stringify(body) + '\n');
     });
   }
@@ -340,6 +349,14 @@ function pythonCandidates(): { cmd: string; args: string[] }[] {
 }
 
 const pool: Daemon[] = [];
+/** What the newest daemon said in its hello line about yt-dlp's JS-less player client (unchecked) */
+let directClient: unknown;
+/**
+ * The YouTube player client the installed yt-dlp uses without a JS runtime, as its daemon reported
+ * it ({name, id, client, params?}); undefined before a daemon started, without daemons, or when
+ * that yt-dlp has no such client. youtubePlayer.ts validates it before use.
+ */
+export const ytdlpDirectClient = (): unknown => directClient;
 let daemonPython: { cmd: string; args: string[] } | null | undefined;
 let daemonProbe: Promise<void> | undefined;
 const waiters: (() => void)[] = [];
@@ -421,6 +438,9 @@ export async function ytdlpInfo(req: InfoRequest, timeoutMs = 150_000): Promise<
   if (req.noplaylist) args.push('--no-playlist');
   if (req.playlistItems) args.push('--playlist-items', req.playlistItems);
   if (req.cookieFile) args.push('--cookies', req.cookieFile);
+  for (const [extractor, kv] of Object.entries(req.extractorArgs || {})) {
+    args.push('--extractor-args', `${extractor}:${Object.entries(kv).map(([k, v]) => `${k}=${v.join(',')}`).join(';')}`);
+  }
   args.push(req.url);
   const out = await ytdlp(args, Math.max(1, deadline - Date.now()));
   return JSON.parse(out.trim().split(/\r?\n/).pop()!);
