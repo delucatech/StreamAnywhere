@@ -798,7 +798,7 @@ Measured 2026-10-12 (dev machine and the GCP VM; the VM's IP is not bot-checked 
   upgrade renews it. Any failure (a refusal, an unplayable answer, a layout the parser does not
   read) sends the video to yt-dlp as before, and `/api/health` → `youtubePlayer` counts it
   (`fallback`, `lastFallback`); `YOUTUBE_PLAYER=ytdlp` sends every video to yt-dlp. A viewer
-  waits 30 s for a video; a lookup slower than that goes on (up to 120 s) and its answer is kept,
+  waits 60 s for a video; a lookup slower than that goes on (up to 120 s) and its answer is kept,
   so opening the video again plays at once.
 - **Videos marked "made for kids"** (Blippi and the like) take the slow route. YouTube answers
   "This video is not available" to the only client that works without the player's JavaScript
@@ -807,14 +807,20 @@ Measured 2026-10-12 (dev machine and the GCP VM; the VM's IP is not bot-checked 
   2.3 or newer; Node 20 does not count) and the `yt-dlp-ejs` package (`pip install
   "yt-dlp[default]"`), yt-dlp runs YouTube's player script and asks as the `tv_samsung` client:
   the direct lookup's refusal sends the video there (`player_client=default,-visionos`, so the
-  client that already refused is not asked again). About 5 s on a PC. YouTube's file server
-  refuses part of the addresses that route hands out (HTTP 403 on every byte range, for one
-  lookup's address always, for the next lookup's often not), so the server asks the first file
-  for two bytes before it answers and looks the video up again when they are refused (three
-  lookups at most); when all are refused the viewer is told so. The same route is the second way
-  for every video should YouTube close the JS-less client. `/api/health` →
-  `ytdlpDaemon.jsRuntime` names the Deno in use (missing = none, and those videos answer "not
-  available"). The VM gets Deno and the package from `deploy/gcp/setup-vm.sh` (step 2c).
+  client that already refused is not asked again). The lookup takes about 5 s on a PC and 5-25 s
+  on the e2-micro (7 s of it Deno when the machine is quiet; a minute or more while a headless
+  Chromium runs). **The ad wait**: the TV client is shown an ad before the video, and YouTube's
+  file server answers 403 for every byte range of the video's files until that ad's time is
+  over - "30s ad": the files opened 21 s after a 7 s lookup; "23s ad skippable after 5s": open at
+  once (measured 2026-11-22 on the PC and the VM; yt-dlp's debug log names the ad). The same
+  address opens by itself, and a new lookup would start the clock again, so the server asks the
+  first file for two bytes until it answers (every 2.5 s, 75 s at most) before it hands the video
+  out, and the status strip says what the wait is. A made-for-kids video therefore opens in
+  10-40 s the first time (then from the kept answer, for an hour); upcoming videos are looked up
+  ahead while the one in view plays. The same route is the second way for every video should
+  YouTube close the JS-less client. `/api/health` → `ytdlpDaemon.jsRuntime` names the Deno in
+  use (missing = none, and those videos answer "not available"). The VM gets Deno and the
+  package from `deploy/gcp/setup-vm.sh` (step 2c).
 - **Proxy chunking**: googlevideo throttles an open-ended request to ~50 KB/s but serves a bounded
   Range at full speed (10 MB in 0.3 s), so `chunked` media records are relayed in 4 MB chunks.
 - **Seeking in fragmented files**: mp4box only knows the fragments it has parsed, so a seek beyond

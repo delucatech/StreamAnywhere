@@ -15,7 +15,7 @@
  *    AsyncLocalStorage, so no handle is passed down the call chain; outside any activity say() is a
  *    no-op. A job started inside a request (track() within track()) reports its steps to the
  *    request too, and outlives it when the request ends first (a video lookup goes on after the
- *    viewer's 30 s).
+ *    viewer's wait is over).
  *
  * Nothing here may throw into the work it describes.
  */

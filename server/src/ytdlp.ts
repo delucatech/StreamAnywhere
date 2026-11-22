@@ -449,7 +449,8 @@ export const daemonStatus = (): { enabled: boolean; python?: string; running: nu
   enabled: Boolean(daemonPython),
   python: daemonPython?.cmd,
   running: pool.filter((d) => d.alive).length,
-  busy: pool.filter((d) => d.busy).length,
+  // (a helper that was stopped stays in the pool until the next lookup prunes it: not counted)
+  busy: pool.filter((d) => d.alive && d.busy).length,
   version: pool[0]?.version,
   jsRuntime,
 });

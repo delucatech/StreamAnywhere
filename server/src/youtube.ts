@@ -38,16 +38,20 @@ import { tvHomeFeed } from './youtubeTv';
  * slow yt-dlp run is no longer cut off just before it ends (ytdlp.ts STUCK_MS).
  */
 const LIST_TIMEOUT_MS = 150_000;
-const RESOLVE_TIMEOUT_MS = 30_000;
+const RESOLVE_TIMEOUT_MS = 60_000;
 const LOOKUP_TIMEOUT_MS = 120_000;
 /**
- * yt-dlp lookups per video. The addresses of the clients that need YouTube's player script (the
- * route for "made for kids" videos, with Deno) are refused by YouTube's file server for part of
- * the lookups - HTTP 403 on every byte range, the same address always, another lookup's address
- * often fine (measured 2026-11-22: from a third to most of them). So an address is tried before
- * it is handed out, and a refused one is looked up again.
+ * How long a video's files may stay refused after a yt-dlp lookup before the lookup fails. The
+ * TV client (the route for "made for kids" videos, with Deno) is shown an ad before the video,
+ * and YouTube's file server answers 403 for every byte range until that ad's time is over
+ * (measured 2026-11-22 on the PC and the VM: "30s ad" = the files opened 21 s after a 7 s
+ * lookup; "23s ad skippable after 5s" = open at once; yt-dlp's debug log names the ad). The same
+ * address opens by itself; a new lookup would start the ad clock again. So the first file is
+ * asked for two bytes until it answers, and the viewer is told what the wait is.
  */
-const YTDLP_TRIES = 3;
+const AD_WAIT_MS = 75_000;
+/** ...asked again this often meanwhile */
+const AD_CHECK_EVERY_MS = 2_500;
 /** One byte range of a file is asked for at most this long when its address is checked */
 const CHECK_TIMEOUT_MS = 6_000;
 /** The direct request gives way to yt-dlp after this long (it answers in 0.2 s when it answers). */
@@ -402,29 +406,36 @@ async function resolveUncached(id: string, inputUrl: string, log: (m: string) =>
     }
   } else say('direct lookups are switched off (YOUTUBE_PLAYER=ytdlp): asking yt-dlp');
   if (!info) {
-    for (let attempt = 1; ; attempt++) {
-      const t1 = Date.now();
-      info = await infoFromYtDlp(id, deadline, log, cookieFile, unplayableFor);
-      // the file the player starts with (the highest H.264 one), asked for its first bytes
-      const first = h264Files(Array.isArray(info.formats) ? info.formats : []).sort((a, b) => (b.height || 0) - (a.height || 0))[0];
-      if (first) say(`checking that YouTube's file server hands out the video (${String(first.format_id)} at ${new URL(first.url).hostname})`);
-      if (!first || !(await refusedCheck(first))) {
-        how = attempt > 1 ? `yt-dlp (lookup ${attempt}: the earlier addresses were refused)` : 'yt-dlp';
-        attempts.push({ resolver: 'ytdlp', ok: true, elapsedMs: Date.now() - t1 });
-        break;
+    const t1 = Date.now();
+    info = await infoFromYtDlp(id, deadline, log, cookieFile, unplayableFor);
+    how = 'yt-dlp';
+    // the file the player starts with (the highest H.264 one), asked for its first bytes
+    const first = h264Files(Array.isArray(info.formats) ? info.formats : []).sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+    if (first) {
+      say(`checking that YouTube's file server hands out the video (${String(first.format_id)} at ${new URL(first.url).hostname})`);
+      const held = Date.now();
+      let checks = 1;
+      while (await refusedCheck(first)) {
+        const waited = Date.now() - held;
+        if (waited >= AD_WAIT_MS || deadline - Date.now() < AD_CHECK_EVERY_MS + CHECK_TIMEOUT_MS) {
+          log(`youtube ${id}: the files stayed refused (403) for ${Math.round(waited / 1000)} s after the lookup`);
+          attempts.push({ resolver: 'ytdlp', ok: false, error: "YouTube's file server kept refusing the files (HTTP 403)", elapsedMs: Date.now() - t1 });
+          throw new YouTubeError(
+            `YouTube's file server kept refusing this video's files (HTTP 403) for ${Math.round(waited / 1000)} s after it handed out their addresses. It holds a video back while the ad it would play first runs (up to about 30 s as measured); this one stayed closed longer. Opening the video again starts over`,
+            502,
+          );
+        }
+        if (checks === 1) log(`youtube ${id}: the files are refused (403) right after the lookup: waiting for YouTube's ad time to pass`);
+        say(`YouTube keeps this video's files closed for the length of the ad its TV app would play first (5 to 30 s as measured): waiting for them to open, ${Math.round(waited / 1000)} s so far`);
+        await new Promise((r) => setTimeout(r, AD_CHECK_EVERY_MS));
+        checks++;
       }
-      const took = Date.now() - t1;
-      attempts.push({ resolver: 'ytdlp', ok: false, error: "YouTube's file server refused the addresses (HTTP 403)", elapsedMs: took });
-      log(`youtube ${id}: lookup ${attempt} of ${YTDLP_TRIES} gave addresses YouTube's file server refuses (403), ${took} ms`);
-      // another lookup needs about as long as this one took
-      if (attempt >= YTDLP_TRIES || deadline - Date.now() < took + RETRY_MIN_MS) {
-        throw new YouTubeError(
-          `YouTube gave addresses for this video that its own file server refuses (HTTP 403), on ${attempt} lookup${attempt === 1 ? '' : 's'} in a row. It does this to part of the requests for videos its simpler apps may not play ("made for kids" among them); opening the video again later often works`,
-          502,
-        );
+      if (checks > 1) {
+        how = `yt-dlp (files opened ${Math.round((Date.now() - held) / 1000)} s after the lookup: YouTube's ad time)`;
+        log(`youtube ${id}: the files opened ${Math.round((Date.now() - held) / 1000)} s after the lookup`);
       }
-      say(`YouTube's file server refused the addresses it just gave out (HTTP 403): looking the video up again (lookup ${attempt + 1} of ${YTDLP_TRIES})`);
     }
+    attempts.push({ resolver: 'ytdlp', ok: true, elapsedMs: Date.now() - t1 });
   }
   const all: any[] = Array.isArray(info.formats) ? info.formats : [];
   say(`YouTube answered with ${all.length} formats: picking the H.264 picture and AAC sound files`);

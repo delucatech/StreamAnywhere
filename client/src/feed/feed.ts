@@ -2262,10 +2262,12 @@ function onPlayerError(entry: Entry, e: Error): void {
 
 /**
  * How long the feed waits for a video's play URLs before it counts the video as failed (and skips
- * it with auto-scroll on). The server gives a YouTube lookup 30 s; this leaves room for the trip.
- * Other platforms may start a browser on the server for their first lookup, so they get longer.
+ * it with auto-scroll on). The server gives a YouTube lookup 60 s (a "made for kids" video is held
+ * back by YouTube for the length of an ad, and the status strip says so meanwhile); this leaves
+ * room for the trip. Other platforms may start a browser on the server for their first lookup, so
+ * they get longer.
  */
-const RESOLVE_LIMIT_MS = P.id === 'youtube' ? 40_000 : 100_000;
+const RESOLVE_LIMIT_MS = P.id === 'youtube' ? 70_000 : 100_000;
 
 /** Play URLs that end within this long are replaced before they are used (a failure and a retry cost more). */
 const URL_MARGIN_MS = 5 * 60_000;
