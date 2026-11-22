@@ -12,7 +12,7 @@
  *    ↑/↓ (or J/K) move, Space pauses, M mutes, F fullscreen, D downloads, A toggles auto-scroll,
  *    W hides the bars.
  *  - Right-hand action column: who posted it (profile, with a follow "+" on the avatar for a signed-in
- *    TikTok account), the likes and comments, sound, save (download), auto-scroll (phones only: wide
+ *    TikTok or Instagram account), the likes and comments, sound, save (download), auto-scroll (phones only: wide
  *    screens have the switch on the Up next panel; the choice is shared by every app), playback speed
  *    (S: 0.5× to 2×, 1× on every visit), fullscreen. Bottom bar: Home, Friends, + (placeholders), Inbox (messages), Profile (sign-in:
  *    TikTok's QR code / window; YouTube's pasted cookies / window, see platforms.ts `signIn`).
@@ -539,7 +539,8 @@ el.actComments.addEventListener('click', () => {
 });
 // The "+" on the avatar: follow the account of the video in view; the badge goes once the account is followed.
 el.actFollow.addEventListener('click', () => {
-  const user = activeEntry()?.item.author.uniqueId;
+  const author = activeEntry()?.item.author;
+  const user = author?.uniqueId;
   if (!user) return;
   if (state.session?.state !== 'logged_in') {
     toast(`Sign in to ${P.name} first to follow accounts`, true, 4000);
@@ -548,7 +549,7 @@ el.actFollow.addEventListener('click', () => {
   }
   pressed(el.actFollow, async () => {
     try {
-      const r = await api.follow({ user, follow: true });
+      const r = await api.follow({ platform: P.id, user, id: author.id, follow: true });
       rememberFollowState(user, r.followState);
       toast(r.followState === 'none' ? `Could not follow @${user}` : r.followState === 'requested' ? `Follow request sent to @${user}` : `Following @${user}`);
       for (const w of r.warnings) console.warn('[follow]', w);
@@ -2322,13 +2323,14 @@ function syncAuthor(entry: Entry): void {
 }
 
 /**
- * The follow "+" on the avatar: shown for a signed-in account on a platform with follows (TikTok), for
- * an author it is not known to follow. TikTok's items say (`relation`) for the signed-in feed; where
- * nothing says, the badge shows, and a tap on an account already followed just takes it away.
+ * The follow "+" on the avatar: shown for a signed-in account on a platform with follows (TikTok,
+ * Instagram), for an author it is not known to follow. TikTok's items say (`relation`) for the
+ * signed-in feed, Instagram's when its feed or an earlier follow told the server; where nothing
+ * says, the badge shows, and a tap on an account already followed just takes it away.
  */
 function syncFollow(entry: Entry | undefined): void {
   const a = entry?.item.author;
-  const can = Boolean(P.social && a?.uniqueId && state.session?.state === 'logged_in');
+  const can = Boolean(P.follow && a?.uniqueId && state.session?.state === 'logged_in');
   const s = a ? followStateOf(a) : undefined;
   const followed = s === 'following' || s === 'friends' || s === 'requested';
   el.actFollow.classList.toggle('hidden', !can || followed);

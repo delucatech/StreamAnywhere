@@ -27,7 +27,7 @@ import { getProgress } from './progress';
 import { cancelInboxReads, cancelReads, commentsDebug, conversation, fetchComments, fetchProfile, followUser, inbox, inboxDebug, isCancelled, searchTikTok, sendMessage, SocialError } from './social';
 import { channelVideos, exploreYouTube, isYouTubeUrl, recommendedYouTube, recommendedYouTubeTv, resolveYouTube, searchYouTube, youTubeCategory, YouTubeError } from './youtube';
 import { youtubeSearchStatus } from './youtubeSearch';
-import { exploreInstagram, forYouInstagram, instagramCategory, instagramStats, InstagramError, isInstagramUrl, pauseInstagramPages, profileInstagram, resolveInstagram, searchInstagram, setInstagramLogger, shutdownInstagram } from './instagram';
+import { exploreInstagram, followInstagram, forYouInstagram, instagramCategory, instagramFollowStates, instagramStats, InstagramError, isInstagramUrl, pauseInstagramPages, profileInstagram, resolveInstagram, searchInstagram, setInstagramLogger, shutdownInstagram } from './instagram';
 import { instagramCancelLogin, instagramLogout, instagramMaySignIn, instagramSessionLog, ensureInstagramSession, instagramSessionLost, instagramSessionStatus, instagramSignedIn, instagramWantsProbe, instagramStartLogin, InstagramSessionError, setInstagramSessionLogger, shutdownInstagramSession } from './instagramSession';
 import { setYouTubeSessionLogger, shutdownYouTubeSession, youtubeCancelLogin, youtubeCookieFile, youtubeLogout, youtubeSessionLog, youtubeSessionLost, youtubeSessionStatus, youtubeSignInKind, youtubeStartLogin, YouTubeSessionError } from './youtubeSession';
 import { TvAuthError } from './youtubeTv';
@@ -541,7 +541,9 @@ export async function buildServer() {
         log(`${what}: nothing handed out (${warm ? 'warm-up' : 'nothing ready for a prefetch'})`);
         return { source, items: [], hasMore: true, warnings: [], elapsedMs: Date.now() - t0 };
       }
-      const resp: FeedResponse = { source, items: slimItems(r.items), hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
+      // Instagram's videos were read before they are shown: who is followed is taken from what is known now.
+      const out = platform === 'instagram' ? instagramFollowStates({ items: r.items }).items : r.items;
+      const resp: FeedResponse = { source, items: slimItems(out), hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
       log(`${what}: ${r.items.length} served ${r.stale ? 'from the last good batch' : r.fromStock ? 'from stock' : 'after a fill'}${prefetch ? ' (prefetch)' : ''}, ${r.ready ?? 0} ready, ${resp.elapsedMs} ms`);
       if (back && r.items.length && !r.stale) undelivered(r.items, what, back);
       return resp;
@@ -681,7 +683,7 @@ export async function buildServer() {
     const u = String(user || '')
       .trim()
       .replace(/^@/, '');
-    if (!/^[\w.\-]{1,64}$/.test(u)) throw new SocialError('That is not a TikTok handle', 400);
+    if (!/^[\w.\-]{1,64}$/.test(u)) throw new SocialError('That is not an account name', 400);
     return u;
   };
   // Search answers and account pages are kept for every device (jobs.ts): a repeat (the same
@@ -719,7 +721,8 @@ export async function buildServer() {
         }
         return searchTikTok(q, offset, socialLog('search'));
       });
-      return { ...r, items: slimItems(r.items), elapsedMs: Date.now() - t0 };
+      const known = platform === 'instagram' ? instagramFollowStates(r) : r;
+      return { ...known, items: slimItems(known.items), elapsedMs: Date.now() - t0 };
     } catch (e) {
       return socialFail(reply, e, t0);
     }
@@ -747,7 +750,9 @@ export async function buildServer() {
         }
         return fetchProfile(user, offset, count, socialLog('profile'));
       });
-      return { ...r, items: slimItems(r.items), elapsedMs: Date.now() - t0 };
+      // A kept Instagram page says who was followed when it was read: what is known now goes over it.
+      const known = platform === 'instagram' ? instagramFollowStates(r) : r;
+      return { ...known, items: slimItems(known.items), elapsedMs: Date.now() - t0 };
     } catch (e) {
       return socialFail(reply, e, t0);
     }
@@ -756,8 +761,18 @@ export async function buildServer() {
     const t0 = Date.now();
     try {
       const user = handle(req.body?.user);
+      const platform = platformOf(req.body?.platform);
+      const follow = req.body?.follow !== false;
+      if (platform === 'instagram') {
+        await ensureInstagramSession();
+        const r = await followInstagram(user, follow, instagramLog, typeof req.body?.id === 'string' ? req.body.id : undefined);
+        // The account's kept pages carry the state from before.
+        invalidateJobs(`profile|instagram|${user.toLowerCase()}|`);
+        return r;
+      }
+      if (platform !== 'tiktok') throw new SocialError(`Following accounts is not available for ${platform} here`, 400);
       invalidateJobs(`profile|tiktok|${user.toLowerCase()}|`);
-      return await followUser(user, req.body?.follow !== false, socialLog('follow'));
+      return await followUser(user, follow, socialLog('follow'));
     } catch (e) {
       return socialFail(reply, e, t0);
     }

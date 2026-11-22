@@ -334,7 +334,11 @@ export interface ProfileResponse {
 }
 
 export interface FollowRequest {
+  /** Which platform's account (default tiktok); TikTok and Instagram have follows */
+  platform?: Platform;
   user: string;
+  /** The account's id when the viewer's item carries it (Instagram's follow call takes the id) */
+  id?: string;
   follow: boolean;
 }
 

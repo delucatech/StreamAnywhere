@@ -28,8 +28,10 @@ export interface PlatformDef {
   categories: PlatformCategory[];
   defaultCategory: number;
   tabs: { explore: string; foryou: string };
-  /** Whether accounts can be followed / messaged (TikTok only) */
+  /** Whether accounts can be messaged and comments read (TikTok only) */
   social: boolean;
+  /** Whether the signed-in account can follow accounts: the "+" on a video's avatar, the Follow button of the account panel (TikTok, Instagram) */
+  follow: boolean;
   /** How the sign-in panel's main button works: TikTok's QR code, or pasted/uploaded cookies (YouTube, Instagram) */
   signIn: 'qr' | 'cookies';
   /** The platform also signs in with a code approved on a phone or computer (YouTube: Google's sign-in for TVs);
@@ -59,6 +61,7 @@ export const PLATFORMS: PlatformDef[] = [
     defaultCategory: 120,
     tabs: { explore: 'Explore', foryou: 'For You' },
     social: true,
+    follow: true,
     signIn: 'qr',
     signInHint: '"Sign in with QR code" shows TikTok\'s login QR here; scan it with the TikTok app on your phone.',
     loginRequired: false,
@@ -79,6 +82,7 @@ export const PLATFORMS: PlatformDef[] = [
     defaultCategory: 0,
     tabs: { explore: 'Shorts', foryou: 'For You' },
     social: false,
+    follow: false,
     signIn: 'cookies',
     codeSignIn: true,
     signInHint: '"Sign in with a code" shows a code and a QR code here: scan it with your phone (or open google.com/device on any device), choose your YouTube account and press Allow.',
@@ -100,6 +104,7 @@ export const PLATFORMS: PlatformDef[] = [
     defaultCategory: 0,
     tabs: { explore: 'Reels', foryou: 'For You' },
     social: false,
+    follow: true,
     signIn: 'cookies',
     signInHint: 'Instagram does not show anything to visitors who are signed out, so it needs a sign-in: use the cookies of a browser that is signed in to Instagram (paste a cookies.txt export below, or choose the file). The server checks them with Instagram and keeps only the instagram.com ones.',
     loginRequired: true,
@@ -120,6 +125,7 @@ export const PLATFORMS: PlatformDef[] = [
     defaultCategory: 0,
     tabs: { explore: 'Reels', foryou: 'For You' },
     social: false,
+    follow: false,
     signIn: 'cookies',
     signInHint: 'Facebook shows the Reels of public Pages to everyone (the Reels tab); your own Reels feed needs your account: use the cookies of a browser that is signed in to Facebook (paste a cookies.txt export below, or choose the file). The server checks them with Facebook and keeps only the facebook.com ones.',
     loginRequired: false,

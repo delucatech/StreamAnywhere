@@ -119,6 +119,7 @@ Configuration is optional. Copy `.env.example` to `server/.env` (or repo-root `.
 | `FACEBOOK_COOKIES_FILE` | `~/.streamanywhere/facebook-cookies.txt` | the Facebook sign-in (Netscape cookies.txt; treat like a password); `…cookies.meta.json` next to it keeps the paste's User-Agent |
 | `FACEBOOK_CATALOG_FILE` | `~/.streamanywhere/facebook-catalog.json` | each Page's last listed reels (a cache; deleting it is harmless) |
 | `INSTAGRAM_CATALOG_FILE` | `~/.streamanywhere/instagram-catalog.json` | each account's last listed Reels (a cache; deleting it is harmless) |
+| `INSTAGRAM_FOLLOWS_FILE` | `~/.streamanywhere/instagram-follows.json` | which accounts the signed-in Instagram account is known to follow (decides the follow "+"; deleted at sign-out, deleting it is harmless) |
 | `LIVETV_DIR` | `<dir of TIKTOK_PROFILE_DIR>/livetv` | Live TV providers (`providers.json`, credentials encrypted), preferences, the encrypted channel caches and the parsed guides |
 | `LIVETV_KEY_FILE` / `LIVETV_KEY` | `<dir of TIKTOK_PROFILE_DIR>/livetv-key` | the AES-256 key that encrypts Live TV credentials and channel caches (generated on first use, 0600; `LIVETV_KEY` = 64 hex digits overrides it; losing it loses the saved providers) |
 | `LIVETV_USER_AGENT` | *(the upstream User-Agent)* | the User-Agent sent to IPTV providers |
@@ -866,6 +867,19 @@ saved cookies check out. Why there is no guest mode, measured 2026-10-13 from th
 - **Search**: the account search (`/web/search/topsearch/`) finds accounts; an `@handle` (or profile
   link) opens the account and its Reels, a pasted post/reel link plays it. **Profile** = the
   account's Reels (a signed-in account keeps paging on scroll; a guest would get 12).
+- **Follow** (like TikTok's): the "+" on a video's avatar and the Follow / Following button of the
+  account panel. TikTok's requests must be signed by its page, so there the server clicks the
+  profile's button; Instagram's web app has plain calls for it, sent from inside the instagram.com
+  page with the session's cookies and CSRF token: `GET /api/v1/friendships/show/<id>/` (is it
+  followed), `POST /api/v1/friendships/create/<id>/` and `…/destroy/<id>/` (a private account gets a
+  follow request: "Requested"). The account id comes from the embed pages (each video names its
+  owner). Who is followed is remembered (`INSTAGRAM_FOLLOWS_FILE`, deleted at sign-out) and written
+  over the videos on their way out, since they were read long before they are shown; the Reels
+  feed's own data says it for the authors of For You. Instagram's refusals are passed on as they
+  are: its action block after many follows in a short time, a checkpoint, the address being
+  limited. Measured 2026-11-22 only as a guest (those calls want a login, a made-up call next to
+  them answers 404); with a session it is the web app's documented behaviour, and
+  `/api/session/log?platform=instagram` shows what Instagram answered at each step.
 - All of it runs in **one headless Chrome/Edge page** (`src/instagram.ts`, its own profile), one job at
   a time, closed after 5 idle minutes (the 1 GB VM needs the memory); no yt-dlp involved.
 

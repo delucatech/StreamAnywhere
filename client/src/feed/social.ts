@@ -1,7 +1,8 @@
 /**
  * The feed page's social panels: search, account profiles (with follow and the account's videos)
  * and messages. All data comes from the server's headless TikTok session (server/src/social.ts);
- * search and profiles work signed out, follow and messages need the signed-in account.
+ * search and profiles work signed out, follow and messages need the signed-in account. Instagram
+ * (server/src/instagram.ts) has search, profiles and follow, always signed in.
  *
  * The panels do not play anything themselves: a tapped video hands a play list (the search results
  * or the account's videos, with the continuation) to the feed through SocialHost.play().
@@ -26,7 +27,7 @@ export interface SocialHost {
   fmtCount(n?: number): string;
   /** Called when the first panel opens (true) and when the last one closes (false): the feed pauses behind a panel. */
   onPanelsChange(open: boolean): void;
-  /** Which platform the panels search and browse (follow / messages exist on TikTok only) */
+  /** Which platform the panels search and browse (follow: TikTok and Instagram; messages and comments: TikTok only) */
   platform: PlatformDef;
   /** The signed-in account's follow state of an account became known (a profile opened, a follow pressed) */
   onFollowState?(user: string, state: FollowState): void;
@@ -689,7 +690,7 @@ el.profileFollow.addEventListener('click', () => {
   const u = profile.info;
   if (!u) return;
   if (!host.isLoggedIn()) {
-    host.toast('Sign in to TikTok first to follow accounts', true, 4000);
+    host.toast(`Sign in to ${host.platform.name} first to follow accounts`, true, 4000);
     void host.openSessionPanel();
     return;
   }
@@ -698,11 +699,12 @@ el.profileFollow.addEventListener('click', () => {
     el.profileFollow,
     async () => {
       try {
-        const r = await api.follow({ user: u.uniqueId, follow: !followed });
+        const r = await api.follow({ platform: host.platform.id, user: u.uniqueId, id: u.id, follow: !followed });
         u.followState = r.followState;
         renderProfileHead();
         host.onFollowState?.(u.uniqueId, r.followState);
-        host.toast(r.followState === 'none' ? `Unfollowed @${u.uniqueId}` : `${followLabel(r.followState)} @${u.uniqueId}`);
+        // "none" after asking to follow = it did not take (the server's warning says why)
+        host.toast(r.followState === 'none' ? (followed ? `Unfollowed @${u.uniqueId}` : `Could not follow @${u.uniqueId}`) : r.followState === 'requested' ? `Follow request sent to @${u.uniqueId}` : `${followLabel(r.followState)} @${u.uniqueId}`, r.followState === 'none' && !followed);
         for (const w of r.warnings) console.warn('[follow]', w);
       } catch (e) {
         host.toast(`Follow failed: ${errMsg(e)}`, true, 6000);
@@ -1078,7 +1080,7 @@ export function initSocial(h: SocialHost): void {
   host = h;
   const p = h.platform;
   el.searchInput.placeholder = p.searchPlaceholder;
-  // Follow and messages exist on TikTok only; the other platforms show the account's videos.
-  el.profileFollow.classList.toggle('hidden', !p.social);
+  // Follow exists on TikTok and Instagram, messages on TikTok only; the other platforms show the account's videos.
+  el.profileFollow.classList.toggle('hidden', !p.follow);
   el.profileMessage.classList.toggle('hidden', !p.social);
 }

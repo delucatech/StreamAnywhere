@@ -31,7 +31,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { FeedItem, MediaFormat, ProfileResponse, ResolveResponse, SearchResponse, UserSummary } from '../../shared/types';
+import type { FeedItem, FollowResponse, FollowState, MediaFormat, ProfileResponse, ResolveResponse, SearchResponse, UserSummary } from '../../shared/types';
 import { INSTAGRAM_CATEGORIES } from '../../shared/types';
 import { config } from './config';
 import { defaultExpiry, registerMedia } from './mediaStore';
@@ -46,6 +46,8 @@ const ORIGIN = 'https://www.instagram.com';
 const APP_ID = '936619743392459';
 const PROFILE_DIR = process.env.INSTAGRAM_PROFILE_DIR || path.join(os.homedir(), '.streamanywhere', 'instagram-profile');
 const CATALOG_FILE = process.env.INSTAGRAM_CATALOG_FILE || path.join(os.homedir(), '.streamanywhere', 'instagram-catalog.json');
+/** Which accounts the signed-in account is known to follow (see "follow" below); deleted at sign-out. */
+const FOLLOWS_FILE = process.env.INSTAGRAM_FOLLOWS_FILE || path.join(os.homedir(), '.streamanywhere', 'instagram-follows.json');
 /** An account's Reels listing is reused this long (profiles are the rate-limited call). */
 const CATALOG_TTL_MS = 6 * 60 * 60 * 1000;
 /** Pause between two profile page loads, and the most loads per hour: the block came after ~100 in 4 minutes. */
@@ -172,6 +174,108 @@ export function collectCodes(node: unknown, out: Set<string>, depth = 0, max = 1
   const into = ad ? ads! : out;
   if (typeof o.code === 'string' && CODE.test(o.code) && (o.video_versions || o.product_type === 'clips' || o.media_type === 2 || o.clips_metadata)) into.add(o.code);
   for (const k of Object.keys(o)) collectCodes(o[k], into, depth + 1, max, ads);
+}
+
+/**
+ * Instagram's `friendship_status` record (the answer to a follow, the account search's users, the
+ * authors of the Reels feed; `friendships/show` answers with the same fields at the top) as a follow
+ * state: `following`, else a follow request waiting for a private account, else not followed.
+ * undefined when the record does not say.
+ */
+export function friendshipToState(fs: unknown): FollowState | undefined {
+  if (!fs || typeof fs !== 'object') return undefined;
+  const f = fs as Record<string, unknown>;
+  if (f.following === true) return 'following';
+  if (f.outgoing_request === true) return 'requested';
+  if (f.following === false) return 'none';
+  return undefined;
+}
+
+/** What `GET /api/v1/friendships/show/<id>/` says about the account; undefined when it gave no verdict. */
+export function friendshipShown(status: number, text: string): FollowState | undefined {
+  if (status !== 200) return undefined;
+  try {
+    return friendshipToState(JSON.parse(text));
+  } catch {
+    return undefined;
+  }
+}
+
+export interface FollowAnswer {
+  /** Instagram carried the follow / unfollow out */
+  ok: boolean;
+  /** The state the answer names, when it names one */
+  state?: FollowState;
+  /** This path of the call is not there (404 / 405, or the web app's page instead of JSON): another path may be */
+  missing?: boolean;
+  /** Instagram said no for a reason no other path changes: what to tell the viewer */
+  refused?: { message: string; status: number; code: string };
+  /** The status and first words of the answer, for the log */
+  hint: string;
+}
+
+/**
+ * What Instagram answered to a follow / unfollow request. Carried out = `status: "ok"` (with the new
+ * `friendship_status`, or the older `result: "following" | "requested"`). `feedback_required` / `spam`
+ * is Instagram's action block (too many follows in a short time), a checkpoint wants the account to
+ * confirm itself, the throttle text is the address being limited: none of those is tried another way.
+ */
+export function followAnswer(status: number, text: string): FollowAnswer {
+  let json: any;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    /* not JSON */
+  }
+  const isObj = Boolean(json) && typeof json === 'object';
+  const msg = isObj && typeof json.message === 'string' ? json.message : '';
+  const words = bodyHint(msg || text, 100);
+  const hint = `HTTP ${status}${words ? ` "${words}"` : ''}`;
+  if (isObj && status === 200 && json.status === 'ok') {
+    return { ok: true, state: friendshipToState(json.friendship_status) ?? (json.result === 'following' ? 'following' : json.result === 'requested' ? 'requested' : undefined), hint };
+  }
+  const refused = (message: string, st: number, code: string): FollowAnswer => ({ ok: false, refused: { message, status: st, code }, hint });
+  if (/feedback_required/i.test(msg) || (isObj && json.spam === true)) return refused('Instagram is not letting this account follow or unfollow anyone right now (it limits how many accounts can be followed in a short time). Try again later.', 429, 'instagram_action_blocked');
+  if (/checkpoint_required|challenge_required/i.test(msg)) return refused('Instagram wants a verification for this account first: open instagram.com in your own browser and confirm it was you.', 403, 'instagram_checkpoint');
+  if (status === 429 || /please wait a few minutes/i.test(words)) return refused("Instagram is limiting this server's address right now; try again in a few minutes.", 429, 'instagram_rate_limited');
+  if (msg === 'login_required' || (isObj && json.require_login === true)) return refused('Instagram signed this server out; sign in again from Profile.', 401, 'instagram_not_signed_in');
+  return { ok: false, missing: status === 404 || status === 405 || !isObj, hint };
+}
+
+/**
+ * The follow states a feed or search answer carries for its accounts: every `{ username,
+ * friendship_status }` anywhere in the tree (the Reels feed names each reel's author that way), by
+ * handle in lower case.
+ */
+export function collectFollowStates(node: unknown, out: Map<string, FollowState>, depth = 0, max = 14): void {
+  if (depth > max || !node || typeof node !== 'object') return;
+  if (Array.isArray(node)) {
+    for (const x of node) collectFollowStates(x, out, depth + 1, max);
+    return;
+  }
+  const o = node as Record<string, unknown>;
+  if (typeof o.username === 'string' && /^[\w.]{1,30}$/.test(o.username)) {
+    const s = friendshipToState(o.friendship_status);
+    if (s) out.set(o.username.toLowerCase(), s);
+  }
+  for (const k of Object.keys(o)) collectFollowStates(o[k], out, depth + 1, max);
+}
+
+/**
+ * An answer on its way out with the follow states `lookup` knows written over what its videos and
+ * accounts carry (they were read earlier: a follow since then is not in them). Copies; the stock's
+ * own items stay as they are.
+ */
+export function withFollowStates<T extends { items: FeedItem[]; user?: UserSummary; users?: UserSummary[] }>(r: T, lookup: (username: string | undefined) => FollowState | undefined): T {
+  const author = (it: FeedItem): FeedItem => {
+    const s = lookup(it.author.uniqueId);
+    return s && s !== it.author.followState ? { ...it, author: { ...it.author, followState: s } } : it;
+  };
+  const account = (u: UserSummary): UserSummary => {
+    const s = lookup(u.uniqueId);
+    return s && s !== u.followState ? { ...u, followState: s } : u;
+  };
+  return { ...r, items: r.items.map(author), ...(r.user ? { user: account(r.user) } : {}), ...(r.users ? { users: r.users.map(account) } : {}) };
 }
 
 /** `oe=` (hex unix seconds) of an Instagram CDN URL */
@@ -492,7 +596,10 @@ export async function resetInstagramBrowser(deleteProfile = false): Promise<void
   await acquire(PRI_ACCOUNT);
   try {
     await closeBrowser('reset');
-    if (deleteProfile) fs.rmSync(PROFILE_DIR, { recursive: true, force: true });
+    if (deleteProfile) {
+      fs.rmSync(PROFILE_DIR, { recursive: true, force: true });
+      followsBelongTo(undefined); // signed out: who that account follows is nobody's business any more
+    }
   } finally {
     releaseJob();
   }
@@ -530,6 +637,86 @@ async function evaluateSettled<T>(p: Page, js: string): Promise<T> {
     return (await p.evaluate(js)) as T;
   }
 }
+
+// ---------------------------------------------------------------- what is known about accounts (ids, who is followed)
+
+/** Account ids by handle (lower case): the follow calls take the id. The embed pages name each video's owner, the search its accounts. */
+const accountIds = new Map<string, string>();
+function noteAccountId(username: unknown, id: unknown): void {
+  const pk = typeof id === 'number' ? String(id) : id;
+  if (typeof username !== 'string' || typeof pk !== 'string' || !/^\d{1,24}$/.test(pk)) return;
+  accountIds.set(username.toLowerCase(), pk);
+  if (accountIds.size > 5000) accountIds.delete(accountIds.keys().next().value as string);
+}
+const knownAccountId = (username: string | undefined): string | undefined => (username ? accountIds.get(username.toLowerCase()) : undefined);
+
+/**
+ * Whether the signed-in account follows an account, as far as the server knows (by handle, lower
+ * case): from its own follows and unfollows, `friendships/show`, the Reels feed's authors and the
+ * account search. Videos are read long before they are shown (the stock, a device's saved feed), so
+ * the answers on their way out take the state from here (withFollowStates). Kept on disk, so a
+ * restart does not put the follow "+" back on accounts followed through this server; tied to the
+ * account (`ds_user_id`) and deleted at sign-out.
+ */
+let followStates: Map<string, FollowState> | undefined;
+let followsOwner: string | undefined;
+let followsTimer: NodeJS.Timeout | undefined;
+const FOLLOWS_MAX = 4000;
+function followMap(): Map<string, FollowState> {
+  if (followStates) return followStates;
+  followStates = new Map();
+  try {
+    const raw = JSON.parse(fs.readFileSync(FOLLOWS_FILE, 'utf8')) as { account?: string; states?: Record<string, FollowState> };
+    followsOwner = typeof raw.account === 'string' ? raw.account : undefined;
+    for (const [k, v] of Object.entries(raw.states || {})) if (v === 'following' || v === 'requested' || v === 'none') followStates.set(k, v);
+  } catch {
+    /* none yet */
+  }
+  return followStates;
+}
+function saveFollowsSoon(): void {
+  if (followsTimer) return;
+  followsTimer = setTimeout(() => {
+    followsTimer = undefined;
+    try {
+      fs.mkdirSync(path.dirname(FOLLOWS_FILE), { recursive: true });
+      fs.writeFileSync(FOLLOWS_FILE, JSON.stringify({ account: followsOwner, states: Object.fromEntries(followMap()) }));
+    } catch {
+      /* a memory aid only */
+    }
+  }, 2000);
+  followsTimer.unref?.();
+}
+function noteFollowState(username: string | undefined, state: FollowState | undefined): void {
+  if (!username || !state || state === 'unknown' || state === 'friends') return;
+  const m = followMap();
+  const key = username.toLowerCase();
+  if (m.get(key) === state) return;
+  m.delete(key); // newest last: the oldest entry goes when the map is full
+  m.set(key, state);
+  if (m.size > FOLLOWS_MAX) m.delete(m.keys().next().value as string);
+  saveFollowsSoon();
+}
+export const knownFollowState = (username: string | undefined): FollowState | undefined => (username ? followMap().get(username.toLowerCase()) : undefined);
+/** The states belong to one account: another one signing in (or a sign-out, `account` undefined) starts empty. */
+function followsBelongTo(account: string | undefined): void {
+  const m = followMap();
+  if (account && account === followsOwner) return;
+  if (account && !followsOwner && !m.size) {
+    followsOwner = account;
+    return;
+  }
+  m.clear();
+  followsOwner = account;
+  if (account) saveFollowsSoon();
+  else {
+    if (followsTimer) clearTimeout(followsTimer);
+    followsTimer = undefined;
+    fs.rmSync(FOLLOWS_FILE, { force: true });
+  }
+}
+/** index.ts: an answer on its way out, with what is known now about who is followed (see withFollowStates). */
+export const instagramFollowStates = <T extends { items: FeedItem[]; user?: UserSummary; users?: UserSummary[] }>(r: T): T => withFollowStates(r, knownFollowState);
 
 // ---------------------------------------------------------------- embed pages (the playable files)
 
@@ -634,7 +821,10 @@ export async function embedMany(codes: string[], log: (m: string) => void, pri =
     for (const a of answers) {
       if (!a) continue;
       const entry: CacheEntry = a.m ? { at: Date.now(), media: a.m } : { at: Date.now(), why: a.notVideo ? 'not_video' : a.gone ? 'gone' : 'unavailable' };
-      if (a.m) ok++;
+      if (a.m) {
+        ok++;
+        noteAccountId(a.m.owner.username, a.m.owner.id);
+      }
       embedCache.set(a.code, entry);
       result.set(a.code, entry);
     }
@@ -672,10 +862,11 @@ function mediaFormat(m: EmbedMedia): MediaFormat {
 }
 
 export function embedToFeedItem(m: EmbedMedia): FeedItem {
+  const followState = knownFollowState(m.owner.username);
   return {
     id: m.code,
     canonicalUrl: `${ORIGIN}/reel/${m.code}/`,
-    author: { id: m.owner.id, uniqueId: m.owner.username, nickname: m.owner.fullName || undefined, avatar: m.owner.avatar },
+    author: { id: m.owner.id, uniqueId: m.owner.username, nickname: m.owner.fullName || undefined, avatar: m.owner.avatar, ...(followState ? { followState } : {}) },
     desc: m.caption || undefined,
     createTime: m.takenAt,
     duration: m.duration,
@@ -1041,13 +1232,18 @@ export async function forYouInstagram(want: number, log: (m: string) => void): P
     await parked;
     const found = new Set<string>();
     const ads = new Set<string>();
+    // The feed names each reel's author with the account's `friendship_status`: whether the follow "+" is due.
+    const follows = new Map<string, FollowState>();
     const onResponse = (res: import('puppeteer-core').HTTPResponse): void => {
       const u = res.url();
       if (!/\/api\/graphql|\/graphql\/query|\/api\/v1\//.test(u) || !/json|javascript|text\/plain/.test(res.headers()['content-type'] || '')) return;
       void res
         .text()
         .then((t) => {
-          if (/"code"/.test(t)) collectCodes(JSON.parse(t.replace(/^for \(;;\);/, '')), found, 0, 14, ads);
+          if (!/"code"/.test(t)) return;
+          const json = JSON.parse(t.replace(/^for \(;;\);/, ''));
+          collectCodes(json, found, 0, 14, ads);
+          collectFollowStates(json, follows, 0, 16);
         })
         .catch(() => undefined);
     };
@@ -1085,7 +1281,9 @@ export async function forYouInstagram(want: number, log: (m: string) => void): P
       for (const t of preloaded) {
         try {
           // The list sits ~16 levels down (ScheduledServerJS > RelayPrefetchedStreamCache > __bbox > result > data).
-          collectCodes(JSON.parse(t), found, 0, 40, ads);
+          const json = JSON.parse(t);
+          collectCodes(json, found, 0, 40, ads);
+          collectFollowStates(json, follows, 0, 42);
         } catch {
           /* not JSON */
         }
@@ -1112,7 +1310,9 @@ export async function forYouInstagram(want: number, log: (m: string) => void): P
       for (const c of ads) found.delete(c);
       // Only a signed-in account gets the Reels page: name it, for a sign-in Instagram would not confirm.
       const viewer = found.size ? await viewerName(p) : '';
-      log(`instagram foryou: ${found.size} reel codes after ${secs()} s${ads.size ? `, ${ads.size} ad(s) skipped` : ''}`);
+      // Known before the videos are made into feed items (embedToFeedItem takes the author's state from here).
+      for (const [username, state] of follows) noteFollowState(username, state);
+      log(`instagram foryou: ${found.size} reel codes after ${secs()} s${ads.size ? `, ${ads.size} ad(s) skipped` : ''}${follows.size ? `, ${[...follows.values()].filter((s) => s !== 'none').length} of ${follows.size} authors followed` : ', no follow states in the feed data'}`);
       return { codes: [...found], viewer };
     } finally {
       p.off('response', onResponse);
@@ -1142,6 +1342,19 @@ function safePath(url: string): string {
 
 const SEARCH_JS = (q: string): string => String.raw`fetch('/web/search/topsearch/?context=blended&include_reel=true&query=' + encodeURIComponent(${JSON.stringify(q)}), { credentials: 'include', headers: { 'x-ig-app-id': '${APP_ID}', 'x-requested-with': 'XMLHttpRequest' } }).then(async (r) => ({ status: r.status, text: await r.text() }))`;
 
+/** The accounts of a `topsearch` answer; their ids and (when the answer says) whether they are followed are remembered. */
+function usersOfSearch(json: any): UserSummary[] {
+  return (Array.isArray(json?.users) ? json.users : [])
+    .map((x: any) => x?.user)
+    .filter((u: any) => u && typeof u.username === 'string')
+    .map((u: any): UserSummary => {
+      const followState = friendshipToState(u.friendship_status);
+      noteAccountId(u.username, u.pk ?? u.id);
+      noteFollowState(u.username, followState);
+      return { id: u.pk ? String(u.pk) : undefined, uniqueId: u.username, nickname: u.full_name || undefined, avatar: u.profile_pic_url || undefined, verified: Boolean(u.is_verified), ...(followState ? { followState } : {}) };
+    });
+}
+
 export async function searchInstagram(q: string, offset: number, log: (m: string) => void): Promise<SearchResponse> {
   requireSignedIn();
   const t0 = Date.now();
@@ -1159,10 +1372,7 @@ export async function searchInstagram(q: string, offset: number, log: (m: string
     try {
       const r = (await withPage((p) => p.evaluate(SEARCH_JS(q)), PRI_VIEWER)) as { status: number; text: string };
       const json = r.status === 200 ? JSON.parse(r.text) : undefined;
-      users = (Array.isArray(json?.users) ? json.users : [])
-        .map((x: any) => x?.user)
-        .filter((u: any) => u && typeof u.username === 'string')
-        .map((u: any): UserSummary => ({ id: u.pk ? String(u.pk) : undefined, uniqueId: u.username, nickname: u.full_name || undefined, avatar: u.profile_pic_url || undefined, verified: Boolean(u.is_verified) }));
+      users = usersOfSearch(json);
       if (r.status !== 200) warnings.push(`Instagram search answered ${r.status}`);
     } catch (e) {
       warnings.push(`Instagram search failed (${(e as Error).message})`);
@@ -1199,7 +1409,149 @@ export async function profileInstagram(handle: string, offset: number, count: nu
   }
   const warnings: string[] = [];
   if (!acc.codes.length) warnings.push(`@${handle} has no Reels to show`);
+  // The Follow button of the account panel: Instagram is asked on the first page, later pages repeat what
+  // is known. Not asked when everything above came from memory and the browser is closed: starting it
+  // takes up to a minute on the VM, and a press on the button asks before it does anything.
+  const asked = offset === 0 && browser?.isConnected() ? await readFollowState(user.uniqueId, user.id || knownAccountId(user.uniqueId)) : undefined;
+  user.followState = asked ?? knownFollowState(user.uniqueId) ?? 'unknown';
   return { user, items, offset, hasMore: signedIn() && acc.codes.length >= offset + count && acc.codes.length >= 12, warnings, elapsedMs: Date.now() - t0 };
+}
+
+// ---------------------------------------------------------------- follow
+
+/**
+ * Following and unfollowing accounts for the signed-in account, like TikTok's in social.ts.
+ *
+ * TikTok's requests must be signed by its page, so there the server clicks the profile's button.
+ * Instagram's web app has plain calls for it, which need the session's cookies and its CSRF token
+ * only, so they are sent from inside the instagram.com page (no page load: about a second):
+ *   GET  /api/v1/friendships/show/<id>/      whether the account is followed (also for the account panel)
+ *   POST /api/v1/friendships/create/<id>/    follow (a private account: a follow request)
+ *   POST /api/v1/friendships/destroy/<id>/   unfollow (or withdraw the request)
+ * The two older paths of the same calls (`/api/v1/web/friendships/<id>/follow/`, `/web/friendships/…`)
+ * are tried when the first is not there. The account id comes from what the server read already (the
+ * embed pages name each video's owner, the search its accounts), else from the viewer's item, else
+ * from the account search.
+ *
+ * Measured 2026-11-22 as a GUEST from the dev machine (it has no Instagram account, so nothing here
+ * ran with a session yet): show, create, destroy and show_many are routes that want a login - a
+ * guest's GET gets the web app's page (exactly as for `accounts/edit/web_form_data`, which works
+ * signed in) and a guest's POST is sent to `/accounts/login/?next=…` - while a made-up call next to
+ * them (`/api/v1/friendships/nosuchcall/<id>/`) answers 404. The older paths answer a guest 404, but
+ * so does the account search, which says nothing about a session. What a session gets is the web
+ * app's documented behaviour, not a measurement: every step notes what Instagram answered (GET
+ * /api/session/log?platform=instagram). The profile page's button is deliberately NOT clicked as a
+ * fallback: an unverified guess at the page could press the Follow button of a suggested account.
+ */
+const FOLLOW_PATHS = (id: string, follow: boolean): string[] => [`/api/v1/friendships/${follow ? 'create' : 'destroy'}/${id}/`, `/api/v1/web/friendships/${id}/${follow ? 'follow' : 'unfollow'}/`, `/web/friendships/${id}/${follow ? 'follow' : 'unfollow'}/`];
+
+/**
+ * A request from inside the instagram.com page with the headers the web app sends, bounded in the
+ * page (the protocol's own timeout is a minute). status 0 = no answer (`text` says why).
+ */
+async function pageRequest(p: Page, method: 'GET' | 'POST', reqPath: string, body?: string): Promise<{ status: number; text: string }> {
+  // The session's cookies go along from an instagram.com page only (jobs leave the work page on robots.txt).
+  if (!p.url().startsWith(`${ORIGIN}/`)) await p.goto(`${ORIGIN}/robots.txt`, { waitUntil: 'domcontentloaded', timeout: 40_000 });
+  // The CSRF token through the browser rather than document.cookie: an export may carry it HttpOnly.
+  const csrf = (await p.cookies(ORIGIN).catch(() => [])).find((c) => c.name === 'csrftoken')?.value || '';
+  return evaluateSettled<{ status: number; text: string }>(
+    p,
+    String.raw`(async (method, path, body, csrf) => {
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), 20000);
+      let claim = '0';
+      try { claim = sessionStorage.getItem('www-claim-v2') || '0'; } catch (e) {}
+      const headers = { 'x-ig-app-id': '${APP_ID}', 'x-requested-with': 'XMLHttpRequest', 'x-csrftoken': csrf, 'x-asbd-id': '129477', 'x-ig-www-claim': claim };
+      if (body !== null) headers['content-type'] = 'application/x-www-form-urlencoded';
+      try {
+        const r = await fetch(path, { method, credentials: 'include', headers, body: body === null ? undefined : body, signal: ctl.signal });
+        return { status: r.status, text: (await r.text()).slice(0, 8000) };
+      } catch (e) {
+        return { status: 0, text: e && e.name === 'AbortError' ? 'no answer within 20 s' : String((e && e.message) || e) };
+      } finally { clearTimeout(timer); }
+    })(${JSON.stringify(method)}, ${JSON.stringify(reqPath)}, ${JSON.stringify(body ?? null)}, ${JSON.stringify(csrf)})`,
+  );
+}
+
+/** After `friendships/show` was refused for the address or the session: not asked again for this long (the panel does without). */
+const SHOW_PAUSE_MS = 10 * 60 * 1000;
+let showPausedUntil = 0;
+
+/** Whether the signed-in account follows the account, asked from Instagram; undefined when its id is not known or Instagram would not say. */
+async function readFollowState(handle: string, id: string | undefined): Promise<FollowState | undefined> {
+  if (!id || !/^\d{1,24}$/.test(id) || !signedIn() || Date.now() < showPausedUntil) return undefined;
+  try {
+    const r = await withPage((p) => pageRequest(p, 'GET', `/api/v1/friendships/show/${id}/`), PRI_VIEWER);
+    const state = friendshipShown(r.status, r.text);
+    if (!state) {
+      showPausedUntil = Date.now() + SHOW_PAUSE_MS;
+      note(`@${handle}: friendships/show answered ${r.status} "${bodyHint(r.text, 100)}"; not asked again for ${SHOW_PAUSE_MS / 60000} min`);
+      return undefined;
+    }
+    noteFollowState(handle, state);
+    return state;
+  } catch (e) {
+    note(`@${handle}: friendships/show failed (${(e as Error).message.split('\n')[0]})`);
+    return undefined;
+  }
+}
+
+/** POST /api/follow for Instagram: follows (`follow` false: unfollows) @handle for the signed-in account. `clientId` is the account id the viewer's item carried. */
+export async function followInstagram(handle: string, follow: boolean, log: (m: string) => void, clientId?: string): Promise<FollowResponse> {
+  requireSignedIn();
+  if (!HANDLE.test(handle)) throw new InstagramError('That is not an Instagram account name', 400, 'bad_handle');
+  const t0 = Date.now();
+  const verb = follow ? 'follow' : 'unfollow';
+  const warnings: string[] = [];
+  const result = await withPage(async (p): Promise<{ state: FollowState; how: string }> => {
+    progress(`${follow ? 'Following' : 'Unfollowing'} @${handle} on Instagram…`);
+    let id = knownAccountId(handle) || (clientId && /^\d{1,24}$/.test(clientId) ? clientId : undefined);
+    if (!id) {
+      // Never seen on a video here: the account search names it.
+      const r = (await evaluateSettled<{ status: number; text: string }>(p, SEARCH_JS(handle)).catch((e: Error) => ({ status: 0, text: e.message }))) as { status: number; text: string };
+      try {
+        if (r.status === 200) usersOfSearch(JSON.parse(r.text));
+      } catch {
+        /* not JSON */
+      }
+      id = knownAccountId(handle);
+      note(`@${handle}: account id ${id ? id + ' from the account search' : `not found (the search answered ${r.status} "${bodyHint(r.text, 80)}")`}`);
+      if (!id) throw new InstagramError(`Instagram's account search did not find @${handle} (it answered ${r.status}), so it cannot be ${follow ? 'followed' : 'unfollowed'} from here right now.`, r.status === 200 ? 404 : 502, 'instagram_no_account_id');
+    }
+    const show = await pageRequest(p, 'GET', `/api/v1/friendships/show/${id}/`);
+    const before = friendshipShown(show.status, show.text);
+    note(`@${handle} (${id}): before the ${verb}, friendships/show answered ${show.status}${before ? ` -> "${before}"` : ` "${bodyHint(show.text, 100)}"`}`);
+    if (before && (before !== 'none') === follow) {
+      warnings.push(`already ${follow ? (before === 'requested' ? 'requested to follow' : 'following') : 'not following'} @${handle}`);
+      return { state: before, how: 'already so' };
+    }
+    const tried: string[] = [];
+    for (const reqPath of FOLLOW_PATHS(id, follow)) {
+      const r = await pageRequest(p, 'POST', reqPath, `container_module=profile&user_id=${id}`);
+      const a = followAnswer(r.status, r.text);
+      note(`@${handle} (${id}): POST ${reqPath} answered ${a.hint}`);
+      if (a.refused) throw new InstagramError(a.refused.message, a.refused.status, a.refused.code);
+      if (a.ok) {
+        let after = a.state;
+        if (!after) {
+          // The older paths answer "ok" without the state: ask.
+          const again = await pageRequest(p, 'GET', `/api/v1/friendships/show/${id}/`);
+          after = friendshipShown(again.status, again.text);
+          if (!after) warnings.push('Instagram accepted the request but would not show the new state');
+        }
+        // A follow that left the account "not followed" (or the reverse) did not take.
+        if (after && (after !== 'none') !== follow) warnings.push(`Instagram accepted the ${verb} but still reports "${after}"`);
+        return { state: after ?? (follow ? 'following' : 'none'), how: reqPath };
+      }
+      tried.push(`${reqPath} answered ${a.hint}`);
+      // Only a path that is not there is worth another path; any other "no" would be repeated.
+      if (!a.missing) break;
+    }
+    throw new InstagramError(`Instagram did not carry out the ${verb} of @${handle}: ${tried.join('; ')}.`, 502, 'instagram_follow_failed');
+  }, PRI_VIEWER);
+  noteFollowState(handle, result.state);
+  log(`instagram @${handle}: ${verb} -> "${result.state}" (${result.how}), ${Date.now() - t0} ms`);
+  return { user: handle, followState: result.state, warnings };
 }
 
 // ---------------------------------------------------------------- the account (used by instagramSession.ts)
@@ -1315,6 +1667,9 @@ export async function checkInstagramAccount(cookies?: ParsedCookie[], userAgent?
       }
       lastCheck = { at: new Date().toISOString(), api: r.status, outcome: acc.ok ? (acc.loggedIn ? 'signed in as @' + acc.username : 'signed out (' + acc.error + ')') : 'inconclusive (' + acc.error + ')' };
       note(`account check: API ${r.status} -> ${lastCheck.outcome}`);
+      // Cookies that stay in use (signed in, or kept provisionally): what is remembered about follows is this account's.
+      const owner = cookies && !(acc.ok && !acc.loggedIn) ? cookies.find((c) => c.name === 'ds_user_id')?.value || cookies.find((c) => c.name === 'sessionid')?.value.split(/%3A|:/i)[0] : undefined;
+      if (owner) followsBelongTo(owner);
       if (cookies && acc.ok && !acc.loggedIn) {
         const cdp = await p.createCDPSession();
         await cdp.send('Network.clearBrowserCookies').catch(() => undefined);
