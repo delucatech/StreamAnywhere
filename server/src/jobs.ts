@@ -20,6 +20,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { lastFeedDir } from './lastBatch';
+import { say, track } from './activity';
 
 export interface JobOptions<T> {
   /** A kept answer younger than this is final */
@@ -125,9 +126,13 @@ function keep(key: string, value: unknown, opts: JobOptions<unknown>): void {
   if (opts.persist) toDisk(key, k);
 }
 
-function run<T>(key: string, work: () => Promise<T>, opts: JobOptions<T>): Promise<T> {
+/** A job key ("search|youtube|tesla|0") as a few words for the status line. */
+const jobLabel = (key: string): string => key.split('|').filter(Boolean).join(' · ').slice(0, 90);
+
+function run<T>(key: string, work: () => Promise<T>, opts: JobOptions<T>, background = false): Promise<T> {
   stats.runs++;
-  const p = work()
+  // An activity of its own: the job goes on (and stays listed) when the request that started it is gone.
+  const p = track(`${background ? 'Refreshing a kept answer' : 'Job'}: ${jobLabel(key)}`, { background }, work)
     .then((v) => {
       keep(key, v, opts as JobOptions<unknown>);
       return v;
@@ -155,7 +160,7 @@ function scheduleRefresh(delayMs: number): void {
     refreshing = true;
     stats.refreshes++;
     next.opts.log?.(`refreshing in the background: ${next.key}`);
-    void run(next.key, next.work, next.opts)
+    void run(next.key, next.work, next.opts, true)
       .catch((e) => next.opts.log?.(`background refresh failed (the earlier answer stays): ${next.key}: ${(e as Error).message}`))
       .finally(() => {
         refreshing = false;
@@ -187,6 +192,7 @@ export async function sharedJob<T>(key: string, work: () => Promise<T>, opts: Jo
   if (running) {
     stats.joined++;
     opts.log?.(`joined the running job: ${key}`);
+    say('the same request is already running (another device, or an earlier try): waiting for its answer');
     return running as Promise<T>;
   }
   return run(key, work, opts);

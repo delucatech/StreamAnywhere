@@ -33,6 +33,7 @@
 import * as zlib from 'node:zlib';
 import { openUpstream, readBody } from './http';
 import { ytdlpDirectClient } from './ytdlp';
+import { say } from './activity';
 
 const API = 'https://www.youtube.com/youtubei/v1/player?prettyPrint=false';
 const HOSTS = ['www.youtube.com'];
@@ -313,6 +314,7 @@ const echoed = (json: any): string | undefined => {
  */
 async function ask(videoId: string, client: PlayerClient, log: (m: string) => void): Promise<{ json: any; requests: number }> {
   const kept = visitor && Date.now() - visitor.at < VISITOR_TTL_MS ? visitor.id : undefined;
+  say(`asking YouTube's player API directly for the video's files (as its ${client.name} app${kept ? '' : ', first request: no visitor id yet'})`);
   let json = await transport.player(videoId, client, kept);
   let requests = 1;
   if (!isBotCheck(json)) {
@@ -336,6 +338,7 @@ async function ask(videoId: string, client: PlayerClient, log: (m: string) => vo
     }
     if (!id || tried.has(id)) continue;
     tried.add(id);
+    say(`YouTube asked "are you a bot?": asking again with a visitor id (${what})`);
     json = await transport.player(videoId, client, id);
     requests++;
     if (!isBotCheck(json)) {

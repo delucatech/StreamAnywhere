@@ -3,7 +3,7 @@
 #
 # What it does (idempotent, re-run safely):
 #   1. 2 GB swap (the e2-micro has 1 GB RAM; headless Chromium needs the headroom)
-#   2. Node.js 20 (NodeSource), Chromium, git, Caddy
+#   2. Node.js 20 (NodeSource), Chromium, git, Caddy, yt-dlp (with its YouTube scripts) and Deno
 #   3. clones/updates the repo into /opt/streamanywhere, installs deps, builds the client
 #   4. a systemd service "streamanywhere" running the Node server on 127.0.0.1:8787 as user "streamanywhere"
 #   5. Caddy in front of it: HTTPS on 443 for https://<VM-IP with dashes>.sslip.io (Let's Encrypt, no DNS setup)
@@ -101,8 +101,9 @@ if ! command -v python3 >/dev/null || ! python3 -c 'import venv, ensurepip' 2>/d
 fi
 if [ ! -x /opt/ytdlp/bin/python3 ]; then python3 -m venv /opt/ytdlp || echo "WARN: venv creation failed"; fi
 if [ -x /opt/ytdlp/bin/python3 ]; then
-  /opt/ytdlp/bin/pip install -q -U yt-dlp >/dev/null 2>&1 || echo "WARN: pip install yt-dlp failed (keeping $(/opt/ytdlp/bin/yt-dlp --version 2>/dev/null || echo nothing))"
-  echo "yt-dlp (venv) $(/opt/ytdlp/bin/yt-dlp --version 2>/dev/null || echo missing)"
+  # [default] brings yt-dlp-ejs, the scripts yt-dlp runs in Deno (step 2c) to work YouTube's player script.
+  /opt/ytdlp/bin/pip install -q -U "yt-dlp[default]" >/dev/null 2>&1 || echo "WARN: pip install yt-dlp failed (keeping $(/opt/ytdlp/bin/yt-dlp --version 2>/dev/null || echo nothing))"
+  echo "yt-dlp (venv) $(/opt/ytdlp/bin/yt-dlp --version 2>/dev/null || echo missing), yt-dlp-ejs $(/opt/ytdlp/bin/pip show yt-dlp-ejs 2>/dev/null | sed -n 's/^Version: //p' || true)"
 fi
 if [ -x /usr/local/bin/yt-dlp ]; then
   /usr/local/bin/yt-dlp -U >/dev/null 2>&1 || true
@@ -111,6 +112,33 @@ else
 fi
 if [ -x /opt/ytdlp/bin/yt-dlp ]; then YTDLP_BIN=/opt/ytdlp/bin/yt-dlp; YTDLP_PY=/opt/ytdlp/bin/python3; else YTDLP_BIN=/usr/local/bin/yt-dlp; YTDLP_PY=python3; fi
 echo "yt-dlp: $YTDLP_BIN ($($YTDLP_BIN --version 2>/dev/null || echo missing)), daemon python: $YTDLP_PY"
+
+echo "== 2c. Deno (yt-dlp runs YouTube's player script with it)"
+# Added 2026-11-22. Without a JavaScript runtime yt-dlp has one YouTube client left (the one the
+# server also asks directly, youtubePlayer.ts); YouTube refuses that client the videos marked
+# "made for kids", and when YouTube closes it everything would fail at once. With Deno (yt-dlp
+# wants 2.3 or newer; Node 20 does not count) yt-dlp can use the TV and web clients. One binary of
+# ~100 MB in /usr/local/bin, on the PATH of the service; it runs only for the seconds of such a
+# lookup, with no file or network access (yt-dlp starts it that way). A failure here is not fatal:
+# the server works as before without it.
+deno_ok() { /usr/local/bin/deno --version >/dev/null 2>&1; }
+case "$(uname -m)" in x86_64) DENO_ARCH=x86_64 ;; aarch64) DENO_ARCH=aarch64 ;; *) DENO_ARCH="" ;; esac
+if [ -n "$DENO_ARCH" ]; then
+  # the latest release's tag (v2.x.y) from GitHub's redirect; an unknown one leaves an installed Deno alone
+  DENO_LATEST=$(curl -fsSI -m 20 https://github.com/denoland/deno/releases/latest 2>/dev/null | tr -d '\r' | sed -n 's#^[Ll]ocation:.*/tag/v##p' | tail -1 || true)
+  DENO_HAVE=$(/usr/local/bin/deno --version 2>/dev/null | sed -n 's/^deno \([0-9.]*\).*/\1/p' | head -1 || true)
+  if ! deno_ok || { [ -n "$DENO_LATEST" ] && [ "$DENO_LATEST" != "$DENO_HAVE" ]; }; then
+    if curl -fsSL -m 300 "https://github.com/denoland/deno/releases/latest/download/deno-${DENO_ARCH}-unknown-linux-gnu.zip" -o /tmp/deno.zip \
+      && rm -rf /tmp/deno-unzip && mkdir -p /tmp/deno-unzip && python3 -m zipfile -e /tmp/deno.zip /tmp/deno-unzip \
+      && chmod 755 /tmp/deno-unzip/deno && /tmp/deno-unzip/deno --version >/dev/null 2>&1; then
+      install -m 755 /tmp/deno-unzip/deno /usr/local/bin/deno
+    else
+      echo "WARN: Deno download failed (keeping ${DENO_HAVE:-none}); YouTube videos marked \"made for kids\" stay unplayable without it"
+    fi
+    rm -rf /tmp/deno.zip /tmp/deno-unzip
+  fi
+fi
+if deno_ok; then echo "deno $(/usr/local/bin/deno --version | head -1)"; else echo "deno: missing"; fi
 
 echo "== 3. app"
 id -u "$APP_USER" >/dev/null 2>&1 || useradd --system --create-home --home-dir /var/lib/streamanywhere --shell /usr/sbin/nologin "$APP_USER"

@@ -142,3 +142,35 @@ export function recentLog(count = 300, minLevel = 30): string {
   }
   return out.slice(-count).join('\n');
 }
+
+/**
+ * The newest log lines as short texts (newest last) for the waiting screens (GET /api/activity):
+ * info and above, no older than `maxAgeMs`, without the devices' own reports (they describe the
+ * viewer's side, not what the server is doing).
+ */
+export function recentLogLines(count = 4, maxAgeMs = 30_000): { at: number; level: 'info' | 'warn' | 'error'; text: string }[] {
+  const out: { at: number; level: 'info' | 'warn' | 'error'; text: string }[] = [];
+  const now = Date.now();
+  for (let i = lines.length - 1; i >= 0 && out.length < count; i--) {
+    let rec: Record<string, unknown>;
+    try {
+      rec = JSON.parse(lines[i]);
+    } catch {
+      continue;
+    }
+    const level = Number(rec.level) || 30;
+    const at = Number(rec.time) || now;
+    if (now - at > maxAgeMs) break;
+    if (level < 30 || rec.client === true || !rec.msg) continue;
+    let text = String(rec.msg);
+    // the relay's line carries its facts as fields: said in words, it is the sign that video bytes are flowing
+    if (text === 'media delivered via proxy' && typeof rec.bytes === 'number') {
+      text = `video relay: sent ${rec.bytes >= 1048576 ? `${(rec.bytes / 1048576).toFixed(1)} MB` : `${Math.round(rec.bytes / 1024)} KB`} in ${((Number(rec.ms) || 0) / 1000).toFixed(1)} s${typeof rec.host === 'string' ? ` from ${rec.host}` : ''}`;
+    }
+    if (typeof rec.err === 'string' && !text.includes(rec.err)) text += `: ${rec.err}`;
+    if (typeof rec.what === 'string' && !text.toLowerCase().startsWith(rec.what.toLowerCase())) text = `${rec.what}: ${text}`;
+    text = text.replace(/\s+/g, ' ').trim();
+    out.push({ at, level: level >= 50 ? 'error' : level >= 40 ? 'warn' : 'info', text: text.length > 220 ? text.slice(0, 219) + '…' : text });
+  }
+  return out.reverse();
+}

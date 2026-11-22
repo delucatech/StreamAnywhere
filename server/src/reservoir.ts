@@ -18,6 +18,7 @@
  * (`stale`), while the fill runs. A viewer who already has videos waits for fresh ones as before.
  */
 import type { FeedItem } from '../../shared/types';
+import { say, track } from './activity';
 import { hasBatch, loadStock, rememberBatch, saveStock, STALE_BATCH, staleBatch } from './lastBatch';
 
 export interface ReservoirFetch {
@@ -348,6 +349,7 @@ export class Reservoir {
     // A back-off from an earlier refusal is shortened to what the caller is willing to wait: the
     // viewer is actually out of videos now, which is worth one more try.
     while (this.opt.now() < until) {
+      say(this.filling ? `no ${this.name} videos in stock: a batch is already being fetched, waiting for it` : `no ${this.name} videos in stock: fetching a batch from the source now`);
       const p = this.filling || this.fill(true);
       await Promise.race([p, new Promise((r) => setTimeout(r, Math.max(0, until - this.opt.now())))]);
       if (this.stock.length || this.lastError) return;
@@ -388,7 +390,14 @@ export class Reservoir {
   /** The fill about to run is a keep-stocked one (nobody waiting); cleared by the fill */
   private idleFill = false;
 
-  private async fillOnce(): Promise<void> {
+  /** One fill, listed as an activity: a viewer's own while one waits for it, a background job otherwise. */
+  private fillOnce(): Promise<void> {
+    const idle = this.idleFill && !this.active();
+    const label = this.name.charAt(0).toUpperCase() + this.name.slice(1);
+    return track(`${idle ? 'Keeping' : 'Fetching'} ${label} videos ${idle ? 'in stock (nobody is waiting)' : 'for the stock'}: ${this.stock.length} ready, asking for ${this.opt.batch} more`, { background: this.stock.length > 0 || idle }, () => this.fillBatch());
+  }
+
+  private async fillBatch(): Promise<void> {
     this.lastFillAt = this.opt.now();
     const idle = this.idleFill && !this.active();
     this.idleFill = false;

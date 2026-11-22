@@ -34,7 +34,8 @@ for i in $(seq 1 12); do
 done
 
 if [ -x /opt/ytdlp/bin/pip ]; then
-  /opt/ytdlp/bin/pip install -q --no-cache-dir -U yt-dlp >/dev/null 2>&1 || echo "WARN: pip install -U yt-dlp failed"
+  # [default] keeps yt-dlp-ejs (the scripts yt-dlp runs in Deno for YouTube) in step with yt-dlp
+  /opt/ytdlp/bin/pip install -q --no-cache-dir -U "yt-dlp[default]" >/dev/null 2>&1 || echo "WARN: pip install -U yt-dlp failed"
 fi
 if [ -x /usr/local/bin/yt-dlp ]; then
   /usr/local/bin/yt-dlp -U >/dev/null 2>&1 || echo "WARN: yt-dlp -U (zipapp) failed"

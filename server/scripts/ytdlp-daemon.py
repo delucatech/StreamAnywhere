@@ -6,21 +6,30 @@ Importing yt_dlp costs ~1 s on a PC and ~11 s of CPU on the free e2-micro VM (me
 2026-10-12: a zipapp recompiles every module on each run), so spawning the CLI per request made
 every YouTube call 25-120 s there. This process pays that once.
 
-Hello:    {"id": 0, "ok": true, "version": "2026.10.26", "direct_client": {...} | null}
+Hello:    {"id": 0, "ok": true, "version": "2026.10.26", "direct_client": {...} | null,
+           "js_runtime": "/usr/local/bin/deno" | null}
 Request:  {"id": 1, "url": "...", "flat": true, "playlist_items": "1-30", "noplaylist": false,
            "cookiefile": "/path/to/cookies.txt",
            "extractor_args": {"youtube": {"skip": ["hls", "dash"]}}}
+Progress: {"id": 1, "progress": "[youtube] dQw4w9WgXcQ: Downloading webpage"}   (any number, before the response)
 Response: {"id": 1, "ok": true, "info": {...}}  or  {"id": 1, "ok": false, "error": "..."}
 
 direct_client is the YouTube player client this yt-dlp uses when it has no JavaScript runtime
 (name, numeric id, the request context): the server asks YouTube's player API with it directly
 (server/src/youtubePlayer.ts), so a daily yt-dlp upgrade also renews that request.
 
+js_runtime is the Deno yt-dlp will find on the PATH (null without one). With it (and the yt-dlp-ejs
+package, part of `pip install "yt-dlp[default]"`) yt-dlp runs YouTube's player script and can use
+the web and TV player clients: the way to the videos the JS-less client is refused ("made for
+kids"), and a second route when YouTube closes that client. Progress lines are yt-dlp's own
+messages for the request in hand; the server shows them to the viewer who is waiting.
+
 The yt_dlp package comes from the running interpreter (pip / venv install); when the environment
 variable YTDLP_PATH names a zipapp (the GitHub release file), that file is put on sys.path instead.
 """
 import json
 import os
+import shutil
 import sys
 
 
@@ -66,12 +75,25 @@ def _direct_client():
         return None
 
 
-class _Quiet:
+class _Steps:
+    """yt-dlp's logger: its screen messages ("[youtube] <id>: Downloading webpage") go out as progress lines."""
+
+    def __init__(self, out, rid):
+        self._out = out
+        self._rid = rid
+
     def debug(self, msg):
-        pass
+        # to_screen() ends here too; real debug output is marked "[debug] "
+        if not isinstance(msg, str) or msg.startswith("[debug] ") or not msg.strip():
+            return
+        try:
+            self._out.write(json.dumps({"id": self._rid, "progress": msg.strip()[:300]}, ensure_ascii=True) + "\n")
+            self._out.flush()
+        except Exception:  # noqa: BLE001
+            pass
 
     def info(self, msg):
-        pass
+        self.debug(msg)
 
     def warning(self, msg):
         pass
@@ -88,7 +110,7 @@ def main():
         out.write(json.dumps({"id": 0, "ok": False, "error": "cannot import yt_dlp: %s" % e}) + "\n")
         out.flush()
         return 1
-    out.write(json.dumps({"id": 0, "ok": True, "version": yt_dlp.version.__version__, "direct_client": _direct_client()}) + "\n")
+    out.write(json.dumps({"id": 0, "ok": True, "version": yt_dlp.version.__version__, "direct_client": _direct_client(), "js_runtime": shutil.which("deno")}) + "\n")
     out.flush()
     for line in sys.stdin:
         line = line.strip()
@@ -104,7 +126,7 @@ def main():
             "no_warnings": True,
             "skip_download": True,
             "noplaylist": bool(req.get("noplaylist")),
-            "logger": _Quiet(),
+            "logger": _Steps(out, rid),
             # the same formats the CLI gives us; no JS runtime is required for them (2026-10)
             "check_formats": False,
             # a connection that stops answering ends by itself (yt-dlp's default is 20 s per read)

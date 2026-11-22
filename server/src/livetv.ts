@@ -28,6 +28,7 @@ import { checkLiveUrl, fetchLiveText, redactUrl, safeHost } from './livetvHttp';
 import { cleanChannelName, countGroups, mergeChannels, parseM3uAsync, splitGroups, type M3uChannel, type MergeEntry } from './livetvM3u';
 import { LIVETV_PRESETS, presetById } from './livetvPresets';
 import { pressureReason } from './pressure';
+import { say, track } from './activity';
 import { classify, DVR_WINDOW_SEC, ensureRemux, leaveRemux, pickVariant, recorderStarting, registerLiveTvStreamRoutes, remuxAvailable, remuxProgress, remuxStats, setLiveTvStreamLogger, setRemuxRoot, shutdownLiveTvStreams, type RemuxSource, type StreamSource, type Verdict } from './livetvStream';
 import { normalizeXtreamServer, xtreamAccount, xtreamEpgUrl, xtreamLiveChannels, xtreamLiveUrl, xtreamSecrets, XtreamError, type XtreamCreds } from './livetvXtream';
 
@@ -542,12 +543,13 @@ export function refreshProvider(id: string): Promise<void> {
   const p = providerOr404(id);
   let job = running.get(id);
   if (job) return job;
-  job = (async () => {
+  job = track(`Live TV: refreshing the channel list of ${p.name}`, { background: true }, async () => {
     const t0 = Date.now();
     p.refresh = { ...p.refresh, state: 'running', error: undefined };
     changed();
     try {
       const prev = listOf(p);
+      say(`downloading the list from ${p.name} and reading its channels (a long list takes 10-20 s on the small server)`);
       const r = await fetchChannels(p, prev);
       const l: CachedList = { at: Date.now(), channels: r.channels, epgUrls: r.epgUrls, etag: r.etag, lastModified: r.lastModified, hash: r.hash };
       saveList(p, l);
@@ -567,7 +569,7 @@ export function refreshProvider(id: string): Promise<void> {
       log(`${p.name}: refresh failed: ${p.refresh.error}`);
       changed();
     }
-  })().finally(() => running.delete(id));
+  }).finally(() => running.delete(id));
   running.set(id, job);
   return job;
 }
@@ -824,6 +826,7 @@ const cleanViewer = (v: unknown): string | undefined => (typeof v === 'string' &
 export async function tune(key: string, viewer?: string, maxHeight?: number, codecs?: LiveTvCodec[]): Promise<LiveTvTuneResponse> {
   const t0 = Date.now();
   tuning.set(key, { phase: 'probing', at: t0 });
+  say(`opening ${channelLabel(key)}: asking the provider for the stream`);
   try {
     const r = await tuneChannel(key, viewer, maxHeight, codecs);
     noteTune(key, r.state === 'ok', Date.now() - t0);
@@ -838,7 +841,18 @@ const tuning = new Map<string, { phase: LiveTvTuneStatus['phase']; at: number }>
 const mark = (key: string, phase: LiveTvTuneStatus['phase']): void => {
   const t = tuning.get(key);
   if (t) t.phase = phase;
+  if (phase === 'checking') say(`opening ${channelLabel(key)}: checking the quality picked for this screen`);
+  else if (phase === 'starting') say(`opening ${channelLabel(key)}: starting the recorder (ffmpeg) and waiting for its first two segments`);
 };
+/** "Provider / Channel" for the status line (the key when the channel is gone). */
+function channelLabel(key: string): string {
+  try {
+    const found = findChannel(key);
+    return found ? `${found.p.name} / ${cleanChannelName(found.c.name)}` : 'the channel';
+  } catch {
+    return 'the channel';
+  }
+}
 
 /** Where opening `key` stands right now, plus how busy the server is (a starved VM explains a slow tune). */
 export function tuneStatus(key: string): LiveTvTuneStatus {

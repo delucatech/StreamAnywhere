@@ -14,6 +14,7 @@
  * work is done, and is dropped when the server stayed busy for too long - the app then loads its
  * own feed when it is opened, as it does without a home screen.
  */
+import { track } from './activity';
 export interface TopUpJob {
   /** One job per feed: a second request for the same feed while the first waits is ignored */
   key: string;
@@ -101,13 +102,15 @@ export function createTopUpQueue(options: TopUpQueueOptions): TopUpQueue {
       }
       current = job;
       try {
-        if (await job.start()) {
-          started++;
-          job.log(`${job.what}: started for the home screen`);
-          await sleep(settleMs);
-          const until = now() + runMs;
-          while (job.running() && now() < until) await sleep(pollMs);
-        }
+        await track(`Home screen: getting ${job.what} videos ready ahead of time`, { background: true }, async () => {
+          if (await job.start()) {
+            started++;
+            job.log(`${job.what}: started for the home screen`);
+            await sleep(settleMs);
+            const until = now() + runMs;
+            while (job.running() && now() < until) await sleep(pollMs);
+          }
+        });
       } catch (e) {
         job.log(`${job.what}: home screen top-up failed (${(e as Error)?.message || e})`);
       }

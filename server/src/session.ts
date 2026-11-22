@@ -32,6 +32,7 @@ import type { FeedItem, LoginMode, SessionInputRequest, SessionStatus } from '..
 import { exploreApiUrl, FeedError, isTikTokAd, itemToFeedItem, parseExploreBody, type ExploreResult } from './feed';
 import { rememberBatch, staleBatch } from './lastBatch';
 import { getProgress } from './progress';
+import { say } from './activity';
 
 type Browser = import('puppeteer-core').Browser;
 type Page = import('puppeteer-core').Page;
@@ -1800,8 +1801,10 @@ async function headlessBrowser(): Promise<Browser> {
       await closeHeadless();
       noteHeadlessUse();
       feedLog?.('launching headless browser');
+      say("starting the TikTok browser on the server (Chromium: a few seconds on a PC, up to a minute on the small server)");
       const browser = await launch(true);
       feedLog?.('headless browser launched: ' + (await browser.version()));
+      say('the TikTok browser is up');
       s.headless = browser;
       browser.on('disconnected', () => {
         if (s.headless !== browser) return;
@@ -1984,6 +1987,8 @@ export async function withWorkPage<T>(log: (m: string) => void, fn: (page: Page)
   const prev = workLock;
   let release!: () => void;
   workLock = new Promise<void>((r) => (release = r));
+  const opWords = op === 'work' ? 'loading Explore videos' : op;
+  if (work.busy || work.waiting) say(`waiting for the TikTok browser: it is busy with "${work.op === 'work' ? 'loading Explore videos' : work.op}" (${Math.round((Date.now() - work.since) / 1000)} s so far)${work.waiting ? `, ${work.waiting} more waiting` : ''}`);
   work.waiting++;
   await prev;
   work.waiting--;
@@ -1996,12 +2001,14 @@ export async function withWorkPage<T>(log: (m: string) => void, fn: (page: Page)
     const browser = await headlessBrowser();
     let page = s.explorePage;
     if (!page || page.isClosed()) {
+      say("opening tiktok.com in the server's browser (a fresh tab: up to 45 s)");
       page = await browser.newPage();
       await preparePage(page, browser);
       await page.goto('https://www.tiktok.com/explore', { waitUntil: 'domcontentloaded', timeout: 45_000 });
       s.explorePage = page;
       log('headless work page opened on /explore');
     }
+    say(`in the TikTok browser: ${opWords}`);
     return await fn(page);
   } finally {
     work.busy = false;
@@ -2254,6 +2261,7 @@ async function fetchForYouNow(count: number, log: (m: string) => void, quick = f
   // FORYOU_ALLOW_GUEST=1 lets the headless page run signed-out (TikTok's guest feed: a few videos,
   // then a login wall) – for testing the capture mechanism only.
   if (s.state !== 'logged_in' && !guestAllowed()) {
+    say('checking the saved TikTok sign-in (the browser on the server asks TikTok who is signed in)');
     await sessionProbe(true);
     if ((s.state as SessionStatus['state']) !== 'logged_in') {
       // An inconclusive check (the browser still starting, an empty answer from TikTok) is not a
@@ -2264,6 +2272,7 @@ async function fetchForYouNow(count: number, log: (m: string) => void, quick = f
     }
   }
   forYouAskedAt = Date.now();
+  say('opening your For You page in the signed-in TikTok browser');
   const page = await feedPage();
   startForYouPump();
   const deadline = Date.now() + 12_000;
@@ -2276,11 +2285,13 @@ async function fetchForYouNow(count: number, log: (m: string) => void, quick = f
       await nudgeFeedPage(page);
     }
     polls++;
+    if (polls % 3 === 1) say(`waiting for TikTok to hand For You videos to the server's browser (${s.pending.length} of ${enough} so far, up to 12 s)`);
     await new Promise((r) => setTimeout(r, 300));
     if (s.lastFeedError && polls > 12 && !s.pending.length) break;
   }
   if (!s.pending.length) {
     // Maybe the page is stuck on a dialog or the session expired: reload once.
+    say('TikTok sent no videos: asking TikTok whether the sign-in still holds, then reloading the For You page');
     const acc = await fetchAccount(page);
     if (acc.signedOut && s.state === 'logged_in') {
       // Only TikTok's own "no session" answer ends the signed-in state. An empty body, a timeout or a

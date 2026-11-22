@@ -4,7 +4,7 @@ import rateLimit from '@fastify/rate-limit';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { EXPLORE_CATEGORIES, YOUTUBE_CATEGORIES, platformOf } from '../../shared/types';
-import type { CommentsRequest, ConversationRequest, DownloadProbeRequest, InboxCancelResponse, LibraryCategoryRequest, LibraryEntryPatch, LibrarySaveRequest, DownloadStartRequest, FeedItem, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ProbeRequest, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SessionActionRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
+import type { CommentsRequest, ConversationRequest, DownloadProbeRequest, InboxCancelResponse, LibraryCategoryRequest, LibraryEntryPatch, LibrarySaveRequest, DownloadStartRequest, FeedItem, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ServerStatus, ProbeRequest, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SessionActionRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
 import { registerAuth } from './auth';
 import { mirrorStats, registerMirror, shutdownMirror } from './mirror';
 import { config, findUp } from './config';
@@ -24,6 +24,8 @@ import { Reservoir, type ReservoirStats } from './reservoir';
 import { hasBatch, reviveItems, slimItems } from './lastBatch';
 import { invalidateJobs, jobStats, sharedJob } from './jobs';
 import { getProgress } from './progress';
+import { registerActivity } from './activityRoutes';
+import { say } from './activity';
 import { cancelInboxReads, cancelReads, commentsDebug, conversation, fetchComments, fetchProfile, followUser, inbox, inboxDebug, isCancelled, searchTikTok, sendMessage, SocialError } from './social';
 import { channelVideos, exploreYouTube, isYouTubeUrl, recommendedYouTube, recommendedYouTubeTv, resolveYouTube, searchYouTube, youTubeCategory, YouTubeError } from './youtube';
 import { youtubePlayerStatus } from './youtubePlayer';
@@ -293,6 +295,8 @@ export async function buildServer() {
 
   // Site password: everything below (pages, API, media) needs the login cookie.
   registerAuth(app);
+  // What the server is doing, for the pages' waiting screens (activity.ts): before the routes, so its hook covers them all.
+  registerActivity(app, () => serverStatusNow());
   // Mirror: the phone's screen to the Tesla through this server (relay + WebRTC signalling)
   registerMirror(app);
   setYtDlpLogger((m) => app.log.info({ what: 'yt-dlp' }, m));
@@ -343,8 +347,13 @@ export async function buildServer() {
   };
   const homeTopUps = createTopUpQueue({ noRoom: noRoomForTopUp });
 
-  app.get('/api/health', async (): Promise<HealthResponse> => {
+  /** The machine's state and what the server is busy with (/api/health and /api/activity). */
+  const serverStatusNow = (): ServerStatus => {
     const p = serverPressure();
+    return { memoryMb: p.availableMb, memoryTotalMb: p.totalMb, swapMb: p.swapUsedMb, swapTotalMb: p.swapTotalMb, rssMb: p.rssMb, load: p.load, lagMs: p.lagMs, pressure: p.pressure, reason: p.reason, busy: serverBusy(), browser: headlessRunning() };
+  };
+
+  app.get('/api/health', async (): Promise<HealthResponse> => {
     return {
       ok: true,
       node: process.version,
@@ -356,7 +365,7 @@ export async function buildServer() {
       resolver: config.resolver,
       proxyAllowedHosts: config.proxyAllowedHosts,
       uptimeSec: Math.round(process.uptime()),
-      server: { memoryMb: p.availableMb, memoryTotalMb: p.totalMb, swapMb: p.swapUsedMb, swapTotalMb: p.swapTotalMb, rssMb: p.rssMb, load: p.load, lagMs: p.lagMs, pressure: p.pressure, reason: p.reason, busy: serverBusy(), browser: headlessRunning() },
+      server: serverStatusNow(),
     };
   });
 
@@ -380,7 +389,9 @@ export async function buildServer() {
 
     if (isInstagramUrl(url)) {
       try {
+        say('checking the Instagram sign-in on the server (this can start its browser: up to a minute on the small server)');
         await ensureInstagramSession();
+        say("asking Instagram for the video's files");
         return await resolveInstagram(url, (m) => log(m));
       } catch (e) {
         const err = e as Error;
@@ -391,7 +402,9 @@ export async function buildServer() {
 
     if (isFacebookUrl(url)) {
       try {
+        say('checking the Facebook sign-in on the server');
         await ensureFacebookSession();
+        say("reading the video's page on Facebook for its files");
         return await resolveFacebook(url, (m) => log(m));
       } catch (e) {
         const err = e as Error;
@@ -404,6 +417,7 @@ export async function buildServer() {
       // Plain MP4 (or any media URL): pass through, probe CORS server-side, offer the proxy if allowlisted.
       const host = new URL(url).hostname;
       const warnings: string[] = [];
+      if (body.probe !== false) say(`testing the address from the server (asking ${host} for the first bytes)`);
       const probe = body.probe === false ? undefined : await probeUrl(url, origin, ['*']);
       let proxyUrl: string | undefined;
       let mediaId: string | undefined;
@@ -450,6 +464,7 @@ export async function buildServer() {
       for (const strategy of order) {
         const ta = Date.now();
         try {
+          say(strategy === 'native' ? "reading the video's page on TikTok for its files" : 'asking yt-dlp for the TikTok video (the second way: slower)');
           const result = strategy === 'native' ? await resolveTikTokNative(url, { probeOrigin: origin, probe: body.probe !== false, log }) : await resolveWithYtDlp(url);
           attempts.push({ resolver: strategy, ok: true, elapsedMs: Date.now() - ta });
           result.attempts = attempts;
@@ -462,6 +477,7 @@ export async function buildServer() {
         } catch (e) {
           const err = e as Error;
           lastError = err;
+          say(`${strategy === 'native' ? "reading TikTok's page" : 'yt-dlp'} failed (${err.message.slice(0, 80)})`);
           attempts.push({ resolver: strategy, ok: false, error: err.message, elapsedMs: Date.now() - ta });
           req.log.warn({ resolver: strategy, err: err.message }, 'resolver attempt failed');
           // Do not fall through to yt-dlp for definitive answers (private/not found)
@@ -578,6 +594,7 @@ export async function buildServer() {
           void ensureInstagramSession().then((ok) => ok && reservoir.warm(), () => undefined);
           return served(quickBatch, what);
         }
+        say('checking the Instagram sign-in on the server (this can start its browser: up to a minute on the small server)');
         await ensureInstagramSession();
         if (!instagramSignedIn()) throw new FeedError('Instagram needs a sign-in: open Profile and sign in with the cookies of a signed-in browser.', 'instagram_not_signed_in', 401);
         return served(await reservoir.take(count, quick), what, (items) => reservoir.putBack(items));
@@ -591,6 +608,7 @@ export async function buildServer() {
             void ensureFacebookSession().then((ok) => ok && reservoir.warm(), () => undefined);
             return served(quickBatch, 'facebook foryou');
           }
+          say('checking the Facebook sign-in on the server');
           await ensureFacebookSession();
           if (!facebookSignedIn()) throw new FeedError('Not signed in to Facebook: sign in from Profile to see your For You feed.', 'facebook_not_signed_in', 401);
           return served(await reservoir.take(count, quick), 'facebook foryou', (items) => reservoir.putBack(items));

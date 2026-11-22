@@ -798,14 +798,23 @@ Measured 2026-10-12 (dev machine and the GCP VM; the VM's IP is not bot-checked 
   upgrade renews it. Any failure (a refusal, an unplayable answer, a layout the parser does not
   read) sends the video to yt-dlp as before, and `/api/health` → `youtubePlayer` counts it
   (`fallback`, `lastFallback`); `YOUTUBE_PLAYER=ytdlp` sends every video to yt-dlp. A viewer
-  waits 30 s for a video; a lookup slower than that goes on (up to 75 s) and its answer is kept,
+  waits 30 s for a video; a lookup slower than that goes on (up to 120 s) and its answer is kept,
   so opening the video again plays at once.
-- **Not playable: videos marked "made for kids"** (Blippi and the like). YouTube answers
+- **Videos marked "made for kids"** (Blippi and the like) take the slow route. YouTube answers
   "This video is not available" to the only client that works without the player's JavaScript
   (measured 2026-11-22: `visionos` and `android_vr` refuse, `android` / `ios` answer with SABR
-  streams only, the web and TV clients hand out signed URLs). Playing them takes a JavaScript
-  runtime yt-dlp accepts on the server (Deno, or Node 22+; the VM has Node 20) and its
-  `web_embedded` client.
+  streams only, the TV clients hand out signed URLs). With **Deno** on the server (yt-dlp wants
+  2.3 or newer; Node 20 does not count) and the `yt-dlp-ejs` package (`pip install
+  "yt-dlp[default]"`), yt-dlp runs YouTube's player script and asks as the `tv_samsung` client:
+  the direct lookup's refusal sends the video there (`player_client=default,-visionos`, so the
+  client that already refused is not asked again). About 5 s on a PC. YouTube's file server
+  refuses part of the addresses that route hands out (HTTP 403 on every byte range, for one
+  lookup's address always, for the next lookup's often not), so the server asks the first file
+  for two bytes before it answers and looks the video up again when they are refused (three
+  lookups at most); when all are refused the viewer is told so. The same route is the second way
+  for every video should YouTube close the JS-less client. `/api/health` →
+  `ytdlpDaemon.jsRuntime` names the Deno in use (missing = none, and those videos answer "not
+  available"). The VM gets Deno and the package from `deploy/gcp/setup-vm.sh` (step 2c).
 - **Proxy chunking**: googlevideo throttles an open-ended request to ~50 KB/s but serves a bounded
   Range at full speed (10 MB in 0.3 s), so `chunked` media records are relayed in 4 MB chunks.
 - **Seeking in fragmented files**: mp4box only knows the fragments it has parsed, so a seek beyond
@@ -1009,6 +1018,24 @@ with a real account on the VM; `/api/session/log?platform=facebook` shows each s
   device), so a problem on the Tesla or a phone can be read afterwards from any browser.
 - **`/api/health`** (public): build facts, yt-dlp and daemon status, uptime. **`/api/stats`**: feed
   stock per category, media records, the headless work page.
+- **The status strip and `/api/activity`** (built 2026-11-22). Whenever a page waits more than
+  about a second - for the server's answer, or for a video's bytes - a small panel says what the
+  page is waiting for and for how long, what the server is doing about it right now (step by
+  step: "yt-dlp: running YouTube's player script with Deno · 6 s on this step", "waiting for
+  the TikTok browser: it is busy with …", "Video relay: waiting for …googlevideo.com to send …"),
+  the last lines of the server's log, and whether the machine is short of memory; when the
+  server itself does not answer, it says that instead ("No answer from the server for 9 s…").
+  A tap shows more lines. The server's side is [`server/src/activity.ts`](server/src/activity.ts):
+  every API request that can be slow is listed from its route and body
+  ([`activityRoutes.ts`](server/src/activityRoutes.ts)), the server's own jobs (stock top-ups,
+  channel list refreshes, kept answers being refreshed) list themselves with `track()`, and
+  any code below them names its step with `say('…')` (found through AsyncLocalStorage, so no
+  handle is passed around; yt-dlp's own progress messages come through its helper process).
+  The client's side is [`client/src/activity.ts`](client/src/activity.ts) and
+  [`pending.ts`](client/src/pending.ts): `api.ts` registers each slow request, a page can name
+  waits of its own (`beginWait`), and waits nobody is held up by (the next batch while videos
+  play) stay off the strip. `/api/activity` (site password) answers `{ activities, recent,
+  server }` and is asked only while a strip is up.
 - **`/api/session/log`**: the last TikTok sign-in steps; `?platform=youtube` / `?platform=instagram` for those.
 
 ## Using the app

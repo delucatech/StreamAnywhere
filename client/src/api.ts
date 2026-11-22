@@ -1,4 +1,5 @@
 import type { LiveTvChannelGuideResponse, LiveTvChannelsResponse, LiveTvCodec, LiveTvGuideNowResponse, LiveTvHealthReport, LiveTvPrefs, LiveTvPrefsPatch, LiveTvPreset, LiveTvWindow, LiveTvProvider, LiveTvProviderInput, LiveTvState, LiveTvTestRequest, LiveTvTestResponse, LiveTvTuneResponse, LiveTvTuneStatus, ConversationResponse, DownloadJob, DownloadProbeResponse, DownloadSource, FeedProgress, LibraryCategory, LibraryEntry, LibraryEntryPatch, LibraryOptionsResponse, LibrarySaveHint, LibrarySaveResponse, LibraryState, FeedRequest, FeedResponse, FollowRequest, FollowResponse, HealthResponse, InboxCancelResponse, InboxResponse, CommentsRequest, CommentsResponse, LoginMode, Platform, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SendMessageResponse, ServerProbe, SessionInputRequest, SessionStatus } from '../../shared/types';
+import { beginWait, type WaitName } from './pending';
 
 /**
  * API base URL. Empty = same origin (dev server proxy or SERVE_CLIENT deployments). When the
@@ -46,6 +47,76 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * What a request is, in the viewer's words, for the status strip (activity.ts shows it with its
+ * clock once the answer takes more than a moment); undefined for requests that are polled or
+ * answered at once. The server names its side of the same request in activityRoutes.ts.
+ */
+function waitLabel(method: 'GET' | 'POST', path: string, body?: unknown): string | undefined {
+  const b = (body && typeof body === 'object' ? body : {}) as Record<string, unknown>;
+  const p = path.split('?')[0];
+  const short = (v: unknown, max = 40): string => {
+    const t = String(v ?? '').trim();
+    return t.length > max ? t.slice(0, max - 1) + '…' : t;
+  };
+  if (method === 'POST') {
+    switch (p) {
+      case '/api/resolve':
+        return 'Getting the video ready';
+      case '/api/probe':
+        return 'Testing the address';
+      case '/api/feed':
+        // the home screen's prefetch / warm-up requests answer at once and are nobody's wait
+        return b.prefetch || b.warm ? undefined : 'Loading videos';
+      case '/api/search':
+        return `Searching for "${short(b.q)}"`;
+      case '/api/profile':
+        return `Loading the videos of @${short(b.user)}`;
+      case '/api/follow':
+        return `${b.follow === false ? 'Unfollowing' : 'Following'} @${short(b.user)}`;
+      case '/api/comments':
+        return 'Loading the comments';
+      case '/api/inbox/open':
+        return 'Opening the conversation';
+      case '/api/inbox/send':
+        return 'Sending your message';
+      case '/api/session/login':
+        return 'Starting the sign-in';
+      case '/api/session/logout':
+        return 'Signing out';
+      case '/api/session/cancel':
+        return 'Cancelling the sign-in';
+      case '/api/session/input':
+        return 'Passing your input to the sign-in page';
+      case '/api/download/probe':
+        return 'Looking at the link for its video files';
+      case '/api/download/start':
+        return 'Starting the download';
+      case '/api/library':
+        return 'Saving to the library';
+      case '/api/library/import':
+        return 'Starting the download to the library';
+      case '/api/livetv/providers':
+        return 'Adding the provider (the server reads its channel list)';
+      case '/api/livetv/providers/test':
+        return 'Testing the provider';
+      case '/api/livetv/tune':
+        return 'Opening the channel';
+    }
+    if (/^\/api\/library\/entries\/[^/]+\/refresh$/.test(p)) return "Refreshing the video's details";
+    if (/^\/api\/library\/entries\/[^/]+\/import$/.test(p)) return 'Starting the download to the library';
+    if (/^\/api\/library\/entries\/[^/]+(\/delete|\/file\/delete)?$/.test(p)) return 'Updating the library';
+    if (/^\/api\/livetv\/providers\/[^/]+\/refresh$/.test(p)) return 'Starting a refresh of the channel list';
+    if (/^\/api\/livetv\/providers\/[^/]+(\/delete)?$/.test(p)) return 'Saving the provider';
+    return undefined;
+  }
+  if (p === '/api/inbox') return 'Loading your messages';
+  if (p === '/api/livetv') return 'Loading Live TV';
+  if (p === '/api/livetv/channels') return 'Loading the channel list';
+  if (/^\/api\/livetv\/guide\/[^/]+$/.test(p)) return "Loading the channel's guide";
+  return undefined;
+}
+
 /** 401 = the site password cookie is missing or expired: back to the server's login page. */
 /** The site password cookie is gone: the server's own 401 names its login page. A platform's "not signed in" 401 does not. */
 function toLoginOn401(res: Response, body?: unknown): void {
@@ -81,9 +152,14 @@ function requestAbort(timeoutMs?: number, signal?: AbortSignal): { ctl: AbortCon
 const abortedError = (signal: AbortSignal | undefined, timeoutMs: number | undefined): ApiError =>
   signal?.aborted ? new ApiError('Cancelled', CANCELLED) : new ApiError(`no answer from the server in ${Math.round((timeoutMs || 0) / 1000)} s`, 504);
 
-/** `timeoutMs`: give up (ApiError 504) when the answer takes longer, the body included. `signal`: the caller's cancel (ApiError 499). */
-async function post<T>(path: string, body: unknown, timeoutMs?: number, signal?: AbortSignal): Promise<T> {
+/**
+ * `timeoutMs`: give up (ApiError 504) when the answer takes longer, the body included. `signal`: the caller's cancel (ApiError 499).
+ * `label`: the wait in the viewer's words for the status strip, instead of the route's own (see waitLabel).
+ */
+async function post<T>(path: string, body: unknown, timeoutMs?: number, signal?: AbortSignal, label?: WaitName): Promise<T> {
   const ab = requestAbort(timeoutMs, signal);
+  const wait = label ?? waitLabel('POST', path, body);
+  const waited = wait ? beginWait(wait) : undefined;
   let res: Response;
   let text: string;
   try {
@@ -94,6 +170,7 @@ async function post<T>(path: string, body: unknown, timeoutMs?: number, signal?:
     throw e;
   } finally {
     ab?.done();
+    waited?.();
   }
   let json: unknown;
   try {
@@ -112,17 +189,21 @@ async function post<T>(path: string, body: unknown, timeoutMs?: number, signal?:
 /** GET JSON (same conventions as post: the site's 401 goes to the login page, errors carry the server's message). */
 async function getJson<T>(path: string, timeoutMs?: number, signal?: AbortSignal): Promise<T> {
   const ab = requestAbort(timeoutMs, signal);
+  const wait = waitLabel('GET', path);
+  const waited = wait ? beginWait(wait) : undefined;
   let res: Response;
+  let json: unknown;
   try {
     res = await fetch(apiUrl(path), { mode: 'cors', credentials: 'same-origin', cache: 'no-store', signal: ab?.ctl.signal });
+    json = await res.json().catch(() => undefined);
   } catch (e) {
     if (ab?.ctl.signal.aborted) throw abortedError(signal, timeoutMs);
     throw e;
   } finally {
     ab?.done();
+    waited?.();
   }
   toLoginOn401(res);
-  const json = await res.json().catch(() => undefined);
   if (!res.ok) throw new ApiError((json as { error?: string })?.error || `${res.status} ${res.statusText}`, res.status, json);
   return json as T;
 }
@@ -144,10 +225,11 @@ export const api = {
     if (!res.ok) throw new ApiError(`health ${res.status}`, res.status);
     return res.json();
   },
-  resolve: (req: ResolveRequest, timeoutMs?: number): Promise<ResolveResponse> => post('/api/resolve', req, timeoutMs),
+  /** `label`: the wait in the viewer's words for the status strip (default "Getting the video ready") */
+  resolve: (req: ResolveRequest, timeoutMs?: number, label?: WaitName): Promise<ResolveResponse> => post('/api/resolve', req, timeoutMs, undefined, label),
   probe: (url: string): Promise<ServerProbe> => post('/api/probe', { url, origin: location.origin }),
   report: (req: ReportRequest): Promise<void> => post('/api/report', req).then(() => undefined, () => undefined),
-  feed: (req: FeedRequest): Promise<FeedResponse> => post('/api/feed', req),
+  feed: (req: FeedRequest, label?: WaitName): Promise<FeedResponse> => post('/api/feed', req, undefined, undefined, label),
   /** The step a slow feed fill is on (shown on the loading screen); no text when nothing runs or on any failure. */
   feedProgress: async (platform: Platform): Promise<FeedProgress> => {
     try {
@@ -159,10 +241,16 @@ export const api = {
   },
   /** `badge`: the home screen's sign-in badge - only what the server knows, no check started for it. */
   session: async (platform: Platform = 'tiktok', recheck = false, badge = false): Promise<SessionStatus> => {
-    const res = await fetch(apiUrl(`/api/session?platform=${platform}${recheck ? '&recheck=1' : ''}${badge ? '&badge=1' : ''}`), { mode: 'cors', credentials: 'same-origin' });
-    toLoginOn401(res);
-    if (!res.ok) throw new ApiError(`session ${res.status}`, res.status);
-    return res.json();
+    // a recheck asks the platform (through the server's browser on TikTok): that one can take a while
+    const waited = recheck ? beginWait('Checking the sign-in') : undefined;
+    try {
+      const res = await fetch(apiUrl(`/api/session?platform=${platform}${recheck ? '&recheck=1' : ''}${badge ? '&badge=1' : ''}`), { mode: 'cors', credentials: 'same-origin' });
+      toLoginOn401(res);
+      if (!res.ok) throw new ApiError(`session ${res.status}`, res.status);
+      return await res.json();
+    } finally {
+      waited?.();
+    }
   },
   sessionLogin: (mode: LoginMode, platform: Platform = 'tiktok', cookies?: string): Promise<SessionStatus> => post('/api/session/login', { mode, platform, cookies }),
   sessionLogout: (platform: Platform = 'tiktok'): Promise<SessionStatus> => post('/api/session/logout', { platform }),
@@ -220,6 +308,7 @@ export const api = {
   libraryOptions: async (id: string, timeoutMs = 120_000): Promise<LibraryOptionsResponse> => {
     const ctl = new AbortController();
     const timer = window.setTimeout(() => ctl.abort(), timeoutMs);
+    const waited = beginWait('Looking up the qualities on offer');
     let res: Response;
     try {
       res = await fetch(apiUrl(`/api/library/entries/${id}/options`), { mode: 'cors', credentials: 'same-origin', cache: 'no-store', signal: ctl.signal });
@@ -228,6 +317,7 @@ export const api = {
       throw e;
     } finally {
       window.clearTimeout(timer);
+      waited();
     }
     toLoginOn401(res);
     const json = await res.json().catch(() => undefined);

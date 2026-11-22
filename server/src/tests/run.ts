@@ -13,6 +13,7 @@
  */
 import { buildServer } from '../index';
 import { mirrorChecks } from './mirror';
+import { activityChecks } from './activity';
 import { hostAllowed, ipIsPrivate, assertSafeUpstream } from '../ssrf';
 import { parseTikTokUrl } from '../tiktok';
 import { isTikTokAd, itemToFeedItem } from '../feed';
@@ -1765,6 +1766,7 @@ async function homeTopUpChecks(): Promise<void> {
   await offline();
   await youtubeSearchOfflineChecks();
   await youtubePlayerOfflineChecks();
+  await activityChecks(check);
   await youtubeTvOfflineChecks();
   await inboxCancelChecks();
   await homeTopUpChecks();

@@ -11,6 +11,7 @@
  *    is reported and "Download again" offered, never shown as present.
  */
 import type { LibraryEntry, LibraryOption, LibraryOptionsResponse, LibraryState } from '../../../shared/types';
+import '../activity';
 import { api, ApiError, apiUrl } from '../api';
 import { startAppUpdates } from '../appUpdate';
 import { PLATFORMS, rememberApp } from '../platforms';

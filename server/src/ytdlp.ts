@@ -19,6 +19,7 @@ import * as readline from 'node:readline';
 import type { MediaFormat, ResolveResponse } from '../../shared/types';
 import { config, findUp } from './config';
 import { defaultExpiry, registerMedia } from './mediaStore';
+import { say, sayer } from './activity';
 
 interface Candidate {
   cmd: string;
@@ -192,6 +193,28 @@ interface Pending {
   timer: NodeJS.Timeout;
   /** the extraction's limit (>= the caller's): restarts the daemon */
   killTimer: NodeJS.Timeout;
+  /** yt-dlp's own messages while it works ("[youtube] <id>: Downloading webpage") */
+  onProgress?: (text: string) => void;
+}
+
+/**
+ * One of yt-dlp's screen messages as a step for the viewer who is waiting: the "[youtube] <id>: "
+ * prefix goes, and the steps of a video lookup are said in plain words.
+ */
+export function ytdlpStep(raw: string): string {
+  const t = raw.replace(/^\[[\w:.-]+\]\s*/, '').replace(/^(?:\[[\w:.-]+\]\s*)?[\w-]{6,}:\s+/, '');
+  if (/^Extracting URL/i.test(t)) return 'yt-dlp: starting on the address';
+  if (/^Downloading webpage/i.test(t)) return "yt-dlp: reading the video's page on YouTube";
+  let m = /^Downloading (.+?) player API JSON/i.exec(t);
+  if (m) return `yt-dlp: asking YouTube for the video's files (as its ${m[1]} app)`;
+  m = /^Downloading (.+?) client config/i.exec(t);
+  if (m) return `yt-dlp: reading the settings of YouTube's ${m[1]} app`;
+  if (/^Downloading player /i.test(t)) return "yt-dlp: downloading YouTube's player script";
+  if (/^Downloading (iframe API JS|initial data API JSON)/i.test(t)) return "yt-dlp: reading YouTube's page data";
+  if (/Solving JS challenges using (\w+)/i.test(raw)) return `yt-dlp: running YouTube's player script with ${/using (\w+)/i.exec(raw)![1].replace(/^./, (c) => c.toUpperCase())} to unlock the video addresses`;
+  if (/^Downloading API JSON|^Downloading .*page \d+|^page \d+/i.test(t)) return `yt-dlp: reading the list from YouTube (${t.replace(/^Downloading /i, '')})`;
+  if (/^Downloading m3u8|^Downloading MPD/i.test(t)) return 'yt-dlp: reading the stream manifest';
+  return `yt-dlp: ${t.slice(0, 120)}`;
 }
 
 /**
@@ -250,7 +273,7 @@ class Daemon {
       });
       const rl = readline.createInterface({ input: proc.stdout! });
       rl.on('line', (line) => {
-        let msg: { id: number; ok: boolean; info?: unknown; error?: string; version?: string; direct_client?: unknown };
+        let msg: { id: number; ok: boolean; info?: unknown; error?: string; version?: string; direct_client?: unknown; js_runtime?: unknown; progress?: unknown };
         try {
           msg = JSON.parse(line);
         } catch {
@@ -261,7 +284,8 @@ class Daemon {
           if (msg.ok) {
             this.version = msg.version || '';
             directClient = msg.direct_client ?? undefined;
-            this.onLog(`daemon ready (${this.python.cmd}, yt-dlp ${this.version})`);
+            jsRuntime = typeof msg.js_runtime === 'string' && msg.js_runtime ? msg.js_runtime : undefined;
+            this.onLog(`daemon ready (${this.python.cmd}, yt-dlp ${this.version}${jsRuntime ? `, JS runtime ${jsRuntime}` : ', no JS runtime'})`);
             resolve(true);
           } else {
             this.onLog(`daemon could not start: ${msg.error}`);
@@ -272,6 +296,10 @@ class Daemon {
         }
         const p = this.pending;
         if (!p || p.id !== msg.id) return;
+        if (typeof msg.progress === 'string') {
+          p.onProgress?.(msg.progress);
+          return;
+        }
         clearTimeout(p.timer);
         clearTimeout(p.killTimer);
         this.pending = undefined;
@@ -289,7 +317,7 @@ class Daemon {
    * promise rejects after `timeoutMs`; the extraction itself is stopped (the daemon restarted)
    * after max(timeoutMs, STUCK_MS). `limitMs` is the caller's whole limit, for the message.
    */
-  request(req: InfoRequest, timeoutMs: number, limitMs = timeoutMs): Promise<any> {
+  request(req: InfoRequest, timeoutMs: number, limitMs = timeoutMs, onProgress?: (text: string) => void): Promise<any> {
     return new Promise((resolve, reject) => {
       if (!this.proc || this.dead) return reject(new Error('yt-dlp daemon is not running'));
       if (this.pending) return reject(new Error('yt-dlp daemon is busy'));
@@ -305,7 +333,7 @@ class Daemon {
         this.onLog(`daemon request ${id} still running after ${runMs} ms; restarting the daemon`);
         this.die(tooSlow());
       }, runMs);
-      this.pending = { id, resolve, reject, timer, killTimer };
+      this.pending = { id, resolve, reject, timer, killTimer, onProgress };
       const body: Record<string, unknown> = { id, url: req.url, flat: Boolean(req.flat), noplaylist: Boolean(req.noplaylist) };
       if (req.playlistItems) body.playlist_items = req.playlistItems;
       if (req.cookieFile) body.cookiefile = req.cookieFile;
@@ -357,6 +385,9 @@ let directClient: unknown;
  * that yt-dlp has no such client. youtubePlayer.ts validates it before use.
  */
 export const ytdlpDirectClient = (): unknown => directClient;
+/** The JavaScript runtime (Deno) the newest daemon found on its PATH: with it yt-dlp can run YouTube's player script. */
+let jsRuntime: string | undefined;
+export const ytdlpJsRuntime = (): string | undefined => jsRuntime;
 let daemonPython: { cmd: string; args: string[] } | null | undefined;
 let daemonProbe: Promise<void> | undefined;
 const waiters: (() => void)[] = [];
@@ -401,23 +432,26 @@ async function acquire(deadline: number): Promise<Daemon> {
     }
     if (Date.now() >= deadline) throw busyError(Date.now() - t0);
     if (pool.length < DAEMONS) {
+      say(`yt-dlp: starting ${pool.length ? 'another' : 'its'} helper process (Python loading yt-dlp: 1 s on a PC, up to 20 s on the small server)`);
       const d = new Daemon(daemonPython!, daemonLog);
       d.claimed = true;
       pool.push(d);
       if (await d.ready) return d;
       continue;
     }
+    say(`yt-dlp: ${pool.length === 1 ? 'its helper is' : `all ${pool.length} helpers are`} busy with other lookups; waiting for a turn (${Math.round((Date.now() - t0) / 1000)} s so far)`);
     await waitInLine(waiters, deadline - Date.now());
   }
 }
 
 
-export const daemonStatus = (): { enabled: boolean; python?: string; running: number; busy: number; version?: string } => ({
+export const daemonStatus = (): { enabled: boolean; python?: string; running: number; busy: number; version?: string; jsRuntime?: string } => ({
   enabled: Boolean(daemonPython),
   python: daemonPython?.cmd,
   running: pool.filter((d) => d.alive).length,
   busy: pool.filter((d) => d.busy).length,
   version: pool[0]?.version,
+  jsRuntime,
 });
 
 /**
@@ -428,12 +462,16 @@ export const daemonStatus = (): { enabled: boolean; python?: string; running: nu
  */
 export async function ytdlpInfo(req: InfoRequest, timeoutMs = 150_000): Promise<any> {
   const deadline = Date.now() + timeoutMs;
+  if (daemonPython === undefined) say('yt-dlp: starting its helper process for the first time (Python loading yt-dlp: 1 s on a PC, up to 20 s on the small server)');
   await probeDaemon();
   if (daemonPython) {
     // the daemon frees itself when the extraction ends (which may be after this caller's deadline)
     const d = await acquire(deadline);
-    return d.request(req, Math.max(1, deadline - Date.now()), timeoutMs);
+    const step = sayer();
+    step(`yt-dlp: asked${req.cookieFile ? ' (with the signed-in cookies)' : ''}; waiting for its first step`);
+    return d.request(req, Math.max(1, deadline - Date.now()), timeoutMs, (text) => step(ytdlpStep(text)));
   }
+  say('yt-dlp: running its command line (no warm helper on this server: every lookup pays the Python start)');
   const args = req.flat ? ['--flat-playlist', '-J'] : ['-j'];
   if (req.noplaylist) args.push('--no-playlist');
   if (req.playlistItems) args.push('--playlist-items', req.playlistItems);

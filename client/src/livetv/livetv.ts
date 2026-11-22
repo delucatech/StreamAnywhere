@@ -15,6 +15,7 @@
 import type { LiveTvChannel, LiveTvCodec, LiveTvPrefs, LiveTvPreset, LiveTvProgramme, LiveTvProvider, LiveTvProviderInput, LiveTvSource, LiveTvState, LiveTvTry } from '../../../shared/types';
 import { HEALTH_AMEND_MS, pushTry, rateStream, ratingRank, type StreamRating } from '../../../shared/livetvHealth';
 import { codecBadge, codecLabel, decodes, detectDecoders, knownDecoders } from './codecs';
+import '../activity';
 import { api, ApiError } from '../api';
 import { startAppUpdates } from '../appUpdate';
 import { rememberApp } from '../platforms';

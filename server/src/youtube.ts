@@ -19,9 +19,12 @@
  */
 import type { FeedItem, MediaFormat, ResolveResponse, SearchResponse, YouTubeCategory } from '../../shared/types';
 import { YOUTUBE_CATEGORIES } from '../../shared/types';
+import { config } from './config';
+import { openUpstream } from './http';
 import { defaultExpiry, registerMedia } from './mediaStore';
-import { ytdlpInfo } from './ytdlp';
-import { directPlayerEnabled, notePlayerDirect, notePlayerFallback, playerInfoDirect } from './youtubePlayer';
+import { ytdlpInfo, ytdlpJsRuntime } from './ytdlp';
+import { say, track } from './activity';
+import { DirectPlayerError, directPlayerEnabled, notePlayerDirect, notePlayerFallback, playerClient, playerInfoDirect } from './youtubePlayer';
 import { directSearchEnabled, noteDirect, noteFallback, searchDirect } from './youtubeSearch';
 import { tvHomeFeed } from './youtubeTv';
 
@@ -36,7 +39,17 @@ import { tvHomeFeed } from './youtubeTv';
  */
 const LIST_TIMEOUT_MS = 150_000;
 const RESOLVE_TIMEOUT_MS = 30_000;
-const LOOKUP_TIMEOUT_MS = 75_000;
+const LOOKUP_TIMEOUT_MS = 120_000;
+/**
+ * yt-dlp lookups per video. The addresses of the clients that need YouTube's player script (the
+ * route for "made for kids" videos, with Deno) are refused by YouTube's file server for part of
+ * the lookups - HTTP 403 on every byte range, the same address always, another lookup's address
+ * often fine (measured 2026-11-22: from a third to most of them). So an address is tried before
+ * it is handed out, and a refused one is looked up again.
+ */
+const YTDLP_TRIES = 3;
+/** One byte range of a file is asked for at most this long when its address is checked */
+const CHECK_TIMEOUT_MS = 6_000;
 /** The direct request gives way to yt-dlp after this long (it answers in 0.2 s when it answers). */
 const DIRECT_TIMEOUT_MS = 8_000;
 /** The cookies retry is skipped when less than this is left of LOOKUP_TIMEOUT_MS. */
@@ -122,6 +135,17 @@ export function entryToFeedItem(e: any): FeedItem | undefined {
 
 const PAGE = 20;
 
+/** A listing target in a few words for the status line ("search tesla", "hashtag/funny/shorts", "@handle/videos"). */
+function listName(target: string): string {
+  const s = /^ytsearch\d+:(.*)$/.exec(target);
+  if (s) return `search "${s[1].slice(0, 40)}"`;
+  try {
+    return decodeURIComponent(new URL(target).pathname).replace(/^\//, '').slice(0, 60) || target;
+  } catch {
+    return target.slice(0, 60);
+  }
+}
+
 /**
  * A page of a flat listing. `target` is a yt-dlp URL or a `ytsearchN:` spec; yt-dlp walks the
  * continuation pages until it has `offset + count` entries (page 2 costs about a second more).
@@ -129,6 +153,7 @@ const PAGE = 20;
 async function listFlat(target: (n: number) => string, offset: number, count: number, log: (m: string) => void, cookieFile?: string): Promise<{ items: FeedItem[]; hasMore: boolean }> {
   const want = offset + count;
   const t0 = Date.now();
+  say(`asking yt-dlp for the list (${listName(target(want))}, entries ${offset + 1}-${want}): usually 3-4 s, longer on a busy server`);
   const json = await ytdlpInfo({ url: target(want), flat: true, playlistItems: `${offset + 1}-${want}`, cookieFile }, LIST_TIMEOUT_MS);
   const entries: any[] = Array.isArray(json?.entries) ? json.entries : [];
   const items: FeedItem[] = [];
@@ -149,6 +174,7 @@ export async function searchYouTube(q: string, offset: number, log: (m: string) 
   const t0 = Date.now();
   if (directSearchEnabled()) {
     try {
+      say(`asking YouTube's search directly${offset ? ' for the next page' : ''} (under a second when it answers)`);
       const r = await searchDirect(q, offset, PAGE, log);
       const items: FeedItem[] = [];
       for (const e of r.entries) {
@@ -162,6 +188,7 @@ export async function searchYouTube(q: string, offset: number, log: (m: string) 
       const reason = (e as Error).message || String(e);
       noteFallback(reason);
       log(`search "${q}" [${offset}]: direct search failed after ${Date.now() - t0} ms (${reason.slice(0, 160)}); asking yt-dlp`);
+      say(`the direct search failed (${reason.slice(0, 80)}): asking yt-dlp instead`);
     }
   }
   const r = await listFlat((n) => `ytsearch${n}:${q}`, offset, PAGE, log);
@@ -190,6 +217,7 @@ export async function recommendedYouTube(offset: number, count: number, cookieFi
  */
 export async function recommendedYouTubeTv(count: number, log: (m: string) => void): Promise<{ items: FeedItem[]; hasMore: boolean }> {
   const t0 = Date.now();
+  say("reading your YouTube home feed through the code sign-in (YouTube's TV app API)");
   const r = await tvHomeFeed(count, log);
   const items: FeedItem[] = [];
   for (const e of r.entries) {
@@ -265,8 +293,10 @@ export async function resolveYouTube(inputUrl: string, log: (m: string) => void,
   const hit = cache.get(id);
   if (hit && Date.now() - hit.at < CACHE_MS) return hit.value;
   let p = inFlight.get(id);
-  if (!p) {
-    p = resolveUncached(id, inputUrl, log, cookieFile).finally(() => inFlight.delete(id));
+  if (p) say('this video is already being looked up for an earlier request: waiting for that answer');
+  else {
+    // An activity of its own: the lookup goes on (and stays listed) after this caller's wait is over.
+    p = track(`Looking up YouTube video ${id}`, { platform: 'youtube' }, () => resolveUncached(id, inputUrl, log, cookieFile)).finally(() => inFlight.delete(id));
     // a lookup that fails after every caller stopped waiting is nobody's unhandled rejection
     p.catch(() => undefined);
     inFlight.set(id, p);
@@ -282,28 +312,57 @@ const h264Files = (formats: any[]): any[] => formats.filter((f) => f.url && /^av
  * video marked "made for kids" (measured 2026-11-22; yt-dlp names the same limit). Region blocks
  * get the same words, so the note says what is known, not what the video is.
  */
-const KIDS_NOTE = ' (YouTube answers this for videos marked "made for kids", which this server cannot play yet)';
+const KIDS_NOTE = ' (YouTube answers this for videos marked "made for kids": playing them needs Deno and the yt-dlp-ejs package on the server, see deploy/gcp/setup-vm.sh)';
 
 function classify(msg: string): YouTubeError {
-  if (/This video is not available\s*$/i.test(msg)) return new YouTubeError(msg + KIDS_NOTE, 404);
+  // With a JS runtime yt-dlp has tried the clients that do play those videos: the words are then YouTube's whole answer.
+  if (/This video is not available\s*$/i.test(msg) && !ytdlpJsRuntime()) return new YouTubeError(msg + KIDS_NOTE, 404);
   if (/private|unavailable|not available|removed|does not exist|age/i.test(msg)) return new YouTubeError(msg, 404);
   if (/sign in|bot|captcha/i.test(msg)) return new YouTubeError(`YouTube refused the request from this server: ${msg}`, 503);
   return new YouTubeError(msg);
 }
 
-/** The video's info through yt-dlp: as a guest, then (refused, and time left) with the account's cookies. */
-async function infoFromYtDlp(id: string, deadline: number, log: (m: string) => void, cookieFile?: string): Promise<any> {
+/**
+ * Whether YouTube's file server refuses this format's address outright (403 for its first two
+ * bytes). Anything else - an answer, a timeout, a network error - is "not refused": the player
+ * finds out, as before.
+ */
+async function fileRefused(f: any): Promise<boolean> {
+  try {
+    const headers: Record<string, string> = { range: 'bytes=0-1' };
+    if (f.http_headers?.['User-Agent']) headers['user-agent'] = f.http_headers['User-Agent'];
+    const { res, status } = await openUpstream(f.url, { allowlist: config.proxyAllowedHosts, maxRedirects: 3, headers, timeoutMs: CHECK_TIMEOUT_MS });
+    res.destroy();
+    return status === 403;
+  } catch {
+    return false;
+  }
+}
+/** Tests: replaces the address check (undefined restores it). */
+let refusedCheck: (f: any) => Promise<boolean> = fileRefused;
+export function setYouTubeFileCheck(check: ((f: any) => Promise<boolean>) | undefined): void {
+  refusedCheck = check || fileRefused;
+}
+
+/**
+ * The video's info through yt-dlp: as a guest, then (refused, and time left) with the account's cookies.
+ * `skipClient`: a player client that already said it has no stream for this video (the direct
+ * lookup's); with a JS runtime yt-dlp has other clients and need not ask that one again.
+ */
+async function infoFromYtDlp(id: string, deadline: number, log: (m: string) => void, cookieFile?: string, skipClient?: string): Promise<any> {
   const t0 = Date.now();
   const url = `https://www.youtube.com/watch?v=${id}`;
+  const extractorArgs = skipClient && ytdlpJsRuntime() ? { youtube: { ...VIDEO_EXTRACTOR_ARGS.youtube, player_client: ['default', `-${skipClient}`] } } : VIDEO_EXTRACTOR_ARGS;
   try {
-    return await ytdlpInfo({ url, noplaylist: true, extractorArgs: VIDEO_EXTRACTOR_ARGS }, Math.max(1, deadline - t0));
+    return await ytdlpInfo({ url, noplaylist: true, extractorArgs }, Math.max(1, deadline - t0));
   } catch (e) {
     const guestErr = classify((e as Error).message);
     log(`youtube ${id}: guest extraction failed after ${Date.now() - t0} ms (${guestErr.message.slice(0, 120)})`);
     if (!cookieFile || deadline - Date.now() < RETRY_MIN_MS) throw guestErr;
     log(`youtube ${id}: retrying with the account's cookies`);
+    say(`YouTube refused the guest request (${guestErr.message.slice(0, 80)}): trying again with your signed-in cookies`);
     try {
-      return await ytdlpInfo({ url, noplaylist: true, cookieFile, extractorArgs: VIDEO_EXTRACTOR_ARGS }, deadline - Date.now());
+      return await ytdlpInfo({ url, noplaylist: true, cookieFile, extractorArgs }, deadline - Date.now());
     } catch (e2) {
       throw classify((e2 as Error).message);
     }
@@ -316,6 +375,8 @@ async function resolveUncached(id: string, inputUrl: string, log: (m: string) =>
   const attempts: ResolveResponse['attempts'] = [];
   let info: any;
   let how = '';
+  /** The direct lookup's client, when YouTube told it there is no stream for it (made for kids, age gate, region) */
+  let unplayableFor: string | undefined;
   if (directPlayerEnabled()) {
     try {
       const d = await within(playerInfoDirect(id, log), DIRECT_TIMEOUT_MS, () => new Error(`no answer in ${DIRECT_TIMEOUT_MS / 1000} s`));
@@ -326,18 +387,47 @@ async function resolveUncached(id: string, inputUrl: string, log: (m: string) =>
       attempts.push({ resolver: 'native', ok: true, elapsedMs: Date.now() - t0 });
     } catch (e) {
       const reason = (e as Error).message || String(e);
+      if (e instanceof DirectPlayerError && e.kind === 'unplayable') unplayableFor = playerClient().name;
       notePlayerFallback(`${id}: ${reason}`);
       attempts.push({ resolver: 'native', ok: false, error: reason, elapsedMs: Date.now() - t0 });
       log(`youtube ${id}: the direct lookup failed after ${Date.now() - t0} ms (${reason.slice(0, 160)}); asking yt-dlp`);
+      const js = ytdlpJsRuntime();
+      say(
+        unplayableFor
+          ? js
+            ? `YouTube gives its ${unplayableFor} app no stream for this video ("${reason.slice(0, 60)}"): asking yt-dlp, which runs YouTube's player script with Deno (the slow route: 10-40 s)`
+            : `YouTube gives its ${unplayableFor} app no stream for this video ("${reason.slice(0, 60)}"): asking yt-dlp (no JS runtime on this server, so it will likely get the same answer)`
+          : `the direct lookup failed (${reason.slice(0, 80)}): asking yt-dlp instead (the slow route: 2 s on a PC, 7-25 s on the small server)`,
+      );
+    }
+  } else say('direct lookups are switched off (YOUTUBE_PLAYER=ytdlp): asking yt-dlp');
+  if (!info) {
+    for (let attempt = 1; ; attempt++) {
+      const t1 = Date.now();
+      info = await infoFromYtDlp(id, deadline, log, cookieFile, unplayableFor);
+      // the file the player starts with (the highest H.264 one), asked for its first bytes
+      const first = h264Files(Array.isArray(info.formats) ? info.formats : []).sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+      if (first) say(`checking that YouTube's file server hands out the video (${String(first.format_id)} at ${new URL(first.url).hostname})`);
+      if (!first || !(await refusedCheck(first))) {
+        how = attempt > 1 ? `yt-dlp (lookup ${attempt}: the earlier addresses were refused)` : 'yt-dlp';
+        attempts.push({ resolver: 'ytdlp', ok: true, elapsedMs: Date.now() - t1 });
+        break;
+      }
+      const took = Date.now() - t1;
+      attempts.push({ resolver: 'ytdlp', ok: false, error: "YouTube's file server refused the addresses (HTTP 403)", elapsedMs: took });
+      log(`youtube ${id}: lookup ${attempt} of ${YTDLP_TRIES} gave addresses YouTube's file server refuses (403), ${took} ms`);
+      // another lookup needs about as long as this one took
+      if (attempt >= YTDLP_TRIES || deadline - Date.now() < took + RETRY_MIN_MS) {
+        throw new YouTubeError(
+          `YouTube gave addresses for this video that its own file server refuses (HTTP 403), on ${attempt} lookup${attempt === 1 ? '' : 's'} in a row. It does this to part of the requests for videos its simpler apps may not play ("made for kids" among them); opening the video again later often works`,
+          502,
+        );
+      }
+      say(`YouTube's file server refused the addresses it just gave out (HTTP 403): looking the video up again (lookup ${attempt + 1} of ${YTDLP_TRIES})`);
     }
   }
-  if (!info) {
-    const t1 = Date.now();
-    info = await infoFromYtDlp(id, deadline, log, cookieFile);
-    how = 'yt-dlp';
-    attempts.push({ resolver: 'ytdlp', ok: true, elapsedMs: Date.now() - t1 });
-  }
   const all: any[] = Array.isArray(info.formats) ? info.formats : [];
+  say(`YouTube answered with ${all.length} formats: picking the H.264 picture and AAC sound files`);
   const warnings: string[] = [];
   const videoOnly = h264Files(all);
   if (!videoOnly.length) throw new YouTubeError(`No H.264 video format up to ${MAX_HEIGHT}p for ${id} (${all.length} formats)`);
@@ -377,7 +467,7 @@ async function resolveUncached(id: string, inputUrl: string, log: (m: string) =>
   });
   const resp: ResolveResponse = {
     source: 'youtube',
-    resolver: how === 'yt-dlp' ? 'ytdlp' : 'native',
+    resolver: how.startsWith('yt-dlp') ? 'ytdlp' : 'native',
     id,
     inputUrl,
     canonicalUrl: `https://www.youtube.com/watch?v=${id}`,

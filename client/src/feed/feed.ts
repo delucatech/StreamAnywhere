@@ -41,9 +41,11 @@
  * the rest from the network. A sweep between videos makes room (see mediaCache.ts).
  */
 import type { FeedAuthor, FeedItem, FeedSource, FollowState, LibraryEntry, LoginMode, MediaFormat, SessionInputRequest, SessionStatus } from '../../../shared/types';
+import '../activity';
 import { api, ApiError, apiUrl } from '../api';
 import { startAppUpdates } from '../appUpdate';
 import { pressed } from '../busy';
+import { beginWait } from '../pending';
 import type { MediaPrefix } from '../media/demuxer';
 import { canSaveFiles, hasIndexedDb } from '../library/capabilities';
 import * as libdb from '../library/db';
@@ -1384,6 +1386,7 @@ function showLoading(title: string, detail: string, done = false): void {
   // centred on the video panel (on wide screens that is the middle column, not the whole window)
   const f = el.feed.getBoundingClientRect();
   const a = el.app.getBoundingClientRect();
+  placeStatusStrip();
   if (f.width > 0) {
     el.loading.style.setProperty('--feed-cx', `${f.left - a.left + f.width / 2}px`);
     el.loading.style.setProperty('--feed-cy', `${f.top - a.top + f.height / 2}px`);
@@ -1397,6 +1400,23 @@ function showLoading(title: string, detail: string, done = false): void {
   el.loadingTitle.textContent = title;
   el.loadingDetail.textContent = detail;
 }
+/**
+ * Where the status strip (activity.ts) sits on this page: on the video panel's left edge, under
+ * the top bar and the small loading card, as wide as the panel at most.
+ */
+function placeStatusStrip(): void {
+  // the video's own card where there is one (on wide screens the feed spans the page, the card is its middle column)
+  const card = state.entries[state.active]?.root.getBoundingClientRect();
+  const f = card && card.width > 0 ? card : el.feed.getBoundingClientRect();
+  if (f.width <= 0) return;
+  const s = document.documentElement.style;
+  s.setProperty('--sa-activity-left', `${Math.round(Math.max(0, f.left) + 8)}px`);
+  // a card that starts below the top bar (wide screens): in its top corner; a full-height one (phones): under the top bar and the loading card
+  s.setProperty('--sa-activity-top', `${Math.round(f.top >= 100 ? f.top + 8 : 114)}px`);
+  s.setProperty('--sa-activity-width', `${Math.round(Math.max(220, Math.min(f.width, window.innerWidth) - 16))}px`);
+}
+window.addEventListener('resize', placeStatusStrip);
+window.addEventListener('load', placeStatusStrip);
 /** The viewer has nothing more to watch until the next batch arrives. */
 const viewerWaiting = (): boolean => state.entries.length === 0 || state.wantNext || state.active >= state.entries.length - 1;
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
@@ -1786,7 +1806,11 @@ async function fetchBatch(): Promise<{ items: FeedItem[]; warnings: string[]; ha
   }
   // Nothing on screen: the server may answer with earlier videos rather than make the viewer wait.
   // With videos on screen (a saved feed, an earlier batch) it must not: those are the same videos.
-  const r = await api.feed({ platform: P.id, source: prefs.source, category: prefs.source === 'explore' ? prefs.category : undefined, count: BATCH, quick: state.entries.length === 0 });
+  const r = await api.feed(
+    { platform: P.id, source: prefs.source, category: prefs.source === 'explore' ? prefs.category : undefined, count: BATCH, quick: state.entries.length === 0 },
+    // on the status strip once the viewer is out of videos; until then the list beside the video says it
+    { label: `Loading ${P.name} videos`, quiet: () => !viewerWaiting() },
+  );
   return { items: r.items, warnings: r.warnings, hasMore: r.hasMore, stale: r.stale, note: r.note };
 }
 
@@ -2259,7 +2283,8 @@ function ensureFormats(entry: Entry): Promise<boolean> {
   if (entry.item.formats.length) return Promise.resolve(true);
   if (!entry.resolving) {
     entry.resolving = api
-      .resolve({ url: entry.item.canonicalUrl, probe: false }, RESOLVE_LIMIT_MS)
+      // on the status strip only while it is the video in view (an upcoming one holds nobody up)
+      .resolve({ url: entry.item.canonicalUrl, probe: false }, RESOLVE_LIMIT_MS, { label: `Getting the video ready (${P.name})`, quiet: () => activeEntry() !== entry })
       .then((r) => {
         entry.item.formats = r.formats.filter((f) => f.directUrl || f.proxyUrl);
         if (!entry.item.formats.length) throw new Error(r.warnings[0] || 'no playable format');
@@ -2511,6 +2536,21 @@ let waitTimer = 0;
 let waitEntry: Entry | undefined;
 let waitPhase = '';
 let waitSince = 0;
+/**
+ * The same wait on the status strip (activity.ts), which adds what the server is doing: while the
+ * video's bytes are awaited (the request for its address is on the strip already, from api.ts).
+ */
+let waitHold: (() => void) | undefined;
+let waitHoldPhase = '';
+function holdWait(phase: string): void {
+  const p = phase === 'resolve' ? '' : phase;
+  if (p === waitHoldPhase) return;
+  placeStatusStrip();
+  waitHold?.();
+  waitHold = undefined;
+  waitHoldPhase = p;
+  if (p) waitHold = beginWait(p === 'retry' ? 'Trying another connection for the video' : p === 'buffer' ? 'Buffering the video' : 'Loading the video');
+}
 function waitPhaseOf(e: Entry): string {
   if (!state.started || e.failed || state.userPaused || document.hidden || overlayOpen()) return '';
   if (e.resolving && !e.item.formats.length) return 'resolve';
@@ -2528,6 +2568,7 @@ function syncWait(): void {
   if (e !== waitEntry || !waitPhase) waitSince = Date.now();
   waitEntry = e;
   waitPhase = phase;
+  holdWait(e ? phase : '');
   if (!e || !phase) {
     e?.waitEl.classList.add('hidden');
     queueWait(e, '');

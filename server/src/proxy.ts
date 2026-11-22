@@ -19,6 +19,7 @@ import { config } from './config';
 import { openUpstream } from './http';
 import { getMedia, type MediaRecord } from './mediaStore';
 import { UpstreamRejectedError } from './ssrf';
+import { track } from './activity';
 
 const FORWARD_HEADERS = ['content-type', 'content-length', 'content-range', 'accept-ranges', 'etag', 'last-modified', 'cache-control'];
 const EXPOSE = 'Content-Length, Content-Range, Accept-Ranges, Content-Type, ETag, Last-Modified, X-Proxy-Upstream-Host, X-Proxy-Upstream-Status, X-Proxy-Redirects';
@@ -63,7 +64,8 @@ async function relayChunked(rec: MediaRecord, req: FastifyRequest, reply: Fastif
   const t0 = Date.now();
   let first;
   try {
-    first = await openChunk(rec, start, Math.min(start + CHUNK - 1, parsed?.end ?? Infinity));
+    // Listed while the source's server has not answered: the part of a video's start that is neither this server's nor the viewer's connection.
+    first = await track(`Video relay: waiting for ${hostOf(rec.url)} to send ${rec.label || 'the file'} (from byte ${start})`, {}, () => openChunk(rec, start, Math.min(start + CHUNK - 1, parsed?.end ?? Infinity)));
   } catch (e) {
     const err = e as Error;
     req.log.warn({ mediaId: rec.id, err: err.message }, 'proxy upstream open failed');
@@ -151,6 +153,15 @@ async function relayChunked(rec: MediaRecord, req: FastifyRequest, reply: Fastif
   return reply.code(parsed ? 206 : 200).headers(headers).send(out);
 }
 
+/** The host of a media URL, for the status line. */
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return 'the source';
+  }
+}
+
 /** `?dl=<name>` on a relay request: the browser saves the body as a file with that name (the library's "Save to device"). */
 function attachmentFor(req: FastifyRequest): string | undefined {
   const name = String((req.query as { dl?: unknown })?.dl || '').trim();
@@ -178,7 +189,7 @@ export function registerProxyRoutes(app: FastifyInstance): void {
     const t0 = Date.now();
     let up;
     try {
-      up = await openUpstream(rec.url, { allowlist: config.proxyAllowedHosts, maxRedirects: 5, headers: upstreamHeaders });
+      up = await track(`Video relay: waiting for ${hostOf(rec.url)} to send ${rec.label || 'the file'}${range ? ` (${range.replace('bytes=', 'bytes ')})` : ''}`, {}, () => openUpstream(rec.url, { allowlist: config.proxyAllowedHosts, maxRedirects: 5, headers: upstreamHeaders }));
     } catch (e) {
       const err = e as Error;
       const code = err instanceof UpstreamRejectedError ? 403 : 502;

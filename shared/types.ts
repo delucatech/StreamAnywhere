@@ -126,7 +126,8 @@ export interface HealthResponse {
   node: string;
   ytdlp: { available: boolean; version?: string; command?: string; error?: string };
   /** The warm yt-dlp Python processes (see server/scripts/ytdlp-daemon.py) */
-  ytdlpDaemon?: { enabled: boolean; python?: string; running: number; busy: number; version?: string };
+  /** `jsRuntime`: the Deno the yt-dlp helper found (yt-dlp runs YouTube's player script with it); missing without one */
+  ytdlpDaemon?: { enabled: boolean; python?: string; running: number; busy: number; version?: string; jsRuntime?: string };
   /** Merges YouTube's separate video and audio files (the Video Downloader) */
   ffmpeg?: { available: boolean; path?: string; version?: string; error?: string };
   /**
@@ -277,6 +278,45 @@ export interface FeedProgress {
   text?: string;
   /** How long the job has been on this step */
   forMs?: number;
+}
+
+/**
+ * One piece of work on the server (GET /api/activity): a request being answered or a job of the
+ * server's own, with the step it is on. See server/src/activity.ts.
+ */
+export interface ActivityEntry {
+  id: number;
+  /** What it is, e.g. "Getting a YouTube video ready" */
+  what: string;
+  /** The step it is on, e.g. "yt-dlp: reading the video's page on YouTube" */
+  step?: string;
+  /** How long it has been running (or ran, when ended) */
+  forMs: number;
+  /** How long it has been on this step */
+  stepForMs?: number;
+  platform?: Platform;
+  /** A job nobody is waiting for (a top-up, a refresh on a timer) */
+  background?: boolean;
+  /** Set once it is over (kept in the list for a few seconds): how it ended */
+  ended?: { agoMs: number; failed?: boolean; result?: string };
+}
+
+/** A recent line of the server's log, for the "what just happened" part of a waiting screen. */
+export interface ActivityLogLine {
+  agoMs: number;
+  /** 'warn' and 'error' lines are problems */
+  level: 'info' | 'warn' | 'error';
+  text: string;
+}
+
+/**
+ * GET /api/activity: what the server is doing right now, what it just logged, and how the machine
+ * is doing. Every page asks it while it waits for the server, so a wait says what it is waiting for.
+ */
+export interface ActivityResponse {
+  activities: ActivityEntry[];
+  recent: ActivityLogLine[];
+  server: ServerStatus;
 }
 
 // ---------------------------------------------------------------- search / profiles / follow / messages

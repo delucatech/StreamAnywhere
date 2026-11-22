@@ -1,4 +1,5 @@
 import type { FeedProgress, Platform } from '../../shared/types';
+import { say } from './activity';
 
 /**
  * What a slow platform job is doing right now (a browser starting, a page loading, video files being
@@ -8,8 +9,11 @@ import type { FeedProgress, Platform } from '../../shared/types';
 const steps = new Map<Platform, { text: string; at: number }>();
 
 export function setProgress(platform: Platform, text: string): void {
-  if (text) steps.set(platform, { text, at: Date.now() });
-  else steps.delete(platform);
+  if (text) {
+    steps.set(platform, { text, at: Date.now() });
+    // the same step for the request (or job) it belongs to: every page's status strip shows it
+    say(text.split('\n')[0]);
+  } else steps.delete(platform);
 }
 
 export const clearProgress = (platform: Platform): void => setProgress(platform, '');

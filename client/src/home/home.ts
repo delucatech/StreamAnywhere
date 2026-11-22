@@ -7,6 +7,7 @@
  * whose server-side sign-in is active (an orange one a sign-in in progress).
  */
 import type { Platform, SessionStatus } from '../../../shared/types';
+import '../activity';
 import { api } from '../api';
 import { startAppUpdates } from '../appUpdate';
 import { PLATFORMS, rememberApp, type PlatformDef, type ToolApp } from '../platforms';

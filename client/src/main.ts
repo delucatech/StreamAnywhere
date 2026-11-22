@@ -1,4 +1,5 @@
 import type { MediaFormat, ResolveResponse } from '../../shared/types';
+import './activity';
 import { pressed } from './busy';
 import { api, ApiError, apiUrl, getApiBase, setApiBase } from './api';
 import { testFetch } from './cors-test';

@@ -10,6 +10,10 @@
   --bottom-h: 56px;
   --safe-b: env(safe-area-inset-bottom, 0px);
   --safe-t: env(safe-area-inset-top, 0px);
+  /* the status strip (activity.ts): under the top bar and the small loading card, clear of the
+     caption and the bottom bar (feed.ts placeStatusStrip moves it onto the video panel) */
+  --sa-activity-top: calc(114px + var(--safe-t));
+  --sa-activity-bottom: auto;
   font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   color-scheme: dark;
 }
