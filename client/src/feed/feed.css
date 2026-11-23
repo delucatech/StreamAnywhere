@@ -10,10 +10,9 @@
   --bottom-h: 56px;
   --safe-b: env(safe-area-inset-bottom, 0px);
   --safe-t: env(safe-area-inset-top, 0px);
-  /* the status strip (activity.ts): under the top bar and the small loading card, clear of the
-     caption and the bottom bar (feed.ts placeStatusStrip moves it onto the video panel) */
-  --sa-activity-top: calc(114px + var(--safe-t));
-  --sa-activity-bottom: auto;
+  /* the status line (activity.ts): at the bottom of the video, above the caption and the bottom
+     bar (feed.ts placeStatusStrip puts it right above the caption of the video in view) */
+  --sa-activity-bottom: calc(var(--bottom-h) + var(--safe-b) + 96px);
   font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   color-scheme: dark;
 }
@@ -395,27 +394,18 @@ button {
   border-radius: 8px;
   font-size: 13px;
 }
-/* What the video in view is waiting for (feed.ts syncWait): loading, buffering, another connection */
+/* The video in view is waiting (feed.ts syncWait): a bare spinner; what it waits for is said by the
+   status line at the bottom of the video (activity.ts) */
 .item .wait {
   position: absolute;
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
   z-index: 2;
-  max-width: 80%;
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  padding: 14px 18px;
-  border-radius: 14px;
-  background: rgba(10, 12, 16, 0.72);
-  color: #fff;
-  font-size: 14px;
-  font-weight: 600;
-  line-height: 1.4;
-  text-align: center;
-  white-space: pre-line;
+  padding: 10px;
+  border-radius: 50%;
+  background: rgba(10, 12, 16, 0.45);
   pointer-events: none;
 }
 .item .wait .spinner {

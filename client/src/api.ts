@@ -1,4 +1,4 @@
-import type { LiveTvChannelGuideResponse, LiveTvChannelsResponse, LiveTvCodec, LiveTvGuideNowResponse, LiveTvHealthReport, LiveTvPrefs, LiveTvPrefsPatch, LiveTvPreset, LiveTvWindow, LiveTvProvider, LiveTvProviderInput, LiveTvState, LiveTvTestRequest, LiveTvTestResponse, LiveTvTuneResponse, LiveTvTuneStatus, ConversationResponse, DownloadJob, DownloadProbeResponse, DownloadSource, FeedProgress, LibraryCategory, LibraryEntry, LibraryEntryPatch, LibraryOptionsResponse, LibrarySaveHint, LibrarySaveResponse, LibraryState, FeedRequest, FeedResponse, FollowRequest, FollowResponse, HealthResponse, InboxCancelResponse, InboxResponse, CommentsRequest, CommentsResponse, LoginMode, Platform, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SendMessageResponse, ServerProbe, SessionInputRequest, SessionStatus } from '../../shared/types';
+import type { AvatarRequest, AvatarResponse, LiveTvChannelGuideResponse, LiveTvChannelsResponse, LiveTvCodec, LiveTvGuideNowResponse, LiveTvHealthReport, LiveTvPrefs, LiveTvPrefsPatch, LiveTvPreset, LiveTvWindow, LiveTvProvider, LiveTvProviderInput, LiveTvState, LiveTvTestRequest, LiveTvTestResponse, LiveTvTuneResponse, LiveTvTuneStatus, ConversationResponse, DownloadJob, DownloadProbeResponse, DownloadSource, FeedProgress, LibraryCategory, LibraryEntry, LibraryEntryPatch, LibraryOptionsResponse, LibrarySaveHint, LibrarySaveResponse, LibraryState, FeedRequest, FeedResponse, FollowRequest, FollowResponse, HealthResponse, InboxCancelResponse, InboxResponse, CommentsRequest, CommentsResponse, LoginMode, Platform, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SendMessageResponse, ServerProbe, SessionInputRequest, SessionStatus } from '../../shared/types';
 import { beginWait, type WaitName } from './pending';
 
 /**
@@ -62,7 +62,7 @@ function waitLabel(method: 'GET' | 'POST', path: string, body?: unknown): string
   if (method === 'POST') {
     switch (p) {
       case '/api/resolve':
-        return 'Getting the video ready';
+        return 'Getting video ready';
       case '/api/probe':
         return 'Testing the address';
       case '/api/feed':
@@ -117,6 +117,20 @@ function waitLabel(method: 'GET' | 'POST', path: string, body?: unknown): string
   return undefined;
 }
 
+/**
+ * The address of a video as both sides name it for the status line: the server's activity for a
+ * request carries the same text (activityRoutes.ts), so a wait finds its own lookup among several.
+ */
+export const waitRef = (url: unknown): string => String(url ?? '').slice(0, 300);
+
+/** A wait with the server's side of it named: the request's route and, for a video lookup, its address. */
+function routed(method: 'GET' | 'POST', path: string, body: unknown, name: WaitName | undefined): WaitName | undefined {
+  if (!name) return undefined;
+  const p = path.split('?')[0];
+  const url = p === '/api/resolve' ? (body as { url?: unknown } | undefined)?.url : undefined;
+  return { route: `${method} ${p}`, ref: url ? waitRef(url) : undefined, ...(typeof name === 'string' ? { label: name } : name) };
+}
+
 /** 401 = the site password cookie is missing or expired: back to the server's login page. */
 /** The site password cookie is gone: the server's own 401 names its login page. A platform's "not signed in" 401 does not. */
 function toLoginOn401(res: Response, body?: unknown): void {
@@ -158,7 +172,7 @@ const abortedError = (signal: AbortSignal | undefined, timeoutMs: number | undef
  */
 async function post<T>(path: string, body: unknown, timeoutMs?: number, signal?: AbortSignal, label?: WaitName): Promise<T> {
   const ab = requestAbort(timeoutMs, signal);
-  const wait = label ?? waitLabel('POST', path, body);
+  const wait = routed('POST', path, body, label ?? waitLabel('POST', path, body));
   const waited = wait ? beginWait(wait) : undefined;
   let res: Response;
   let text: string;
@@ -189,7 +203,7 @@ async function post<T>(path: string, body: unknown, timeoutMs?: number, signal?:
 /** GET JSON (same conventions as post: the site's 401 goes to the login page, errors carry the server's message). */
 async function getJson<T>(path: string, timeoutMs?: number, signal?: AbortSignal): Promise<T> {
   const ab = requestAbort(timeoutMs, signal);
-  const wait = waitLabel('GET', path);
+  const wait = routed('GET', path, undefined, waitLabel('GET', path));
   const waited = wait ? beginWait(wait) : undefined;
   let res: Response;
   let json: unknown;
@@ -259,6 +273,8 @@ export const api = {
   search: (req: SearchRequest): Promise<SearchResponse> => post('/api/search', req),
   profile: (req: ProfileRequest): Promise<ProfileResponse> => post('/api/profile', req),
   follow: (req: FollowRequest): Promise<FollowResponse> => post('/api/follow', req),
+  /** The profile picture of a video's channel (YouTube); answers within a few seconds, without one when there is none */
+  avatar: (req: AvatarRequest): Promise<AvatarResponse> => post('/api/avatar', req, 10_000),
   /** The conversation list; `signal` cancels the read (ApiError 499). Pair it with inboxCancel so the server's work stops as well. */
   inbox: (signal?: AbortSignal): Promise<InboxResponse> => getJson('/api/inbox', undefined, signal),
   /** Stops the server's messages reads in flight (the headless page's work), so the next request is not queued behind them. */

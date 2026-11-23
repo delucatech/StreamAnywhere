@@ -6,10 +6,10 @@
 import Fastify from 'fastify';
 import * as http from 'node:http';
 import type { ActivityResponse, ServerStatus } from '../../../shared/types';
-import { activitySnapshot, beginActivity, endActivity, inActivity, resetActivity, say, sayer, track, tracking } from '../activity';
+import { activitySnapshot, beginActivity, currentActivity, endActivity, followActivity, inActivity, resetActivity, say, sayer, track, tracking, type Act } from '../activity';
 import { describeRequest, registerActivity } from '../activityRoutes';
 import { logStream, recentLogLines } from '../logbuf';
-import { ytdlpStep } from '../ytdlp';
+import { ytdlpBrief, ytdlpStep } from '../ytdlp';
 
 type Check = (name: string, cond: boolean, detail?: unknown) => void;
 
@@ -107,10 +107,51 @@ export async function activityChecks(check: Check): Promise<void> {
   check('Live TV and library requests are named', d('POST', '/api/livetv/tune', { key: 'k' }) === 'Live TV: opening a channel' && /qualities/.test(d('GET', '/api/library/entries/abc/options') || '') && /refreshing a provider/.test(d('POST', '/api/livetv/providers/p1/refresh') || ''));
   check('a body that is not an object does not break the naming', d('POST', '/api/search', 'oops') === 'Searching TikTok for ""' && d('POST', '/api/resolve', null) !== undefined);
 
+  // ---- the one-line status: a step in a few words, a request found by its route, a later request following the work
+  resetActivity();
+  const req1 = beginActivity('Getting a YouTube video ready (abc)', { platform: 'youtube', route: 'POST /api/resolve', ref: 'https://www.youtube.com/watch?v=abc' });
+  const g3 = gate();
+  let lookup: Act | undefined;
+  let lookupSays: (t: string, b?: string) => void = () => undefined;
+  const work = inActivity(req1, () =>
+    track('Looking up YouTube video abc', {}, async () => {
+      lookup = currentActivity();
+      lookupSays = sayer();
+      say("yt-dlp: reading the video's page on YouTube", 'reading the video page');
+      await g3.wait;
+    }),
+  );
+  await tick();
+  list = activitySnapshot();
+  check('a request carries its route and what it is about', list.length === 1 && list[0].route === 'POST /api/resolve' && list[0].ref === 'https://www.youtube.com/watch?v=abc', list);
+  check('a step may name its short form, and the request gets both', list[0].step === "yt-dlp: reading the video's page on YouTube" && list[0].brief === 'reading the video page', list[0]);
+  say('outside');
+  const req2 = beginActivity('Getting a YouTube video ready (abc)', { platform: 'youtube', route: 'POST /api/resolve', ref: 'https://www.youtube.com/watch?v=abc' });
+  inActivity(req2, () => {
+    say('this video is already being looked up for an earlier request: waiting for that answer');
+    followActivity(lookup);
+  });
+  const second = (): { step?: string; brief?: string } => activitySnapshot().find((a) => a.id === req2.id) || {};
+  check('a second request for the same work takes over its current step', second().step === "yt-dlp: reading the video's page on YouTube" && second().brief === 'reading the video page', second());
+  lookupSays('yt-dlp: asking YouTube for the files (as its tv app)');
+  check('...and every later one (a step without a short form clears the old one)', second().step === 'yt-dlp: asking YouTube for the files (as its tv app)' && second().brief === undefined, second());
+  inActivity(req1, () => followActivity(lookup));
+  lookupSays('yt-dlp: one more step', 'one more');
+  check('following the work one already carries changes nothing (no loop)', activitySnapshot().find((a) => a.id === req1.id)?.brief === 'one more' && second().brief === 'one more', activitySnapshot());
+  endActivity(req2);
+  lookupSays('yt-dlp: after the second request ended');
+  check('a request that ended is no longer told', activitySnapshot().find((a) => a.id === req1.id)?.step === 'yt-dlp: after the second request ended' && !lookup?.followers?.size, lookup?.followers?.size);
+  g3.open();
+  await work;
+  endActivity(req1);
+  resetActivity();
+  check('a video request is told apart by its address', describeRequest('POST', '/api/resolve', { url: 'https://www.youtube.com/watch?v=Gh-XKNuvvC4' }, {})?.ref === 'https://www.youtube.com/watch?v=Gh-XKNuvvC4' && describeRequest('POST', '/api/search', { q: 'x' }, {})?.ref === undefined);
+  check("yt-dlp's steps have short forms", ytdlpBrief('[youtube] Gh-XKNuvvC4: Downloading webpage') === 'reading the video page' && ytdlpBrief('[youtube] [jsc:deno] Solving JS challenges using deno') === 'unlocking the video addresses' && ytdlpBrief('[youtube:tab] Extracting something new') === undefined);
+
   // ---- yt-dlp's own messages as steps
   check("yt-dlp: the watch page step is said in plain words", ytdlpStep('[youtube] Gh-XKNuvvC4: Downloading webpage') === "yt-dlp: reading the video's page on YouTube", ytdlpStep('[youtube] Gh-XKNuvvC4: Downloading webpage'));
   check('yt-dlp: a player request names the app it asks as', ytdlpStep('[youtube] Gh-XKNuvvC4: Downloading tv samsung player API JSON') === "yt-dlp: asking YouTube for the video's files (as its tv samsung app)");
-  check('yt-dlp: the JavaScript step names the runtime', ytdlpStep('[youtube] [jsc:deno] Solving JS challenges using deno') === "yt-dlp: running YouTube's player script with Deno to unlock the video addresses", ytdlpStep('[youtube] [jsc:deno] Solving JS challenges using deno'));
+  check('yt-dlp: the JavaScript step names the runtime', ytdlpStep('[youtube] [jsc:deno] Solving JS challenges using deno') === "yt-dlp: running YouTube's player script (with Deno, to unlock the video addresses)", ytdlpStep('[youtube] [jsc:deno] Solving JS challenges using deno'));
   check('yt-dlp: the player script download is named', ytdlpStep('[youtube] Gh-XKNuvvC4: Downloading player 6b3d0364-main') === "yt-dlp: downloading YouTube's player script");
   check('yt-dlp: an unknown message is passed on without its prefix', ytdlpStep('[youtube:tab] Extracting something new') === 'yt-dlp: Extracting something new', ytdlpStep('[youtube:tab] Extracting something new'));
 

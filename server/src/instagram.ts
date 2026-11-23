@@ -591,6 +591,18 @@ async function closeBrowser(why: string): Promise<void> {
   }
 }
 
+/**
+ * Closes the browser while no job runs in it or waits for it, so other work has the memory of the
+ * 1 GB VM (a slow YouTube lookup, see index.ts); the next Instagram job starts it again. Returns
+ * false and leaves it alone while it is starting or in use.
+ */
+export async function parkInstagramBrowser(why: string): Promise<boolean> {
+  if (!browser || launching || jobRunning || waiters.length) return false;
+  if (idleTimer) clearTimeout(idleTimer);
+  await closeBrowser(why);
+  return true;
+}
+
 /** Drops the browser so the next job starts one with the current saved cookies (after a sign-in or sign-out). */
 export async function resetInstagramBrowser(deleteProfile = false): Promise<void> {
   await acquire(PRI_ACCOUNT);

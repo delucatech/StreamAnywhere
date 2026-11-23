@@ -1,7 +1,40 @@
 import * as https from 'node:https';
+import * as net from 'node:net';
 import type { IncomingMessage } from 'node:http';
 import { config } from './config';
 import { assertSafeUpstream } from './ssrf';
+
+/**
+ * Node 20 connects to a host's addresses one after the other and gives each one 250 ms before it
+ * moves on ("happy eyeballs"). The VM has no IPv6 route, so a host's IPv4 address is the only one
+ * that can answer - and when the machine is busy the event loop itself is 200+ ms late (health:
+ * lagMs), the 250 ms pass before Node looks at the finished handshake, the IPv4 attempt is dropped,
+ * IPv6 fails at once, and the request dies with an AggregateError whose message is empty. Seen
+ * 2026-11-23 as 'proxy upstream open failed err ""' and, in the player, "HTTP 502 fetching media"
+ * - always while a headless browser or a yt-dlp lookup was running. Five seconds per address keeps
+ * the fallback and survives a busy moment. (Node 16 on the dev PC has neither the feature nor the
+ * setter.)
+ */
+const CONNECT_ATTEMPT_MS = 5000;
+try {
+  (net as { setDefaultAutoSelectFamilyAttemptTimeout?: (ms: number) => void }).setDefaultAutoSelectFamilyAttemptTimeout?.(CONNECT_ATTEMPT_MS);
+} catch {
+  /* an older Node: nothing to set */
+}
+
+/**
+ * A network error with words: an AggregateError (every address of the host failed) has an empty
+ * message, so its code and the first address's error are named instead.
+ */
+export function netError(e: unknown): Error {
+  const err = e as Error & { code?: string; errors?: (Error & { code?: string; address?: string })[] };
+  if (err?.message) return err;
+  const parts = (err?.errors || []).map((x) => `${x.address ? x.address + ': ' : ''}${x.code || x.message || 'failed'}`);
+  const text = `could not connect${err?.code ? ` (${err.code})` : ''}${parts.length ? `: ${parts.slice(0, 3).join(', ')}` : ''}`;
+  const out = new Error(text) as Error & { code?: string };
+  out.code = err?.code;
+  return out;
+}
 
 export interface CookieJar {
   cookies: Map<string, string>;
@@ -62,7 +95,7 @@ export async function openUpstream(rawUrl: string, opts: RequestOptions = {}): P
     const res = await new Promise<IncomingMessage>((resolve, reject) => {
       const req = https.request(url, { method: opts.method || 'GET', headers, timeout: timeoutMs }, resolve);
       req.on('timeout', () => req.destroy(new Error(`Upstream timeout after ${timeoutMs}ms`)));
-      req.on('error', reject);
+      req.on('error', (e) => reject(netError(e)));
       req.end(opts.body);
     });
     absorbSetCookie(opts.jar, res);

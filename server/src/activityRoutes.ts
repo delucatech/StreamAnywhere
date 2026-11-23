@@ -35,6 +35,8 @@ function videoOf(raw: unknown): { platform?: Platform; short: string } {
 interface Described {
   what: string;
   platform?: Platform;
+  /** What the request is about, as the page names it too (client/src/api.ts waitRef): a video's address */
+  ref?: string;
 }
 
 /**
@@ -49,7 +51,7 @@ export function describeRequest(method: string, path: string, body: any, query: 
     switch (path) {
       case '/api/resolve': {
         const v = videoOf(b.url);
-        return { what: v.platform ? `Getting a ${NAMES[v.platform]} video ready (${v.short})` : `Getting a video ready (${v.short})`, platform: v.platform };
+        return { what: v.platform ? `Getting a ${NAMES[v.platform]} video ready (${v.short})` : `Getting a video ready (${v.short})`, platform: v.platform, ref: b.url ? String(b.url).slice(0, 300) : undefined };
       }
       case '/api/probe':
         return { what: `Testing a video address (${videoOf(b.url).short})` };
@@ -119,13 +121,14 @@ export function registerActivity(app: FastifyInstance, serverStatus: () => Serve
   // preHandler: the body is parsed, and the handler runs right after, inside the activity.
   app.addHook('preHandler', (req, reply, done) => {
     let d: Described | undefined;
+    const path = req.url.split('?')[0];
     try {
-      d = describeRequest(req.method, req.url.split('?')[0], req.body, req.query);
+      d = describeRequest(req.method, path, req.body, req.query);
     } catch {
       d = undefined;
     }
     if (!d) return done();
-    const act = beginActivity(d.what, { platform: d.platform });
+    const act = beginActivity(d.what, { platform: d.platform, route: `${req.method} ${path}`, ref: d.ref });
     (req as Tracked)[KEY] = act;
     // 'close' comes when the response is out and also when the viewer's side hung up first
     reply.raw.once('close', () => endActivity(act, reply.raw.writableEnded ? { failed: reply.statusCode >= 400, result: reply.statusCode >= 400 ? act.result || `HTTP ${reply.statusCode}` : undefined } : { failed: true, result: 'the viewer stopped waiting' }));

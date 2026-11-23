@@ -23,8 +23,9 @@ import { config } from './config';
 import { openUpstream } from './http';
 import { defaultExpiry, registerMedia } from './mediaStore';
 import { ytdlpInfo, ytdlpJsRuntime } from './ytdlp';
-import { say, track } from './activity';
+import { currentActivity, followActivity, say, track, type Act } from './activity';
 import { DirectPlayerError, directPlayerEnabled, notePlayerDirect, notePlayerFallback, playerClient, playerInfoDirect } from './youtubePlayer';
+import { avatarIfKnown, channelAvatar, pickAvatar, rememberAvatar } from './youtubeAvatar';
 import { directSearchEnabled, noteDirect, noteFallback, searchDirect } from './youtubeSearch';
 import { tvHomeFeed } from './youtubeTv';
 
@@ -124,10 +125,16 @@ export function entryToFeedItem(e: any): FeedItem | undefined {
   if (!id) return undefined;
   if (e.live_status === 'is_live' || e.live_status === 'is_upcoming') return undefined;
   const handle = handleOf(e);
+  // The channel's picture: a search result carries it (kept for the channel's other videos); the
+  // other listings do not, so a picture learned earlier is used and the feed asks for the rest
+  // when a video comes into view (POST /api/avatar).
+  const channel = { channelId: e.channel_id || undefined, handle };
+  const carried = pickAvatar(e.channel_thumbnails);
+  if (carried) rememberAvatar(channel, carried);
   return {
     id,
     canonicalUrl: `https://www.youtube.com/watch?v=${id}`,
-    author: { id: e.channel_id || undefined, uniqueId: handle, nickname: e.channel || e.uploader || undefined },
+    author: { id: e.channel_id || undefined, uniqueId: handle, nickname: e.channel || e.uploader || undefined, avatar: carried || avatarIfKnown(channel) },
     desc: e.title || undefined,
     createTime: typeof e.timestamp === 'number' ? e.timestamp : undefined,
     duration: typeof e.duration === 'number' ? e.duration : undefined,
@@ -247,7 +254,68 @@ export async function channelVideos(handle: string, offset: number, count: numbe
 const MAX_HEIGHT = 720;
 const CACHE_MS = 60 * 60 * 1000;
 const cache = new Map<string, { at: number; value: ResolveResponse }>();
-const inFlight = new Map<string, Promise<ResolveResponse>>();
+const inFlight = new Map<string, { p: Promise<ResolveResponse>; act?: Act }>();
+
+// ---------------------------------------------------------------- the slow route's lane
+/**
+ * The slow route (yt-dlp; with Deno for a "made for kids" video) runs one video at a time, the
+ * one a viewer is looking at first.
+ *
+ * Seen on the VM, 2026-11-22/23: one such lookup takes 7-13 s alone, but the feed asks for the
+ * next videos ahead of time and a kids' feed is all slow-route videos, so two ran side by side in
+ * the two yt-dlp helpers (42 s each instead of 2 x 10) while the video on screen waited behind
+ * them for a helper - past the viewer's 60 s ("HTTP 504"). In line, each takes its 10 s, and the
+ * video in view goes before the ones asked ahead. YOUTUBE_SLOW_LOOKUPS=2 gives a bigger server
+ * two lanes.
+ */
+const SLOW_LANES = Math.max(1, Number(process.env.YOUTUBE_SLOW_LOOKUPS) || 1);
+interface SlowTurn {
+  id: string;
+  go: () => void;
+}
+const slowQueue: SlowTurn[] = [];
+let slowRunning = 0;
+/** Videos a viewer is looking at (asked for without `ahead`), until their lookup settles */
+const wanted = new Set<string>();
+/** Called when a slow lookup starts: the server frees what memory it can for it (index.ts) */
+let makeRoom: (() => void) | undefined;
+export function setYouTubeRoomMaker(fn: (() => void) | undefined): void {
+  makeRoom = fn;
+}
+
+/** Slow lookups running and waiting in line, for /api/health and the "what is the server busy with" lists. */
+export const youtubeSlowLookups = (): { running: number; queued: number } => ({ running: slowRunning, queued: slowQueue.length });
+
+/** The next in line: the video a viewer asked for last, else the one asked ahead the longest ago. */
+function nextSlowTurn(): SlowTurn | undefined {
+  if (!slowQueue.length) return undefined;
+  let at = 0;
+  for (let i = slowQueue.length - 1; i >= 0; i--) {
+    if (wanted.has(slowQueue[i].id)) {
+      at = i;
+      break;
+    }
+  }
+  return slowQueue.splice(at, 1)[0];
+}
+
+/** Waits for the lane; the returned function gives it up (calling it twice is fine). */
+async function slowTurn(id: string): Promise<() => void> {
+  if (slowRunning < SLOW_LANES) slowRunning++;
+  else {
+    const ahead = slowQueue.length + slowRunning;
+    say(`the slow route takes one video at a time on this server: ${ahead} lookup${ahead === 1 ? '' : 's'} before this one (the video on screen goes first)`, ahead === 1 ? "waiting for another video's lookup to end" : `waiting for ${ahead} other lookups to end`);
+    await new Promise<void>((go) => slowQueue.push({ id, go }));
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const next = nextSlowTurn();
+    if (next) next.go();
+    else slowRunning--;
+  };
+}
 
 /** `expire=` (unix seconds) of a googlevideo URL */
 function urlExpiry(url: string): number | undefined {
@@ -290,22 +358,38 @@ function within<T>(p: Promise<T>, ms: number, late: () => Error): Promise<T> {
  * measured one, and it keeps the account's cookies out of every ordinary play.
  *
  * Rejects after `waitMs` with a 504 while the lookup goes on: its answer is kept for the next ask.
+ *
+ * `ahead`: the feed is getting an upcoming video ready; without it a viewer is looking at this
+ * video, and a slow-route lookup for it goes before the ones asked ahead (also when it was first
+ * asked ahead and is asked again now).
  */
-export async function resolveYouTube(inputUrl: string, log: (m: string) => void, cookieFile?: string, waitMs = RESOLVE_TIMEOUT_MS): Promise<ResolveResponse> {
+export async function resolveYouTube(inputUrl: string, log: (m: string) => void, cookieFile?: string, waitMs = RESOLVE_TIMEOUT_MS, opts: { ahead?: boolean } = {}): Promise<ResolveResponse> {
   const id = youTubeVideoId(inputUrl);
   if (!id) throw new YouTubeError('That is not a YouTube video URL', 400);
   const hit = cache.get(id);
   if (hit && Date.now() - hit.at < CACHE_MS) return hit.value;
-  let p = inFlight.get(id);
-  if (p) say('this video is already being looked up for an earlier request: waiting for that answer');
-  else {
+  if (!opts.ahead) wanted.add(id);
+  let running = inFlight.get(id);
+  if (running) {
+    say('this video is already being looked up for an earlier request: waiting for that answer', 'waiting for the lookup to end');
+    // ...and from here on this request says what that lookup is doing
+    followActivity(running.act);
+  } else {
     // An activity of its own: the lookup goes on (and stays listed) after this caller's wait is over.
-    p = track(`Looking up YouTube video ${id}`, { platform: 'youtube' }, () => resolveUncached(id, inputUrl, log, cookieFile)).finally(() => inFlight.delete(id));
+    let act: Act | undefined;
+    const p = track(`Looking up YouTube video ${id}`, { platform: 'youtube' }, () => {
+      act = currentActivity();
+      return resolveUncached(id, inputUrl, log, cookieFile);
+    }).finally(() => {
+      inFlight.delete(id);
+      wanted.delete(id);
+    });
     // a lookup that fails after every caller stopped waiting is nobody's unhandled rejection
     p.catch(() => undefined);
-    inFlight.set(id, p);
+    running = { p, act };
+    inFlight.set(id, running);
   }
-  return within(p, waitMs, () => new YouTubeError(`YouTube took more than ${Math.round(waitMs / 1000)} s for this video; the lookup is still running on the server, so opening it again may play at once`, 504));
+  return within(running.p, waitMs, () => new YouTubeError(`YouTube took more than ${Math.round(waitMs / 1000)} s for this video; the lookup is still running on the server, so opening it again may play at once`, 504));
 }
 
 /** The picture-only H.264 files the player can take (plain https, up to MAX_HEIGHT). */
@@ -364,7 +448,7 @@ async function infoFromYtDlp(id: string, deadline: number, log: (m: string) => v
     log(`youtube ${id}: guest extraction failed after ${Date.now() - t0} ms (${guestErr.message.slice(0, 120)})`);
     if (!cookieFile || deadline - Date.now() < RETRY_MIN_MS) throw guestErr;
     log(`youtube ${id}: retrying with the account's cookies`);
-    say(`YouTube refused the guest request (${guestErr.message.slice(0, 80)}): trying again with your signed-in cookies`);
+    say(`YouTube refused the guest request (${guestErr.message.slice(0, 80)}): trying again with your signed-in cookies`, 'trying again with your sign-in');
     try {
       return await ytdlpInfo({ url, noplaylist: true, cookieFile, extractorArgs }, deadline - Date.now());
     } catch (e2) {
@@ -373,9 +457,14 @@ async function infoFromYtDlp(id: string, deadline: number, log: (m: string) => v
   }
 }
 
+/** Tests: replaces the slow route's yt-dlp lookup (undefined restores it). */
+let slowInfo: (id: string, deadline: number, log: (m: string) => void, cookieFile?: string, skipClient?: string) => Promise<any> = infoFromYtDlp;
+export function setYouTubeSlowInfo(fn: ((id: string) => Promise<any>) | undefined): void {
+  slowInfo = fn ? (id) => fn(id) : infoFromYtDlp;
+}
+
 async function resolveUncached(id: string, inputUrl: string, log: (m: string) => void, cookieFile?: string): Promise<ResolveResponse> {
   const t0 = Date.now();
-  const deadline = t0 + LOOKUP_TIMEOUT_MS;
   const attempts: ResolveResponse['attempts'] = [];
   let info: any;
   let how = '';
@@ -402,17 +491,33 @@ async function resolveUncached(id: string, inputUrl: string, log: (m: string) =>
             ? `YouTube gives its ${unplayableFor} app no stream for this video ("${reason.slice(0, 60)}"): asking yt-dlp, which runs YouTube's player script with Deno (the slow route: 10-40 s)`
             : `YouTube gives its ${unplayableFor} app no stream for this video ("${reason.slice(0, 60)}"): asking yt-dlp (no JS runtime on this server, so it will likely get the same answer)`
           : `the direct lookup failed (${reason.slice(0, 80)}): asking yt-dlp instead (the slow route: 2 s on a PC, 7-25 s on the small server)`,
+        'taking the slow route',
       );
     }
   } else say('direct lookups are switched off (YOUTUBE_PLAYER=ytdlp): asking yt-dlp');
   if (!info) {
+    // One slow lookup at a time, the viewer's first (see slowTurn); its time limit starts with its turn.
+    const queuedAt = Date.now();
+    const done = await slowTurn(id);
     const t1 = Date.now();
-    info = await infoFromYtDlp(id, deadline, log, cookieFile, unplayableFor);
+    if (t1 - queuedAt > 1000) log(`youtube ${id}: waited ${t1 - queuedAt} ms for the slow route's turn`);
+    const deadline = t1 + LOOKUP_TIMEOUT_MS;
+    try {
+      makeRoom?.();
+    } catch {
+      /* freeing memory is a favour, never a failure */
+    }
+    try {
+      info = await slowInfo(id, deadline, log, cookieFile, unplayableFor);
+    } finally {
+      // (the wait for YouTube's ad time below is a few bytes every 2.5 s: the next video's lookup need not wait for it)
+      done();
+    }
     how = 'yt-dlp';
     // the file the player starts with (the highest H.264 one), asked for its first bytes
     const first = h264Files(Array.isArray(info.formats) ? info.formats : []).sort((a, b) => (b.height || 0) - (a.height || 0))[0];
     if (first) {
-      say(`checking that YouTube's file server hands out the video (${String(first.format_id)} at ${new URL(first.url).hostname})`);
+      say(`checking that YouTube's file server hands out the video (${String(first.format_id)} at ${new URL(first.url).hostname})`, 'checking the video file');
       const held = Date.now();
       let checks = 1;
       while (await refusedCheck(first)) {
@@ -426,7 +531,7 @@ async function resolveUncached(id: string, inputUrl: string, log: (m: string) =>
           );
         }
         if (checks === 1) log(`youtube ${id}: the files are refused (403) right after the lookup: waiting for YouTube's ad time to pass`);
-        say(`YouTube keeps this video's files closed for the length of the ad its TV app would play first (5 to 30 s as measured): waiting for them to open, ${Math.round(waited / 1000)} s so far`);
+        say(`YouTube keeps this video's files closed for the length of the ad its TV app would play first (5 to 30 s as measured): waiting for them to open, ${Math.round(waited / 1000)} s so far`, 'waiting for YouTube to release it');
         await new Promise((r) => setTimeout(r, AD_CHECK_EVERY_MS));
         checks++;
       }
@@ -438,7 +543,7 @@ async function resolveUncached(id: string, inputUrl: string, log: (m: string) =>
     attempts.push({ resolver: 'ytdlp', ok: true, elapsedMs: Date.now() - t1 });
   }
   const all: any[] = Array.isArray(info.formats) ? info.formats : [];
-  say(`YouTube answered with ${all.length} formats: picking the H.264 picture and AAC sound files`);
+  say(`YouTube answered with ${all.length} formats: picking the H.264 picture and AAC sound files`, 'picking the files');
   const warnings: string[] = [];
   const videoOnly = h264Files(all);
   if (!videoOnly.length) throw new YouTubeError(`No H.264 video format up to ${MAX_HEIGHT}p for ${id} (${all.length} formats)`);
@@ -476,6 +581,10 @@ async function resolveUncached(id: string, inputUrl: string, log: (m: string) =>
       upstreamHost: new URL(f.url).hostname,
     };
   });
+  // The channel's picture is not in any lookup answer: the one kept from earlier goes along; else
+  // it is asked for now, off the viewer's path, so the feed's own ask (POST /api/avatar) finds it.
+  const channelRef = { channelId: typeof info.channel_id === 'string' ? info.channel_id : undefined, handle: handleOf(info), videoId: id };
+  if (!avatarIfKnown(channelRef)) void channelAvatar(channelRef, log);
   const resp: ResolveResponse = {
     source: 'youtube',
     resolver: how.startsWith('yt-dlp') ? 'ytdlp' : 'native',
@@ -484,6 +593,7 @@ async function resolveUncached(id: string, inputUrl: string, log: (m: string) =>
     canonicalUrl: `https://www.youtube.com/watch?v=${id}`,
     title: info.title,
     author: handleOf(info) || info.channel || info.uploader,
+    authorAvatar: avatarIfKnown(channelRef),
     duration: typeof info.duration === 'number' ? info.duration : undefined,
     width: info.width,
     height: info.height,

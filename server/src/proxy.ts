@@ -41,13 +41,23 @@ const totalOf = (contentRange: string | undefined): number | undefined => {
   return m ? Number(m[1]) : undefined;
 };
 
-/** One bounded upstream chunk; a 403/5xx is retried once (googlevideo refuses the odd request). */
+/**
+ * One bounded upstream chunk; a 403/5xx is retried once (googlevideo refuses the odd request), and
+ * so is a connection that could not be opened (a busy moment on the small server, see http.ts).
+ */
 async function openChunk(rec: MediaRecord, start: number, end: number): Promise<{ res: IncomingMessage; status: number; finalUrl: string }> {
   let last: { res: IncomingMessage; status: number; finalUrl: string } | undefined;
   for (let attempt = 0; attempt < 2; attempt++) {
     if (attempt) await new Promise((r) => setTimeout(r, 400));
     last?.res.destroy();
-    last = await openUpstream(rec.url, { allowlist: config.proxyAllowedHosts, maxRedirects: 5, headers: { ...rec.headers, range: `bytes=${start}-${end}` } });
+    try {
+      last = await openUpstream(rec.url, { allowlist: config.proxyAllowedHosts, maxRedirects: 5, headers: { ...rec.headers, range: `bytes=${start}-${end}` } });
+    } catch (e) {
+      // (a refusal of the address itself - not allowed, not public - is final)
+      if (attempt || e instanceof UpstreamRejectedError) throw e;
+      last = undefined;
+      continue;
+    }
     if (last.status < 400) return last;
   }
   return last!;

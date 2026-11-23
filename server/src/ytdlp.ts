@@ -211,10 +211,24 @@ export function ytdlpStep(raw: string): string {
   if (m) return `yt-dlp: reading the settings of YouTube's ${m[1]} app`;
   if (/^Downloading player /i.test(t)) return "yt-dlp: downloading YouTube's player script";
   if (/^Downloading (iframe API JS|initial data API JSON)/i.test(t)) return "yt-dlp: reading YouTube's page data";
-  if (/Solving JS challenges using (\w+)/i.test(raw)) return `yt-dlp: running YouTube's player script with ${/using (\w+)/i.exec(raw)![1].replace(/^./, (c) => c.toUpperCase())} to unlock the video addresses`;
+  if (/Solving JS challenges using (\w+)/i.test(raw)) return `yt-dlp: running YouTube's player script (with ${/using (\w+)/i.exec(raw)![1].replace(/^./, (c) => c.toUpperCase())}, to unlock the video addresses)`;
   if (/^Downloading API JSON|^Downloading .*page \d+|^page \d+/i.test(t)) return `yt-dlp: reading the list from YouTube (${t.replace(/^Downloading /i, '')})`;
   if (/^Downloading m3u8|^Downloading MPD/i.test(t)) return 'yt-dlp: reading the stream manifest';
   return `yt-dlp: ${t.slice(0, 120)}`;
+}
+
+/** The same step in a few words, for the one-line status of the page that waits (undefined: the page shortens the long form). */
+export function ytdlpBrief(raw: string): string | undefined {
+  const t = raw.replace(/^\[[\w:.-]+\]\s*/, '').replace(/^(?:\[[\w:.-]+\]\s*)?[\w-]{6,}:\s+/, '');
+  if (/^Extracting URL/i.test(t)) return 'starting the lookup';
+  if (/^Downloading webpage/i.test(t)) return 'reading the video page';
+  if (/^Downloading .+? player API JSON/i.test(t)) return 'asking YouTube for the files';
+  if (/^Downloading .+? client config/i.test(t)) return "reading YouTube's app settings";
+  if (/^Downloading player /i.test(t)) return "getting YouTube's player script";
+  if (/^Downloading (iframe API JS|initial data API JSON)/i.test(t)) return "reading YouTube's page data";
+  if (/Solving JS challenges using/i.test(raw)) return 'unlocking the video addresses';
+  if (/^Downloading API JSON|^Downloading .*page \d+|^page \d+/i.test(t)) return 'reading the list from YouTube';
+  return undefined;
 }
 
 /**
@@ -432,14 +446,14 @@ async function acquire(deadline: number): Promise<Daemon> {
     }
     if (Date.now() >= deadline) throw busyError(Date.now() - t0);
     if (pool.length < DAEMONS) {
-      say(`yt-dlp: starting ${pool.length ? 'another' : 'its'} helper process (Python loading yt-dlp: 1 s on a PC, up to 20 s on the small server)`);
+      say(`yt-dlp: starting ${pool.length ? 'another' : 'its'} helper process (Python loading yt-dlp: 1 s on a PC, up to 20 s on the small server)`, 'starting a lookup helper');
       const d = new Daemon(daemonPython!, daemonLog);
       d.claimed = true;
       pool.push(d);
       if (await d.ready) return d;
       continue;
     }
-    say(`yt-dlp: ${pool.length === 1 ? 'its helper is' : `all ${pool.length} helpers are`} busy with other lookups; waiting for a turn (${Math.round((Date.now() - t0) / 1000)} s so far)`);
+    say(`yt-dlp: waiting for a free helper (${pool.length === 1 ? 'its helper is' : `all ${pool.length} are`} busy with other lookups, ${Math.round((Date.now() - t0) / 1000)} s so far)`, 'waiting for a free helper');
     await waitInLine(waiters, deadline - Date.now());
   }
 }
@@ -463,14 +477,14 @@ export const daemonStatus = (): { enabled: boolean; python?: string; running: nu
  */
 export async function ytdlpInfo(req: InfoRequest, timeoutMs = 150_000): Promise<any> {
   const deadline = Date.now() + timeoutMs;
-  if (daemonPython === undefined) say('yt-dlp: starting its helper process for the first time (Python loading yt-dlp: 1 s on a PC, up to 20 s on the small server)');
+  if (daemonPython === undefined) say('yt-dlp: starting its helper process for the first time (Python loading yt-dlp: 1 s on a PC, up to 20 s on the small server)', 'starting a lookup helper');
   await probeDaemon();
   if (daemonPython) {
     // the daemon frees itself when the extraction ends (which may be after this caller's deadline)
     const d = await acquire(deadline);
     const step = sayer();
-    step(`yt-dlp: asked${req.cookieFile ? ' (with the signed-in cookies)' : ''}; waiting for its first step`);
-    return d.request(req, Math.max(1, deadline - Date.now()), timeoutMs, (text) => step(ytdlpStep(text)));
+    step(`yt-dlp: starting the lookup (asked${req.cookieFile ? ' with the signed-in cookies' : ''}, waiting for its first step)`, 'starting the lookup');
+    return d.request(req, Math.max(1, deadline - Date.now()), timeoutMs, (text) => step(ytdlpStep(text), ytdlpBrief(text)));
   }
   say('yt-dlp: running its command line (no warm helper on this server: every lookup pays the Python start)');
   const args = req.flat ? ['--flat-playlist', '-J'] : ['-j'];

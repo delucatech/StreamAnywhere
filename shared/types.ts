@@ -90,6 +90,8 @@ export interface ResolveResponse {
   duration?: number;
   width?: number;
   height?: number;
+  /** The profile picture of the video's channel, when the server knows it already (YouTube; else POST /api/avatar) */
+  authorAvatar?: string;
   cover?: string;
   formats: MediaFormat[];
   warnings: string[];
@@ -105,6 +107,23 @@ export interface ResolveRequest {
   probe?: boolean;
   /** Browser origin to use for the server-side probe (defaults to request Origin header) */
   origin?: string;
+  /**
+   * The video is not the one in view yet (the feed gets the next ones ready): a slow lookup for it
+   * waits behind the lookups a viewer is looking at. Asked again without it, the lookup moves up.
+   */
+  ahead?: boolean;
+}
+
+/** POST /api/avatar: the profile picture of a video's channel (YouTube's listings do not carry it). Any one of the three is enough. */
+export interface AvatarRequest {
+  platform?: Platform;
+  videoId?: string;
+  channelId?: string;
+  handle?: string;
+}
+export interface AvatarResponse {
+  /** An image address; absent when the platform gave none */
+  avatar?: string;
 }
 
 export interface ReportRequest {
@@ -143,6 +162,10 @@ export interface HealthResponse {
    * an older build.
    */
   youtubePlayer?: { mode: 'direct' | 'ytdlp'; client: string; direct: number; fallback: number; lastFallback?: { at: string; reason: string } };
+  /** YouTube channel pictures (youtubeAvatar.ts): how many are kept and how the lookups went */
+  youtubeAvatar?: { kept: number; running: number; waiting: number; lookups: number; requests: number; found: number; failed: number; lastFailure?: { at: string; reason: string } };
+  /** YouTube's slow lookups (yt-dlp, one at a time): running and waiting in line */
+  youtubeSlow?: { running: number; queued: number };
   resolver: string;
   proxyAllowedHosts: string[];
   uptimeSec: number;
@@ -290,6 +313,12 @@ export interface ActivityEntry {
   what: string;
   /** The step it is on, e.g. "yt-dlp: reading the video's page on YouTube" */
   step?: string;
+  /** The step in a few words for the one-line status ("reading the video's page"), where the work names one */
+  brief?: string;
+  /** An API request's activity: its method and path ("POST /api/resolve"), so the page that waits for it finds it */
+  route?: string;
+  /** ...and what it is about where that tells requests of one route apart (a video lookup: the video's address) */
+  ref?: string;
   /** How long it has been running (or ran, when ended) */
   forMs: number;
   /** How long it has been on this step */

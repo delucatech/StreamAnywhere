@@ -14,10 +14,12 @@
 import { buildServer } from '../index';
 import { mirrorChecks } from './mirror';
 import { activityChecks } from './activity';
+import { youtubeAvatarChecks } from './youtubeAvatar';
+import { setAvatarTransport } from '../youtubeAvatar';
 import { hostAllowed, ipIsPrivate, assertSafeUpstream } from '../ssrf';
 import { parseTikTokUrl } from '../tiktok';
 import { isTikTokAd, itemToFeedItem } from '../feed';
-import { entryToFeedItem, isYouTubeUrl, pickAudio, resolveYouTube, searchYouTube, YouTubeError, youTubeVideoId } from '../youtube';
+import { entryToFeedItem, isYouTubeUrl, pickAudio, resolveYouTube, searchYouTube, setYouTubeFileCheck, setYouTubeRoomMaker, setYouTubeSlowInfo, YouTubeError, youtubeSlowLookups, youTubeVideoId } from '../youtube';
 import { BUILTIN_CLIENT, directPlayerEnabled, DirectPlayerError, isBotCheck, playability, playerAnswerToInfo, playerInfoDirect, playerRequestBody, setPlayerTransport, validClient, visitorFromPage, youtubePlayerStatus, type PlayerTransport } from '../youtubePlayer';
 import { getMedia } from '../mediaStore';
 import { clientVersionFromPage, directSearchEnabled, parseDuration, parseSearchAnswer, parseViews, searchDirect, SearchLayoutError, setSearchTransport, videoRendererToEntry, VIDEOS_ONLY, youtubeSearchStatus, type SearchTransport } from '../youtubeSearch';
@@ -1538,6 +1540,8 @@ async function youtubePlayerOfflineChecks(): Promise<void> {
     setPlayerTransport(scripted);
 
     // through the resolver: the answer the feed gets, without yt-dlp
+    // (a resolved video asks for its channel's picture in the background: not over the network here)
+    setAvatarTransport({ browse: async () => ({}), next: async () => ({}), resolve: async () => ({}) });
     const before = youtubePlayerStatus();
     const r = await resolveYouTube('https://www.youtube.com/watch?v=fffffffffff', noLog);
     const after = youtubePlayerStatus();
@@ -1559,8 +1563,61 @@ async function youtubePlayerOfflineChecks(): Promise<void> {
     const t1 = Date.now();
     const kept = await resolveYouTube('https://www.youtube.com/watch?v=ggggggggggg', noLog, undefined, 40).catch((e) => e);
     check('the lookup finished meanwhile: asked again, the video is answered at once', !(kept instanceof Error) && kept.formats.length === 3 && Date.now() - t1 < 30, { kept: String(kept instanceof Error ? kept : kept.formats.length), ms: Date.now() - t1 });
+
+    // the slow route (a "made for kids" video goes to yt-dlp): one lookup at a time, the viewer's video first
+    const kids = new Set(['kkkkkkkkkk1', 'kkkkkkkkkk2', 'kkkkkkkkkk3', 'kkkkkkkkkk4']);
+    setPlayerTransport({ ...scripted, player: async (video, c, v) => (kids.has(video) ? { playabilityStatus: { status: 'UNPLAYABLE', reason: 'This video is not available' }, videoDetails: { videoId: video } } : scripted.player(video, c, v)) });
+    const order: string[] = [];
+    const gates = new Map<string, () => void>();
+    setYouTubeSlowInfo(async (id) => {
+      order.push(id);
+      await new Promise<void>((r) => gates.set(id, r));
+      const file = (itag: number): string => `https://rr1---sn-test.googlevideo.com/videoplayback?id=${id}&itag=${itag}&expire=1900000000`;
+      return {
+        id,
+        title: `Video ${id}`,
+        channel: 'Kids TV',
+        duration: 60,
+        formats: [
+          { format_id: '136', url: file(136), vcodec: 'avc1.4d401f', acodec: 'none', protocol: 'https', width: 1280, height: 720, tbr: 1500 },
+          { format_id: '140', url: file(140), vcodec: 'none', acodec: 'mp4a.40.2', protocol: 'https', abr: 128 },
+        ],
+      };
+    });
+    setYouTubeFileCheck(async () => false);
+    let roomAsked = 0;
+    setYouTubeRoomMaker(() => void roomAsked++);
+    const yt = (id: string): string => `https://www.youtube.com/watch?v=${id}`;
+    const k1 = resolveYouTube(yt('kkkkkkkkkk1'), noLog, undefined, 5000, { ahead: true });
+    await cancellableSleep(20);
+    const k2 = resolveYouTube(yt('kkkkkkkkkk2'), noLog, undefined, 5000, { ahead: true });
+    const k3 = resolveYouTube(yt('kkkkkkkkkk3'), noLog, undefined, 5000, { ahead: true });
+    await cancellableSleep(20);
+    const k4 = resolveYouTube(yt('kkkkkkkkkk4'), noLog, undefined, 5000);
+    await cancellableSleep(20);
+    check('slow lookups run one at a time: the first runs, the others wait in line', order.join() === 'kkkkkkkkkk1' && youtubeSlowLookups().running === 1 && youtubeSlowLookups().queued === 3 && roomAsked === 1, { order, lane: youtubeSlowLookups(), roomAsked });
+    gates.get('kkkkkkkkkk1')!();
+    await k1;
+    await cancellableSleep(20);
+    check('the video a viewer is looking at goes before the ones asked ahead', order.join() === 'kkkkkkkkkk1,kkkkkkkkkk4', order);
+    // the viewer scrolls on to a video that was asked ahead: asked again, it moves up
+    const k3again = resolveYouTube(yt('kkkkkkkkkk3'), noLog, undefined, 5000);
+    gates.get('kkkkkkkkkk4')!();
+    await k4;
+    await cancellableSleep(20);
+    check('a video asked ahead moves up when the viewer reaches it', order.join() === 'kkkkkkkkkk1,kkkkkkkkkk4,kkkkkkkkkk3', order);
+    gates.get('kkkkkkkkkk3')!();
+    const [r3, r3again] = await Promise.all([k3, k3again]);
+    await cancellableSleep(20);
+    gates.get('kkkkkkkkkk2')!();
+    const r2 = await k2;
+    check('every one is answered through yt-dlp, and the lane is free again', r3 === r3again && r2.resolver === 'ytdlp' && r2.formats[0]?.id === '136' && Boolean(r2.formats[0]?.audioProxyUrl) && youtubeSlowLookups().running === 0 && youtubeSlowLookups().queued === 0, { lane: youtubeSlowLookups(), r2: r2.formats.map((f) => f.id) });
   } finally {
     setPlayerTransport(undefined);
+    setYouTubeSlowInfo(undefined);
+    setYouTubeFileCheck(undefined);
+    setYouTubeRoomMaker(undefined);
+    setAvatarTransport(undefined);
   }
   const prev = process.env.YOUTUBE_PLAYER;
   process.env.YOUTUBE_PLAYER = 'ytdlp';
@@ -1767,6 +1824,7 @@ async function homeTopUpChecks(): Promise<void> {
   await youtubeSearchOfflineChecks();
   await youtubePlayerOfflineChecks();
   await activityChecks(check);
+  await youtubeAvatarChecks(check);
   await youtubeTvOfflineChecks();
   await inboxCancelChecks();
   await homeTopUpChecks();

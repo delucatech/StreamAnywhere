@@ -40,12 +40,12 @@
  * back to this app from another, the saved feed after the page was closed) is fed from disk first,
  * the rest from the network. A sweep between videos makes room (see mediaCache.ts).
  */
-import type { FeedAuthor, FeedItem, FeedSource, FollowState, LibraryEntry, LoginMode, MediaFormat, SessionInputRequest, SessionStatus } from '../../../shared/types';
+import type { FeedAuthor, FeedItem, FeedSource, FollowState, LibraryEntry, LoginMode, MediaFormat, ResolveResponse, SessionInputRequest, SessionStatus } from '../../../shared/types';
 import '../activity';
-import { api, ApiError, apiUrl } from '../api';
+import { api, ApiError, apiUrl, waitRef } from '../api';
 import { startAppUpdates } from '../appUpdate';
 import { pressed } from '../busy';
-import { beginWait } from '../pending';
+import { beginWait, type WaitInfo } from '../pending';
 import type { MediaPrefix } from '../media/demuxer';
 import { canSaveFiles, hasIndexedDb } from '../library/capabilities';
 import * as libdb from '../library/db';
@@ -162,8 +162,6 @@ const el = {
   // wide-screen layout (the car): rail, header title, Up next
   railLauncher: $<HTMLButtonElement>('railLauncher'),
   railApps: $('railApps'),
-  railFriends: $<HTMLButtonElement>('railFriends'),
-  railInbox: $<HTMLButtonElement>('railInbox'),
   railProfile: $<HTMLButtonElement>('railProfile'),
   railProfileLabel: $('railProfileLabel'),
   appName: $('appName'),
@@ -202,9 +200,10 @@ interface Entry {
   isSeeking: () => boolean;
   /** Play URLs being fetched for an item that came without any (guest search results) */
   resolving?: Promise<boolean>;
+  /** The address was asked for while the video was not the one in view (the server looks such a video up after the viewer's) */
+  askedAhead?: boolean;
   /** The status shown on the video while it waits (see syncWait) */
   waitEl: HTMLElement;
-  waitText: HTMLElement;
   /** The player reports loading / buffering */
   buffering: boolean;
   /** The direct URL failed; the proxy is being tried */
@@ -594,8 +593,6 @@ for (const p of PLATFORMS) {
   el.railApps.appendChild(b);
 }
 onHomeTap(el.railLauncher);
-el.railFriends.addEventListener('click', () => el.navFriends.click());
-el.railInbox.addEventListener('click', () => el.navInbox.click());
 el.railProfile.addEventListener('click', () => el.navProfile.click());
 el.upnextAuto.addEventListener('click', () => toggleAutoscroll());
 initSocial({
@@ -1401,19 +1398,22 @@ function showLoading(title: string, detail: string, done = false): void {
   el.loadingDetail.textContent = detail;
 }
 /**
- * Where the status strip (activity.ts) sits on this page: on the video panel's left edge, under
- * the top bar and the small loading card, as wide as the panel at most.
+ * Where the status line (activity.ts) sits on this page: at the bottom of the video in view, on
+ * its left edge just above the caption, as wide as the video at most.
  */
 function placeStatusStrip(): void {
   // the video's own card where there is one (on wide screens the feed spans the page, the card is its middle column)
-  const card = state.entries[state.active]?.root.getBoundingClientRect();
+  const root = state.entries[state.active]?.root;
+  const card = root?.getBoundingClientRect();
   const f = card && card.width > 0 ? card : el.feed.getBoundingClientRect();
   if (f.width <= 0) return;
+  // above the caption where the video has one, else above the seek bar
+  const info = root?.querySelector<HTMLElement>('.info')?.getBoundingClientRect();
+  const floor = info && info.height > 0 && info.top > f.top ? info.top : f.bottom - 22;
   const s = document.documentElement.style;
-  s.setProperty('--sa-activity-left', `${Math.round(Math.max(0, f.left) + 8)}px`);
-  // a card that starts below the top bar (wide screens): in its top corner; a full-height one (phones): under the top bar and the loading card
-  s.setProperty('--sa-activity-top', `${Math.round(f.top >= 100 ? f.top + 8 : 114)}px`);
-  s.setProperty('--sa-activity-width', `${Math.round(Math.max(220, Math.min(f.width, window.innerWidth) - 16))}px`);
+  s.setProperty('--sa-activity-left', `${Math.round(Math.max(0, f.left) + 12)}px`);
+  s.setProperty('--sa-activity-bottom', `${Math.round(Math.max(8, window.innerHeight - floor + 8))}px`);
+  s.setProperty('--sa-activity-width', `${Math.round(Math.max(200, Math.min(f.width, window.innerWidth) - 24))}px`);
 }
 window.addEventListener('resize', placeStatusStrip);
 window.addEventListener('load', placeStatusStrip);
@@ -2055,11 +2055,10 @@ function makeEntry(item: FeedItem): Entry {
   const waitSpin = document.createElement('span');
   waitSpin.className = 'spinner';
   waitSpin.setAttribute('aria-hidden', 'true');
-  const waitText = document.createElement('span');
-  waitEl.append(waitSpin, waitText);
+  waitEl.append(waitSpin);
   root.appendChild(waitEl);
 
-  const entry: Entry = { item, root, canvas, progress: bar, downloaded, err, triedProxy: false, failed: false, isSeeking: () => seeking, waitEl, waitText, buffering: false, retrying: false, loadGen: 0, stored: { video: 0, audio: 0 } };
+  const entry: Entry = { item, root, canvas, progress: bar, downloaded, err, triedProxy: false, failed: false, isSeeking: () => seeking, waitEl, buffering: false, retrying: false, loadGen: 0, stored: { video: 0, audio: 0 } };
 
   // Tap/click on the picture (poster or canvas) = pause/resume; on the edge of the previous / next
   // video showing above / below (wide screens) = go there. The info block and progress bar handle
@@ -2283,10 +2282,26 @@ function ensureFormats(entry: Entry): Promise<boolean> {
     entry.item.formats = [];
   }
   if (entry.item.formats.length) return Promise.resolve(true);
+  // (never on the status line by itself: the wait of the video in view covers it, see holdWait)
+  const quietly = { label: 'Getting video ready', quiet: () => true };
+  if (entry.resolving && entry.askedAhead && activeEntry() === entry) {
+    // Asked for ahead of time and still being looked up, and now it is the video in view: the
+    // server moves its lookup to the front (the answer comes through the first request too).
+    entry.askedAhead = false;
+    void api.resolve({ url: entry.item.canonicalUrl, probe: false }, RESOLVE_LIMIT_MS, quietly).catch(() => undefined);
+  }
   if (!entry.resolving) {
-    entry.resolving = api
-      // on the status strip only while it is the video in view (an upcoming one holds nobody up)
-      .resolve({ url: entry.item.canonicalUrl, probe: false }, RESOLVE_LIMIT_MS, { label: `Getting the video ready (${P.name})`, quiet: () => activeEntry() !== entry })
+    // `ahead`: an upcoming video's lookup waits behind the one the viewer is looking at
+    entry.askedAhead = activeEntry() !== entry;
+    const ask = (ahead: boolean): Promise<ResolveResponse> => api.resolve({ url: entry.item.canonicalUrl, probe: false, ahead }, RESOLVE_LIMIT_MS, quietly);
+    entry.resolving = ask(entry.askedAhead)
+      // The server's lookup outlived its wait (the slow route of a "made for kids" video on a busy
+      // server) and goes on there: one more wait for that answer beats failing the video.
+      .catch((e) => {
+        if (!(e instanceof ApiError && e.status === 504 && /still running/i.test(e.message))) throw e;
+        console.info(`[feed] ${entry.item.id}: the lookup is still running on the server; waiting for it once more`);
+        return ask(activeEntry() !== entry);
+      })
       .then((r) => {
         entry.item.formats = r.formats.filter((f) => f.directUrl || f.proxyUrl);
         if (!entry.item.formats.length) throw new Error(r.warnings[0] || 'no playable format');
@@ -2307,11 +2322,13 @@ function ensureFormats(entry: Entry): Promise<boolean> {
           renderQueue();
         }
         if (!item.duration && r.duration) item.duration = r.duration;
+        if (r.authorAvatar) gotAvatar(entry, r.authorAvatar);
         if (activeEntry() === entry) syncWait();
         return true;
       })
       .catch((e) => {
         entry.failed = true;
+        entry.askedAhead = false;
         entry.err.textContent = `This video could not be resolved (${errMsg(e)})`;
         entry.err.classList.remove('hidden');
         syncWait();
@@ -2337,9 +2354,36 @@ async function playEntry(entry: Entry): Promise<void> {
   }
 }
 
+/**
+ * YouTube's listings name a video's channel but not its picture: the server is asked for it when
+ * the video comes into view (one small request per channel there, kept a day), once per video.
+ */
+const avatarAsked = new Set<string>();
+function wantAvatar(entry: Entry): void {
+  const a = entry.item.author;
+  if (P.id !== 'youtube' || a.avatar || avatarAsked.has(entry.item.id)) return;
+  avatarAsked.add(entry.item.id);
+  void api.avatar({ platform: 'youtube', videoId: entry.item.id, channelId: a.id, handle: a.uniqueId }).then(
+    (r) => r.avatar && gotAvatar(entry, r.avatar),
+    () => undefined,
+  );
+}
+/** A channel's picture arrived: for this video and the channel's other videos in the feed. */
+function gotAvatar(entry: Entry, url: string): void {
+  const a = entry.item.author;
+  for (const e of state.entries) {
+    const b = e.item.author;
+    if (b.avatar) continue;
+    if (e === entry || (a.id && b.id === a.id) || (a.uniqueId && b.uniqueId === a.uniqueId)) b.avatar = url;
+  }
+  const cur = activeEntry();
+  if (cur && cur.item.author.avatar === url) syncAuthor(cur);
+}
+
 /** The author button beside the video: its avatar, and its @name under it ("Profile" until it is known). */
 function syncAuthor(entry: Entry): void {
   const a = entry.item.author;
+  wantAvatar(entry);
   if (a.avatar) el.actAuthorImg.src = a.avatar;
   else el.actAuthorImg.removeAttribute('src');
   el.actAuthor.disabled = !a.uniqueId;
@@ -2539,19 +2583,34 @@ let waitEntry: Entry | undefined;
 let waitPhase = '';
 let waitSince = 0;
 /**
- * The same wait on the status strip (activity.ts), which adds what the server is doing: while the
- * video's bytes are awaited (the request for its address is on the strip already, from api.ts).
+ * The same wait on the status line (activity.ts): one wait from the moment the video in view has
+ * to wait until it plays, its step and bytes asked at every repaint (waitInfo). The request for
+ * the video's address is not listed by itself (ensureFormats registers it as quiet).
  */
 let waitHold: (() => void) | undefined;
-let waitHoldPhase = '';
-function holdWait(phase: string): void {
-  const p = phase === 'resolve' ? '' : phase;
-  if (p === waitHoldPhase) return;
-  placeStatusStrip();
+let waitHoldFor: Entry | undefined;
+function holdWait(e: Entry | undefined): void {
+  if (e === waitHoldFor) return;
   waitHold?.();
   waitHold = undefined;
-  waitHoldPhase = p;
-  if (p) waitHold = beginWait(p === 'retry' ? 'Trying another connection for the video' : p === 'buffer' ? 'Buffering the video' : 'Loading the video');
+  waitHoldFor = e;
+  if (!e) return;
+  placeStatusStrip();
+  waitHold = beginWait({ label: 'Getting video ready', info: waitInfo });
+}
+/** What the video in view is waiting for right now, for the status line: the step and what is moving. */
+function waitInfo(): WaitInfo {
+  const e = waitEntry;
+  if (!e || !waitPhase) return {};
+  // a video whose address had to be asked for has one more step
+  const of = e.resolving ? 3 : 2;
+  if (waitPhase === 'resolve') return { step: [1, of], detail: `asking ${P.name}`, route: 'POST /api/resolve', ref: waitRef(e.item.canonicalUrl) };
+  const dl = e.player?.download();
+  const bytes = dl && dl.loaded > 0 ? (dl.total ? `${fmtBytes(dl.loaded)} of ${fmtBytes(dl.total)} loaded` : `${fmtBytes(dl.loaded)} loaded`) : dl && dl.fraction > 0 ? `${Math.floor(dl.fraction * 100)}% loaded` : '';
+  if (waitPhase === 'buffer') return { label: 'Buffering', detail: bytes };
+  const retry = waitPhase === 'retry';
+  if (bytes) return { step: [of, of], detail: retry ? `another connection · ${bytes}` : bytes };
+  return { step: [of - 1, of], detail: retry ? 'trying another connection' : 'opening the video file' };
 }
 function waitPhaseOf(e: Entry): string {
   if (!state.started || e.failed || state.userPaused || document.hidden || overlayOpen()) return '';
@@ -2570,7 +2629,7 @@ function syncWait(): void {
   if (e !== waitEntry || !waitPhase) waitSince = Date.now();
   waitEntry = e;
   waitPhase = phase;
-  holdWait(e ? phase : '');
+  holdWait(e && phase ? e : undefined);
   if (!e || !phase) {
     e?.waitEl.classList.add('hidden');
     queueWait(e, '');
@@ -2584,22 +2643,16 @@ function syncWait(): void {
 function renderWait(): void {
   const e = waitEntry;
   if (!e) return;
-  const ms = Date.now() - waitSince;
-  if (ms < WAIT_SHOW_MS) {
+  if (Date.now() - waitSince < WAIT_SHOW_MS) {
     e.waitEl.classList.add('hidden');
     queueWait(e, '');
     return;
   }
-  const sec = Math.floor(ms / 1000);
-  let text = waitPhase === 'resolve' ? `Getting the video from ${P.name}…` : waitPhase === 'retry' ? 'Trying another connection…' : waitPhase === 'buffer' ? 'Buffering…' : 'Loading video…';
-  // Bytes are moving: how much of the video is here (the file size once the server has said it)
-  const dl = waitPhase === 'resolve' ? undefined : e.player?.download();
-  if (dl && dl.fraction >= 0) text += ` ${Math.floor(dl.fraction * 100)}%`;
-  if (dl && dl.loaded > 0) text += dl.total ? `\n${fmtBytes(dl.loaded)} of ${fmtBytes(dl.total)}` : `\n${fmtBytes(dl.loaded)} received`;
-  if (sec >= 6) text += `\n${sec} s – slow connection, still loading`;
-  if (e.waitText.textContent !== text) e.waitText.textContent = text;
+  // A spinner on the video and a word on its row of the list; what the wait is (step, bytes,
+  // seconds) is said in one place, the status line at the bottom of the video.
+  placeStatusStrip();
   e.waitEl.classList.remove('hidden');
-  queueWait(e, text);
+  queueWait(e, waitPhase === 'buffer' ? 'Buffering…' : 'Loading…');
 }
 /** The wait line on the video's row in the Up next list (empty text hides it). */
 function queueWait(e: Entry | undefined, text: string): void {

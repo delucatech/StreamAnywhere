@@ -4,7 +4,7 @@ import rateLimit from '@fastify/rate-limit';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { EXPLORE_CATEGORIES, YOUTUBE_CATEGORIES, platformOf } from '../../shared/types';
-import type { CommentsRequest, ConversationRequest, DownloadProbeRequest, InboxCancelResponse, LibraryCategoryRequest, LibraryEntryPatch, LibrarySaveRequest, DownloadStartRequest, FeedItem, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ServerStatus, ProbeRequest, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SessionActionRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
+import type { AvatarRequest, AvatarResponse, CommentsRequest, ConversationRequest, DownloadProbeRequest, InboxCancelResponse, LibraryCategoryRequest, LibraryEntryPatch, LibrarySaveRequest, DownloadStartRequest, FeedItem, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ServerStatus, ProbeRequest, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SessionActionRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
 import { registerAuth } from './auth';
 import { mirrorStats, registerMirror, shutdownMirror } from './mirror';
 import { config, findUp } from './config';
@@ -19,7 +19,7 @@ import { logStream, recentLog } from './logbuf';
 import { defaultExpiry, mediaCount, registerMedia } from './mediaStore';
 import { hostAllowed } from './ssrf';
 import { EXPLORE_DEFAULT_CATEGORY, FeedError, fetchExploreFeed, normalizeExploreOptions, type ExploreResult } from './feed';
-import { cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouCheap, forYouPutBack, forYouQuick, forYouStock, forYouWantsWarm, forYouWarm, headlessRunning, logout, rememberLog, workState, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
+import { cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouCheap, forYouPutBack, forYouQuick, forYouStock, forYouWantsWarm, forYouWarm, headlessRunning, logout, parkHeadlessBrowser, rememberLog, workState, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
 import { Reservoir, type ReservoirStats } from './reservoir';
 import { hasBatch, reviveItems, slimItems } from './lastBatch';
 import { invalidateJobs, jobStats, sharedJob } from './jobs';
@@ -27,10 +27,11 @@ import { getProgress } from './progress';
 import { registerActivity } from './activityRoutes';
 import { say } from './activity';
 import { cancelInboxReads, cancelReads, commentsDebug, conversation, fetchComments, fetchProfile, followUser, inbox, inboxDebug, isCancelled, searchTikTok, sendMessage, SocialError } from './social';
-import { channelVideos, exploreYouTube, isYouTubeUrl, recommendedYouTube, recommendedYouTubeTv, resolveYouTube, searchYouTube, youTubeCategory, YouTubeError } from './youtube';
+import { channelVideos, exploreYouTube, isYouTubeUrl, recommendedYouTube, recommendedYouTubeTv, resolveYouTube, searchYouTube, setYouTubeRoomMaker, youTubeCategory, YouTubeError, youtubeSlowLookups } from './youtube';
+import { channelAvatar, youtubeAvatarStatus } from './youtubeAvatar';
 import { youtubePlayerStatus } from './youtubePlayer';
 import { youtubeSearchStatus } from './youtubeSearch';
-import { exploreInstagram, followInstagram, forYouInstagram, instagramCategory, instagramFollowStates, instagramStats, InstagramError, isInstagramUrl, pauseInstagramPages, profileInstagram, resolveInstagram, searchInstagram, setInstagramLogger, shutdownInstagram } from './instagram';
+import { exploreInstagram, followInstagram, forYouInstagram, instagramCategory, instagramFollowStates, instagramStats, InstagramError, isInstagramUrl, parkInstagramBrowser, pauseInstagramPages, profileInstagram, resolveInstagram, searchInstagram, setInstagramLogger, shutdownInstagram } from './instagram';
 import { instagramCancelLogin, instagramLogout, instagramMaySignIn, instagramSessionLog, ensureInstagramSession, instagramSessionLost, instagramSessionStatus, instagramSignedIn, instagramWantsProbe, instagramStartLogin, InstagramSessionError, setInstagramSessionLogger, shutdownInstagramSession } from './instagramSession';
 import { setYouTubeSessionLogger, shutdownYouTubeSession, youtubeCancelLogin, youtubeCookieFile, youtubeLogout, youtubeSessionLog, youtubeSessionLost, youtubeSessionStatus, youtubeSignInKind, youtubeStartLogin, YouTubeSessionError } from './youtubeSession';
 import { TvAuthError } from './youtubeTv';
@@ -323,8 +324,19 @@ export async function buildServer() {
     if (im.running) out.push(`importing ${im.running} file${im.running > 1 ? 's' : ''} to the library`);
     const lookups = (jobStats() as { inFlight?: unknown[] }).inFlight?.length || 0;
     if (lookups) out.push(`${lookups} video lookup${lookups > 1 ? 's' : ''}`);
+    const slow = youtubeSlowLookups();
+    if (slow.running + slow.queued) out.push(`${slow.running + slow.queued} slow YouTube video lookup${slow.running + slow.queued > 1 ? 's' : ''} (yt-dlp)`);
     return out;
   };
+
+  // A slow YouTube lookup (yt-dlp with Deno, for a "made for kids" video) takes 10 s on the quiet
+  // VM and two minutes beside a headless browser (seen 2026-11-23: TikTok's and Instagram's were
+  // open from the apps the viewer had just left, and every kids' video failed with "HTTP 504").
+  // So a browser nothing is using is closed when such a lookup starts; one in use stays.
+  setYouTubeRoomMaker(() => {
+    void parkHeadlessBrowser((m) => app.log.info({ platform: 'tiktok' }, `${m} (a slow YouTube lookup needs the memory)`)).catch(() => false);
+    void parkInstagramBrowser('to free memory for a slow YouTube lookup').catch(() => false);
+  });
 
   /**
    * Home-screen top-ups run one at a time and only when the machine has room (homeTopUps.ts): this
@@ -362,6 +374,8 @@ export async function buildServer() {
       ffmpeg: await detectFfmpeg(),
       youtubeSearch: youtubeSearchStatus(),
       youtubePlayer: youtubePlayerStatus(),
+      youtubeAvatar: youtubeAvatarStatus(),
+      youtubeSlow: youtubeSlowLookups(),
       resolver: config.resolver,
       proxyAllowedHosts: config.proxyAllowedHosts,
       uptimeSec: Math.round(process.uptime()),
@@ -379,7 +393,7 @@ export async function buildServer() {
 
     if (isYouTubeUrl(url)) {
       try {
-        return await resolveYouTube(url, (m) => log(m), youtubeCookieFile());
+        return await resolveYouTube(url, (m) => log(m), youtubeCookieFile(), undefined, { ahead: body.ahead === true });
       } catch (e) {
         const err = e as Error;
         req.log.warn({ err: err.message }, 'youtube resolve failed');
@@ -764,8 +778,9 @@ export async function buildServer() {
           return profileFacebook(user, offset, count, facebookLog);
         }
         if (platform === 'youtube') {
-          const c = await channelVideos(user, offset, count, youtubeLog);
-          const resp: ProfileResponse = { user: { uniqueId: user, nickname: c.items[0]?.author.nickname }, items: c.items, offset, hasMore: c.hasMore, warnings: [], elapsedMs: Date.now() - t0 };
+          // (the channel's picture: half a kilobyte from YouTube, asked beside the list, never in its way)
+          const [c, avatar] = await Promise.all([channelVideos(user, offset, count, youtubeLog), offset ? undefined : channelAvatar({ handle: user }, youtubeLog)]);
+          const resp: ProfileResponse = { user: { uniqueId: user, nickname: c.items[0]?.author.nickname, avatar }, items: c.items, offset, hasMore: c.hasMore, warnings: [], elapsedMs: Date.now() - t0 };
           return resp;
         }
         return fetchProfile(user, offset, count, socialLog('profile'));
@@ -777,6 +792,15 @@ export async function buildServer() {
       return socialFail(reply, e, t0);
     }
   });
+  // The profile picture of a video's channel. YouTube's listings name the channel only, so the
+  // feed asks here when a video comes into view; one small request to YouTube per channel, kept a day.
+  app.post<{ Body: AvatarRequest }>('/api/avatar', resolveLimit, async (req): Promise<AvatarResponse> => {
+    const b = req.body || ({} as AvatarRequest);
+    if (platformOf(b.platform) !== 'youtube') return {};
+    const str = (v: unknown): string | undefined => (typeof v === 'string' && v.length <= 200 ? v : undefined);
+    return { avatar: await channelAvatar({ videoId: str(b.videoId), channelId: str(b.channelId), handle: str(b.handle) }, (m) => req.log.info({ what: 'youtube' }, m)) };
+  });
+
   app.post<{ Body: FollowRequest }>('/api/follow', resolveLimit, async (req, reply) => {
     const t0 = Date.now();
     try {

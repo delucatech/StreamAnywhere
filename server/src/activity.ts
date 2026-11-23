@@ -26,11 +26,18 @@ export interface Act {
   id: number;
   what: string;
   step?: string;
+  /** The step in a few words, for the one-line status of the page that waits */
+  brief?: string;
   startedAt: number;
   stepAt: number;
   platform?: Platform;
   background: boolean;
+  /** An API request: "POST /api/resolve", and what it is about (a video's address) */
+  route?: string;
+  ref?: string;
   parent?: Act;
+  /** Activities that repeat this one's steps (a later request waiting for the same work, see followActivity) */
+  followers?: Set<Act>;
   endedAt?: number;
   result?: string;
   failed?: boolean;
@@ -40,6 +47,9 @@ export interface ActivityOptions {
   platform?: Platform;
   /** Work nobody is waiting for (a top-up, a refresh on a timer): listed after the viewers' work */
   background?: boolean;
+  /** The API request this activity is (activityRoutes.ts): the waiting page finds its own work by these */
+  route?: string;
+  ref?: string;
 }
 
 const als = new AsyncLocalStorage<Act>();
@@ -61,7 +71,7 @@ const clip = (text: string, max = 240): string => {
 /** Starts an activity by hand (the request hook); the caller ends it with endActivity(). */
 export function beginActivity(what: string, opts: ActivityOptions = {}): Act {
   const now = Date.now();
-  const act: Act = { id: nextId++, what: clip(what), startedAt: now, stepAt: now, platform: opts.platform, background: Boolean(opts.background), parent: als.getStore() };
+  const act: Act = { id: nextId++, what: clip(what), startedAt: now, stepAt: now, platform: opts.platform, background: Boolean(opts.background), route: opts.route, ref: opts.ref, parent: als.getStore() };
   running.set(act.id, act);
   if (act.parent && !act.parent.endedAt) setStep(act.parent, act.what);
   return act;
@@ -82,17 +92,53 @@ export function endActivity(act: Act, outcome: { failed?: boolean; result?: stri
 /** Runs `fn` inside `act` (say() below it reports to `act`). */
 export const inActivity = <T>(act: Act, fn: () => T): T => als.run(act, fn);
 
-function setStep(act: Act, text: string): void {
+function setStep(act: Act, text: string, brief?: string): void {
   act.step = text;
+  act.brief = brief;
   act.stepAt = Date.now();
-  if (act.parent && !act.parent.endedAt) setStep(act.parent, text);
+  if (act.parent && !act.parent.endedAt) setStep(act.parent, text, brief);
+  if (act.followers) {
+    for (const f of act.followers) {
+      if (f.endedAt) act.followers.delete(f);
+      else setStep(f, text, brief);
+    }
+  }
 }
 
-/** The step the work in progress is on; a no-op outside any activity. */
-export function say(text: string): void {
+/** The activity this code runs in (kept by work that later requests may wait for, see followActivity). */
+export const currentActivity = (): Act | undefined => als.getStore();
+
+const isAncestor = (a: Act, of: Act): boolean => {
+  for (let p = of.parent; p; p = p.parent) if (p === a) return true;
+  return false;
+};
+
+/**
+ * Makes the activity this code runs in repeat `of`'s steps from now on: a second request that
+ * waits for work an earlier one started (the same video asked again) then says what that work is
+ * doing instead of standing still. A no-op outside an activity, and for one that gets `of`'s steps
+ * already (its parent) or would feed them back (its child).
+ */
+export function followActivity(of: Act | undefined): void {
+  try {
+    const me = als.getStore();
+    if (!of || !me || of === me || of.endedAt || me.endedAt || isAncestor(me, of) || isAncestor(of, me)) return;
+    (of.followers ||= new Set()).add(me);
+    if (of.step) setStep(me, of.step, of.brief);
+  } catch {
+    /* a status line never breaks the work */
+  }
+}
+
+/**
+ * The step the work in progress is on; a no-op outside any activity. `brief`: the same step in a
+ * few words ("reading the video's page") for the one-line status of the page that waits; without
+ * it the page shortens `text` itself.
+ */
+export function say(text: string, brief?: string): void {
   try {
     const act = als.getStore();
-    if (act && !act.endedAt && text) setStep(act, clip(text));
+    if (act && !act.endedAt && text) setStep(act, clip(text), brief ? clip(brief, 60) : undefined);
   } catch {
     /* a status line never breaks the work */
   }
@@ -102,12 +148,12 @@ export function say(text: string): void {
  * say() for later: a function that reports steps to the activity of *this* moment, for callbacks
  * that run outside it (a child process's output, a timer set up elsewhere).
  */
-export function sayer(): (text: string) => void {
+export function sayer(): (text: string, brief?: string) => void {
   const act = als.getStore();
   if (!act) return () => undefined;
-  return (text) => {
+  return (text, brief) => {
     try {
-      if (!act.endedAt && text) setStep(act, clip(text));
+      if (!act.endedAt && text) setStep(act, clip(text), brief ? clip(brief, 60) : undefined);
     } catch {
       /* a status line never breaks the work */
     }
@@ -138,6 +184,9 @@ function entryOf(a: Act, now: number): ActivityEntry {
     id: a.id,
     what: a.what,
     step: a.step && a.step !== a.what ? a.step : undefined,
+    brief: a.step && a.step !== a.what && !a.endedAt ? a.brief : undefined,
+    route: a.route,
+    ref: a.ref,
     forMs: (a.endedAt || now) - a.startedAt,
     stepForMs: a.step && !a.endedAt ? now - a.stepAt : undefined,
     platform: a.platform,

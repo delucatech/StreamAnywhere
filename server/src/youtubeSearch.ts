@@ -55,6 +55,8 @@ export interface SearchEntry {
   view_count?: number;
   live_status?: 'is_live' | 'is_upcoming';
   thumbnails: { url: string; width?: number; height?: number }[];
+  /** The channel's profile picture as the result carries it (one small size; youtube.ts picks and keeps it) */
+  channel_thumbnails?: { url: string; width?: number }[];
 }
 
 export interface ParsedAnswer {
@@ -116,6 +118,7 @@ export function videoRendererToEntry(v: any): SearchEntry | undefined {
   const live = badgeStyles.includes('BADGE_STYLE_TYPE_LIVE_NOW') || overlayStyles.includes('LIVE');
   const upcoming = Boolean(v.upcomingEventData) || overlayStyles.includes('UPCOMING');
   const thumbs: any[] = Array.isArray(v.thumbnail?.thumbnails) ? v.thumbnail.thumbnails : [];
+  const channelThumbs: any[] = v.channelThumbnailSupportedRenderers?.channelThumbnailWithLinkRenderer?.thumbnail?.thumbnails;
   return {
     id,
     title: text(v.title),
@@ -125,6 +128,7 @@ export function videoRendererToEntry(v: any): SearchEntry | undefined {
     duration: parseDuration(text(v.lengthText)),
     view_count: parseViews(text(v.viewCountText)),
     live_status: live ? 'is_live' : upcoming ? 'is_upcoming' : undefined,
+    channel_thumbnails: Array.isArray(channelThumbs) ? channelThumbs.filter((t) => typeof t?.url === 'string').map((t) => ({ url: t.url, width: Number(t.width) || undefined })) : undefined,
     thumbnails: thumbs
       .filter((t) => typeof t?.url === 'string')
       .map((t) => ({ url: cleanThumb(t.url), width: Number(t.width) || undefined, height: Number(t.height) || undefined })),
