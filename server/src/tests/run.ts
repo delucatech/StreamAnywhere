@@ -19,7 +19,7 @@ import { setAvatarTransport } from '../youtubeAvatar';
 import { hostAllowed, ipIsPrivate, assertSafeUpstream } from '../ssrf';
 import { parseTikTokUrl } from '../tiktok';
 import { isTikTokAd, itemToFeedItem } from '../feed';
-import { entryToFeedItem, isYouTubeUrl, pickAudio, resolveYouTube, searchYouTube, setYouTubeFileCheck, setYouTubeRoomMaker, setYouTubeSlowInfo, YouTubeError, youtubeSlowLookups, youTubeVideoId } from '../youtube';
+import { entryToFeedItem, isYouTubeUrl, pickAudio, resolveYouTube, searchYouTube, setYouTubeFileCheck, setYouTubeLookupHooks, setYouTubeRoomMaker, setYouTubeSlowInfo, YouTubeError, youtubeSlowLookups, youTubeVideoId } from '../youtube';
 import { BUILTIN_CLIENT, directPlayerEnabled, DirectPlayerError, isBotCheck, playability, playerAnswerToInfo, playerInfoDirect, playerRequestBody, setPlayerTransport, validClient, visitorFromPage, youtubePlayerStatus, type PlayerTransport } from '../youtubePlayer';
 import { getMedia } from '../mediaStore';
 import { clientVersionFromPage, directSearchEnabled, parseDuration, parseSearchAnswer, parseViews, searchDirect, SearchLayoutError, setSearchTransport, videoRendererToEntry, VIDEOS_ONLY, youtubeSearchStatus, type SearchTransport } from '../youtubeSearch';
@@ -1612,8 +1612,73 @@ async function youtubePlayerOfflineChecks(): Promise<void> {
     gates.get('kkkkkkkkkk2')!();
     const r2 = await k2;
     check('every one is answered through yt-dlp, and the lane is free again', r3 === r3again && r2.resolver === 'ytdlp' && r2.formats[0]?.id === '136' && Boolean(r2.formats[0]?.audioProxyUrl) && youtubeSlowLookups().running === 0 && youtubeSlowLookups().queued === 0, { lane: youtubeSlowLookups(), r2: r2.formats.map((f) => f.id) });
+
+    // a video the guest's client is refused ("made for kids") is asked for as the signed-in account first (the code sign-in)
+    setYouTubeSlowInfo(undefined);
+    for (const id of ['kkkkkkkkkk5', 'kkkkkkkkkk6', 'kkkkkkkkkk7', 'kkkkkkkkkk9']) kids.add(id);
+    setPlayerTransport({
+      ...scripted,
+      player: async (video, c, v) => {
+        if (video === 'kkkkkkkkkk8') throw new Error('simulated outage');
+        return kids.has(video) ? { playabilityStatus: { status: 'UNPLAYABLE', reason: 'This video is not available' }, videoDetails: { videoId: video } } : scripted.player(video, c, v);
+      },
+    });
+    const sent: { id: string; auth: boolean; client?: string; skip?: string }[] = [];
+    let token: string | undefined = 'TOKEN';
+    let accountFails = false;
+    let guestSays: string | undefined;
+    const botCheck = (id: string): string => `yt-dlp failed: [youtube] ${id}: Sign in to confirm you’re not a bot. This helps protect our community. Use --cookies-from-browser or --cookies for the authentication. See  https://github.com/yt-dlp/yt-dlp/wiki/FAQ  for how to manually pass cookies`;
+    setYouTubeLookupHooks({
+      token: async () => token,
+      ytdlp: async (req) => {
+        const id = new URL(req.url).searchParams.get('v') || '';
+        const args = req.extractorArgs?.youtube || {};
+        const auth = req.headers?.Authorization;
+        sent.push({ id, auth: Boolean(auth), client: args.player_client?.join(','), skip: args.player_skip?.join(',') });
+        if (auth && auth !== 'Bearer TOKEN') throw new Error('the wrong token was sent');
+        if (auth && accountFails) throw new Error('yt-dlp failed: HTTP Error 401: Unauthorized');
+        if (!auth && guestSays) throw new Error(guestSays);
+        const file = (itag: number): string => `https://rr1---sn-test.googlevideo.com/videoplayback?id=${id}&itag=${itag}&expire=1900000000`;
+        return {
+          id,
+          // what yt-dlp makes up when the TV answer names no title
+          title: auth ? `youtube video #${id}` : `Video ${id}`,
+          channel: 'Kids TV',
+          duration: 60,
+          formats: [
+            { format_id: '136', url: file(136), vcodec: 'avc1.4d401f', acodec: 'none', protocol: 'https', width: 1280, height: 720, tbr: 1500 },
+            { format_id: '140', url: file(140), vcodec: 'none', acodec: 'mp4a.40.2', protocol: 'https', abr: 128 },
+          ],
+        };
+      },
+    });
+    const lane0 = youtubeSlowLookups();
+    const r5 = await resolveYouTube(yt('kkkkkkkkkk5'), noLog);
+    check('with a code sign-in such a video is asked for as the account, and only so', sent.length === 1 && sent[0].auth && sent[0].client === 'tv_downgraded' && sent[0].skip === 'webpage,configs,initial_data' && r5.resolver === 'ytdlp' && r5.formats[0]?.id === '136' && youtubeSlowLookups().asAccount === lane0.asAccount + 1, { sent, r5: r5.formats.map((f) => f.id) });
+    check("the title yt-dlp makes up for that answer is not passed on (the feed keeps its own)", r5.title === undefined, r5.title);
+    accountFails = true;
+    sent.length = 0;
+    const r6 = await resolveYouTube(yt('kkkkkkkkkk6'), noLog);
+    check('when the lookup as the account fails, the guest route is next', sent.map((a) => a.auth).join() === 'true,false' && r6.title === 'Video kkkkkkkkkk6' && Boolean(youtubeSlowLookups().lastAccountFailure?.reason.includes('401')) && youtubeSlowLookups().asGuest === lane0.asGuest + 1, { sent, status: youtubeSlowLookups() });
+    accountFails = false;
+    token = undefined;
+    guestSays = botCheck('kkkkkkkkkk7');
+    sent.length = 0;
+    const r7 = await resolveYouTube(yt('kkkkkkkkkk7'), noLog).catch((e) => e);
+    check('without a sign-in a bot check is the answer, and says what lifts it', sent.length === 1 && !sent[0].auth && r7 instanceof YouTubeError && r7.status === 503 && /not a bot/.test(r7.message) && /Sign in with a code/.test(r7.message) && !/--cookies/.test(r7.message), { sent, r7: String(r7) });
+    token = 'TOKEN';
+    guestSays = botCheck('kkkkkkkkkk8');
+    sent.length = 0;
+    const r8 = await resolveYouTube(yt('kkkkkkkkkk8'), noLog).catch((e) => e);
+    check('an ordinary video goes to the guest route first; refused there, it is asked for as the account', !(r8 instanceof Error) && sent.map((a) => a.auth).join() === 'false,true' && sent[0].skip === undefined, { sent, r8: String(r8 instanceof Error ? r8 : r8.formats.length) });
+    accountFails = true;
+    guestSays = botCheck('kkkkkkkkkk9');
+    sent.length = 0;
+    const r9 = await resolveYouTube(yt('kkkkkkkkkk9'), noLog).catch((e) => e);
+    check('refused both ways: the account is asked once, and the refusal is the answer', r9 instanceof YouTubeError && r9.status === 503 && sent.map((a) => a.auth).join() === 'true,false' && !/Sign in with a code/.test(r9.message), { sent, r9: String(r9) });
   } finally {
     setPlayerTransport(undefined);
+    setYouTubeLookupHooks();
     setYouTubeSlowInfo(undefined);
     setYouTubeFileCheck(undefined);
     setYouTubeRoomMaker(undefined);

@@ -5,9 +5,12 @@
  * password anywhere near this server.
  *
  * What the sign-in is used for: the account's home feed, read from YouTube's own TV API
- * (youtubei/v1/browse, the TVHTML5 client, `Authorization: Bearer`) over plain HTTPS. Playback is
- * unchanged (the guest two-file path through yt-dlp): yt-dlp dropped this kind of sign-in in 2024,
- * so a video that YouTube refuses to a guest (age gate) still needs the cookie sign-in.
+ * (youtubei/v1/browse, the TVHTML5 client, `Authorization: Bearer`) over plain HTTPS. Ordinary
+ * playback is unchanged (the guest path). Since 2026-11-23 a video YouTube refuses to a guest
+ * ("made for kids" through the JS-less client, or the "are you a bot?" check the VM's address gets
+ * on the other clients) is looked up as the account: tvBearer() hands the token to youtube.ts,
+ * which gives it to yt-dlp for the TV player call only (yt-dlp dropped its own handling of this
+ * sign-in in 2024).
  *
  * Measured 2026-11-20 from the dev PC with a real account:
  *  - POST youtube.com/o/oauth2/device/code -> { device_code, user_code "XXXX-XXXX", expires_in 1800,
@@ -350,6 +353,21 @@ async function accessToken(force = false): Promise<string> {
     });
   }
   return refreshing;
+}
+
+/**
+ * A valid access token of the code sign-in, for a request made as the account outside this file
+ * (youtube.ts: a video YouTube refuses to a guest); undefined when there is no sign-in, Google no
+ * longer accepts it, or it could not be renewed right now. It is the sign-in: never logged, and
+ * sent nowhere but youtube.com.
+ */
+export async function tvBearer(): Promise<string | undefined> {
+  if (!load()) return undefined;
+  try {
+    return await accessToken();
+  } catch {
+    return undefined;
+  }
 }
 
 /** One call of YouTube's TV API as the signed-in account. Throws TvAuthError when the sign-in is dead. */

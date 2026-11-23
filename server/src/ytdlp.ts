@@ -168,6 +168,11 @@ export interface InfoRequest {
   cookieFile?: string;
   /** --extractor-args, per extractor: {youtube: {skip: ['hls', 'dash']}} = "youtube:skip=hls,dash" */
   extractorArgs?: Record<string, Record<string, string[]>>;
+  /**
+   * Request headers for every request of this extraction (the code sign-in's token for YouTube's TV
+   * client). Through the warm helper only: on a command line they would show in the process list.
+   */
+  headers?: Record<string, string>;
 }
 
 const DAEMONS = Math.max(1, Number(process.env.YTDLP_DAEMONS) || 2);
@@ -352,6 +357,7 @@ class Daemon {
       if (req.playlistItems) body.playlist_items = req.playlistItems;
       if (req.cookieFile) body.cookiefile = req.cookieFile;
       if (req.extractorArgs) body.extractor_args = req.extractorArgs;
+      if (req.headers) body.http_headers = req.headers;
       this.proc.stdin!.write(JSON.stringify(body) + '\n');
     });
   }
@@ -486,6 +492,7 @@ export async function ytdlpInfo(req: InfoRequest, timeoutMs = 150_000): Promise<
     step(`yt-dlp: starting the lookup (asked${req.cookieFile ? ' with the signed-in cookies' : ''}, waiting for its first step)`, 'starting the lookup');
     return d.request(req, Math.max(1, deadline - Date.now()), timeoutMs, (text) => step(ytdlpStep(text), ytdlpBrief(text)));
   }
+  if (req.headers) throw new Error('this lookup needs the yt-dlp helper process (its request headers are not put on a command line)');
   say('yt-dlp: running its command line (no warm helper on this server: every lookup pays the Python start)');
   const args = req.flat ? ['--flat-playlist', '-J'] : ['-j'];
   if (req.noplaylist) args.push('--no-playlist');

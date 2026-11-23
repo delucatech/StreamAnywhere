@@ -10,7 +10,8 @@ Hello:    {"id": 0, "ok": true, "version": "2026.10.26", "direct_client": {...} 
            "js_runtime": "/usr/local/bin/deno" | null}
 Request:  {"id": 1, "url": "...", "flat": true, "playlist_items": "1-30", "noplaylist": false,
            "cookiefile": "/path/to/cookies.txt",
-           "extractor_args": {"youtube": {"skip": ["hls", "dash"]}}}
+           "extractor_args": {"youtube": {"skip": ["hls", "dash"]}},
+           "http_headers": {"Authorization": "Bearer ..."}}
 Progress: {"id": 1, "progress": "[youtube] dQw4w9WgXcQ: Downloading webpage"}   (any number, before the response)
 Response: {"id": 1, "ok": true, "info": {...}}  or  {"id": 1, "ok": false, "error": "..."}
 
@@ -23,6 +24,10 @@ package, part of `pip install "yt-dlp[default]"`) yt-dlp runs YouTube's player s
 the web and TV player clients: the way to the videos the JS-less client is refused ("made for
 kids"), and a second route when YouTube closes that client. Progress lines are yt-dlp's own
 messages for the request in hand; the server shows them to the viewer who is waiting.
+
+http_headers go out with every request of that extraction (the server's sign-in with a code: the
+account's token for YouTube's TV player client, which yt-dlp itself no longer handles). They are
+taken out of the answer again: yt-dlp copies them into each format's own headers.
 
 The yt_dlp package comes from the running interpreter (pip / venv install); when the environment
 variable YTDLP_PATH names a zipapp (the GitHub release file), that file is put on sys.path instead.
@@ -102,6 +107,18 @@ class _Steps:
         pass
 
 
+def _without_headers(info, names):
+    """Removes the named request headers from the answer (the top level and every format)."""
+    if not isinstance(info, dict):
+        return
+    lower = {n.lower() for n in names}
+    for holder in [info] + [f for f in (info.get("formats") or []) + (info.get("requested_formats") or []) if isinstance(f, dict)]:
+        h = holder.get("http_headers")
+        if isinstance(h, dict):
+            for k in [k for k in h if k.lower() in lower]:
+                del h[k]
+
+
 def main():
     out = sys.stdout
     try:
@@ -141,10 +158,15 @@ def main():
         if req.get("cookiefile"):
             # The YouTube sign-in. yt-dlp saves the (possibly rotated) jar back to the file on close.
             opts["cookiefile"] = str(req["cookiefile"])
+        headers = req.get("http_headers") if isinstance(req.get("http_headers"), dict) else None
+        if headers:
+            opts["http_headers"] = {str(k): str(v) for k, v in headers.items()}
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(req["url"], download=False)
                 info = ydl.sanitize_info(info)
+            if headers:
+                _without_headers(info, headers.keys())
             resp = {"id": rid, "ok": True, "info": info}
         except Exception as e:  # noqa: BLE001
             msg = str(e)

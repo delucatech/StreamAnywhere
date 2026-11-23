@@ -27,7 +27,7 @@ import { currentActivity, followActivity, say, track, type Act } from './activit
 import { DirectPlayerError, directPlayerEnabled, notePlayerDirect, notePlayerFallback, playerClient, playerInfoDirect } from './youtubePlayer';
 import { avatarIfKnown, avatarKept, channelAvatar, pickAvatar, rememberAvatar } from './youtubeAvatar';
 import { directSearchEnabled, noteDirect, noteFallback, searchDirect } from './youtubeSearch';
-import { tvHomeFeed } from './youtubeTv';
+import { tvBearer, tvHomeFeed } from './youtubeTv';
 
 /**
  * Listings keep a long limit (a page of a busy hashtag can take a while on the e2-micro).
@@ -299,7 +299,7 @@ export function setYouTubeRoomMaker(fn: (() => void) | undefined): void {
 }
 
 /** Slow lookups running and waiting in line, for /api/health and the "what is the server busy with" lists. */
-export const youtubeSlowLookups = (): { running: number; queued: number } => ({ running: slowRunning, queued: slowQueue.length });
+export const youtubeSlowLookups = (): { running: number; queued: number; asAccount: number; asGuest: number; lastAccountFailure?: { at: string; reason: string } } => ({ running: slowRunning, queued: slowQueue.length, ...slowStats });
 
 /** The next in line: the video a viewer asked for last, else the one asked ahead the longest ago. */
 function nextSlowTurn(): SlowTurn | undefined {
@@ -448,27 +448,104 @@ export function setYouTubeFileCheck(check: ((f: any) => Promise<boolean>) | unde
 }
 
 /**
- * The video's info through yt-dlp: as a guest, then (refused, and time left) with the account's cookies.
+ * yt-dlp asking as the signed-in account (the code sign-in, youtubeTv.ts): YouTube's TV player
+ * client in the older version yt-dlp calls "tv_downgraded", with the account's token on the
+ * request, and nothing else asked (the watch page and its data go through the web client, which
+ * answers a TV token with HTTP 400).
+ *
+ * Measured on the VM, 2026-11-23, when YouTube answered its address "Sign in to confirm you're not
+ * a bot" for every guest client that plays a "made for kids" video (tv_samsung, web; a visitor id
+ * changed nothing):
+ *  - TVHTML5 with the token, asked directly: playable, but 26 formats without an address (SABR only)
+ *  - yt-dlp player_client=tv with the token: the same, "missing a URL"
+ *  - yt-dlp player_client=tv_downgraded with the token: 23 formats in 5.8 s (Deno included), and
+ *    the file answered 206 at once - no ad time to wait out, unlike the guest's TV route
+ *  - the token on every request of an ordinary extraction: HTTP 400 "invalid argument" (web client)
+ * The answer names no title (the feed has it from its listing).
+ */
+const SIGNED_IN_ARGS = { youtube: { ...VIDEO_EXTRACTOR_ARGS.youtube, player_client: ['tv_downgraded'], player_skip: ['webpage', 'configs', 'initial_data'] } };
+
+/** How the slow route's lookups went (for /api/health) */
+const slowStats = { asAccount: 0, asGuest: 0, lastAccountFailure: undefined as { at: string; reason: string } | undefined };
+
+/** Tests: the yt-dlp call and the code sign-in's token (undefined restores each). */
+let askYtDlp: typeof ytdlpInfo = ytdlpInfo;
+let accountToken: () => Promise<string | undefined> = tvBearer;
+export function setYouTubeLookupHooks(hooks: { ytdlp?: typeof ytdlpInfo; token?: () => Promise<string | undefined> } = {}): void {
+  askYtDlp = hooks.ytdlp || ytdlpInfo;
+  accountToken = hooks.token || tvBearer;
+}
+
+const BOT_CHECK = /sign in to confirm you.re not a bot/i;
+
+/**
+ * The video's info through yt-dlp.
+ *
  * `skipClient`: a player client that already said it has no stream for this video (the direct
- * lookup's); with a JS runtime yt-dlp has other clients and need not ask that one again.
+ * lookup's: "made for kids", an age gate). Such a video is asked for as the signed-in account
+ * first when there is a code sign-in - the quicker route, and the one YouTube does not put a bot
+ * check or an ad's wait in front of. Otherwise, and when that fails: as a guest (with a JS runtime
+ * yt-dlp has other clients and need not ask the refused one again), then - refused, and time left -
+ * with the account's cookies, then as the account when that was not tried yet.
  */
 async function infoFromYtDlp(id: string, deadline: number, log: (m: string) => void, cookieFile?: string, skipClient?: string): Promise<any> {
-  const t0 = Date.now();
   const url = `https://www.youtube.com/watch?v=${id}`;
-  const extractorArgs = skipClient && ytdlpJsRuntime() ? { youtube: { ...VIDEO_EXTRACTOR_ARGS.youtube, player_client: ['default', `-${skipClient}`] } } : VIDEO_EXTRACTOR_ARGS;
-  try {
-    return await ytdlpInfo({ url, noplaylist: true, extractorArgs }, Math.max(1, deadline - t0));
-  } catch (e) {
-    const guestErr = classify((e as Error).message);
-    log(`youtube ${id}: guest extraction failed after ${Date.now() - t0} ms (${guestErr.message.slice(0, 120)})`);
-    if (!cookieFile || deadline - Date.now() < RETRY_MIN_MS) throw guestErr;
-    log(`youtube ${id}: retrying with the account's cookies`);
-    say(`YouTube refused the guest request (${guestErr.message.slice(0, 80)}): trying again with your signed-in cookies`, 'trying again with your sign-in');
+  const left = (): number => deadline - Date.now();
+  let triedAccount = false;
+  /** undefined: no code sign-in (or no time left); throws what yt-dlp said otherwise */
+  const asAccount = async (why: string): Promise<any | undefined> => {
+    if (triedAccount || left() < RETRY_MIN_MS) return undefined;
+    const token = await accountToken().catch(() => undefined);
+    if (!token) return undefined;
+    triedAccount = true;
+    const t1 = Date.now();
+    say(`${why}: asking YouTube as your account (the sign-in with a code), through yt-dlp and Deno (about 6 s on the small server)`, 'asking YouTube as your account');
     try {
-      return await ytdlpInfo({ url, noplaylist: true, cookieFile, extractorArgs }, deadline - Date.now());
-    } catch (e2) {
-      throw classify((e2 as Error).message);
+      const info = await askYtDlp({ url, noplaylist: true, extractorArgs: SIGNED_IN_ARGS, headers: { Authorization: `Bearer ${token}` } }, Math.max(1, left()));
+      slowStats.asAccount++;
+      log(`youtube ${id}: looked up as the signed-in account in ${Date.now() - t1} ms`);
+      return info;
+    } catch (e) {
+      const reason = ((e as Error).message || String(e)).slice(0, 200);
+      slowStats.lastAccountFailure = { at: new Date().toISOString(), reason: `${id}: ${reason}` };
+      log(`youtube ${id}: the lookup as the signed-in account failed after ${Date.now() - t1} ms (${reason.slice(0, 120)})`);
+      throw e;
     }
+  };
+  if (skipClient) {
+    const info = await asAccount(`YouTube gives a guest's ${skipClient} app no stream for this video`).catch(() => undefined);
+    if (info) return info;
+    if (triedAccount) say('the lookup as your account failed: asking YouTube as a guest (yt-dlp, the slow route: 10-40 s)', 'asking YouTube as a guest');
+  }
+  const extractorArgs = skipClient && ytdlpJsRuntime() ? { youtube: { ...VIDEO_EXTRACTOR_ARGS.youtube, player_client: ['default', `-${skipClient}`] } } : VIDEO_EXTRACTOR_ARGS;
+  const t1 = Date.now();
+  try {
+    const info = await askYtDlp({ url, noplaylist: true, extractorArgs }, Math.max(1, left()));
+    slowStats.asGuest++;
+    return info;
+  } catch (e) {
+    let last = classify((e as Error).message);
+    log(`youtube ${id}: guest extraction failed after ${Date.now() - t1} ms (${last.message.slice(0, 120)})`);
+    if (cookieFile && left() >= RETRY_MIN_MS) {
+      log(`youtube ${id}: retrying with the account's cookies`);
+      say(`YouTube refused the guest request (${last.message.slice(0, 80)}): trying again with your signed-in cookies`, 'trying again with your sign-in');
+      try {
+        return await askYtDlp({ url, noplaylist: true, cookieFile, extractorArgs }, left());
+      } catch (e2) {
+        last = classify((e2 as Error).message);
+      }
+    }
+    try {
+      const info = await asAccount(`YouTube refused the guest request (${last.message.slice(0, 60)})`);
+      if (info) return info;
+    } catch {
+      /* logged above; the guest's refusal is the answer */
+    }
+    // (no sign-in to ask with: the viewer can add one)
+    if (!triedAccount && !cookieFile && BOT_CHECK.test(last.message)) {
+      throw new YouTubeError(`${last.message.replace(/\s*Use --cookies[\s\S]*$/, '')} Signing in to YouTube in this app (Profile, "Sign in with a code") lets the server ask for such videos as your account.`, last.status);
+    }
+    throw last;
   }
 }
 
@@ -606,7 +683,8 @@ async function resolveUncached(id: string, inputUrl: string, log: (m: string) =>
     id,
     inputUrl,
     canonicalUrl: `https://www.youtube.com/watch?v=${id}`,
-    title: info.title,
+    // (yt-dlp makes up "youtube video #<id>" when the answer names no title: the feed's own stays)
+    title: typeof info.title === 'string' && !/^youtube video #/i.test(info.title) ? info.title : undefined,
     author: handleOf(info) || info.channel || info.uploader,
     authorAvatar: avatarIfKnown(channelRef),
     duration: typeof info.duration === 'number' ? info.duration : undefined,

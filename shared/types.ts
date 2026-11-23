@@ -169,8 +169,8 @@ export interface HealthResponse {
   youtubePlayer?: { mode: 'direct' | 'ytdlp'; client: string; direct: number; fallback: number; lastFallback?: { at: string; reason: string } };
   /** YouTube channel pictures (youtubeAvatar.ts): how many are kept and how the lookups went */
   youtubeAvatar?: { kept: number; running: number; waiting: number; lookups: number; requests: number; found: number; failed: number; refreshed: number; changed: number; lastFailure?: { at: string; reason: string } };
-  /** YouTube's slow lookups (yt-dlp, one at a time): running and waiting in line */
-  youtubeSlow?: { running: number; queued: number };
+  /** YouTube's slow lookups (yt-dlp, one at a time): running and waiting in line, and how many were answered as the signed-in account / as a guest */
+  youtubeSlow?: { running: number; queued: number; asAccount?: number; asGuest?: number; lastAccountFailure?: { at: string; reason: string } };
   resolver: string;
   proxyAllowedHosts: string[];
   uptimeSec: number;
