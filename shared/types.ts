@@ -124,6 +124,11 @@ export interface AvatarRequest {
 export interface AvatarResponse {
   /** An image address; absent when the platform gave none */
   avatar?: string;
+  /**
+   * The picture is one the server kept (up to 30 days) and it is checking for a newer one right
+   * now: asking again a few seconds later gives the channel's current picture.
+   */
+  refreshing?: boolean;
 }
 
 export interface ReportRequest {
@@ -163,7 +168,7 @@ export interface HealthResponse {
    */
   youtubePlayer?: { mode: 'direct' | 'ytdlp'; client: string; direct: number; fallback: number; lastFallback?: { at: string; reason: string } };
   /** YouTube channel pictures (youtubeAvatar.ts): how many are kept and how the lookups went */
-  youtubeAvatar?: { kept: number; running: number; waiting: number; lookups: number; requests: number; found: number; failed: number; lastFailure?: { at: string; reason: string } };
+  youtubeAvatar?: { kept: number; running: number; waiting: number; lookups: number; requests: number; found: number; failed: number; refreshed: number; changed: number; lastFailure?: { at: string; reason: string } };
   /** YouTube's slow lookups (yt-dlp, one at a time): running and waiting in line */
   youtubeSlow?: { running: number; queued: number };
   resolver: string;

@@ -25,7 +25,7 @@ import { defaultExpiry, registerMedia } from './mediaStore';
 import { ytdlpInfo, ytdlpJsRuntime } from './ytdlp';
 import { currentActivity, followActivity, say, track, type Act } from './activity';
 import { DirectPlayerError, directPlayerEnabled, notePlayerDirect, notePlayerFallback, playerClient, playerInfoDirect } from './youtubePlayer';
-import { avatarIfKnown, channelAvatar, pickAvatar, rememberAvatar } from './youtubeAvatar';
+import { avatarIfKnown, avatarKept, channelAvatar, pickAvatar, rememberAvatar } from './youtubeAvatar';
 import { directSearchEnabled, noteDirect, noteFallback, searchDirect } from './youtubeSearch';
 import { tvHomeFeed } from './youtubeTv';
 
@@ -128,7 +128,7 @@ export function entryToFeedItem(e: any): FeedItem | undefined {
   // The channel's picture: a search result carries it (kept for the channel's other videos); the
   // other listings do not, so a picture learned earlier is used and the feed asks for the rest
   // when a video comes into view (POST /api/avatar).
-  const channel = { channelId: e.channel_id || undefined, handle };
+  const channel = { channelId: e.channel_id || undefined, handle, videoId: id };
   const carried = pickAvatar(e.channel_thumbnails);
   if (carried) rememberAvatar(channel, carried);
   return {
@@ -204,6 +204,21 @@ export async function searchYouTube(q: string, offset: number, log: (m: string) 
   }
   const r = await listFlat((n) => `ytsearch${n}:${q}`, offset, PAGE, log);
   return { q, items: r.items, users: [], hasMore: r.hasMore, offset: offset + PAGE, warnings: [], elapsedMs: Date.now() - t0 };
+}
+
+/**
+ * Feed items on their way out, each with its channel's picture where the server has one kept
+ * (30 days, youtubeAvatar.ts): the picture is on screen with the video, without a request of its
+ * own. Items in stock were listed before their pictures were learned, so this is done at the
+ * door; the stocked items are not changed.
+ */
+export function withYouTubeAvatars<T extends FeedItem>(items: T[], log: (m: string) => void = () => undefined): T[] {
+  return items.map((it) => {
+    if (it.author?.avatar) return it;
+    // (a kept picture older than a day goes out as it is and is checked behind this answer)
+    const avatar = avatarKept({ channelId: it.author?.id, handle: it.author?.uniqueId, videoId: it.id }, log);
+    return avatar ? { ...it, author: { ...it.author, avatar } } : it;
+  });
 }
 
 /** The Shorts tab of a hashtag (the guest Explore feed); `page` 0 = the first 30. */

@@ -42,10 +42,18 @@
  * A channel id that does not exist and an auto-generated "Topic" channel answer `{"header":{}}`:
  * no picture. With a video id the watch data is asked next (not tried against a Topic video).
  *
+ * How long a picture is kept (the viewer never waits for one twice): 30 days, in memory and in a
+ * file that survives a restart (loadAvatarStore). A picture older than a day is still handed out at
+ * once, and looked up again behind the answer; when the channel has a new one, the next ask gets it
+ * (the feed asks once more a few seconds later when the answer says `refreshing`). A lookup that
+ * fails keeps the old picture and tries again ten minutes later.
+ *
  * Not measured from the VM (a datacenter address). browse and next took no visitor id and no
  * cookie here, and no consent page stands in front of the API; a refusal there shows in the log
  * and in youtubeAvatarStatus().lastFailure, and costs nothing else (the feed shows no picture).
  */
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import * as zlib from 'node:zlib';
 import { openUpstream, readBody } from './http';
 import { youtubeSearchStatus } from './youtubeSearch';
@@ -54,9 +62,14 @@ const API = 'https://www.youtube.com/youtubei/v1';
 const HOSTS = ['www.youtube.com'];
 /** One lookup (all its requests) gives up after this long */
 const LOOKUP_TIMEOUT_MS = 5_000;
-const KEEP_MS = 24 * 60 * 60 * 1000;
+/** A picture is handed out for this long */
+const KEEP_MS = 30 * 24 * 60 * 60 * 1000;
+/** ...and once it is older than this, each ask also looks it up again behind the answer */
+const FRESH_MS = 24 * 60 * 60 * 1000;
 const FAILED_KEEP_MS = 10 * 60 * 1000;
-const MAX_ENTRIES = 2000;
+const MAX_ENTRIES = 6000;
+/** The file is written this long after the last change */
+const SAVE_AFTER_MS = 15_000;
 const MAX_RUNNING = 2;
 /** The feed draws the picture at 40-60 px; these sizes stay sharp at twice that */
 const WANT_MIN = 88;
@@ -252,13 +265,16 @@ let lookupTimeoutMs = LOOKUP_TIMEOUT_MS;
 interface Known {
   /** undefined: the lookup failed, or the channel has no picture */
   url?: string;
+  /** Handed out until then */
   until: number;
+  /** Looked up again (behind the answer) once this has passed */
+  checkAt: number;
 }
 
 /** By channel id ("c:UC…"), handle ("h:name", lower case) and video id ("v:…"); the oldest entry leaves first */
 const known = new Map<string, Known>();
 const inFlight = new Map<string, Promise<string | undefined>>();
-const stats = { lookups: 0, requests: 0, found: 0, failed: 0, lastFailure: undefined as { at: string; reason: string } | undefined };
+const stats = { lookups: 0, requests: 0, found: 0, failed: 0, refreshed: 0, changed: 0, lastFailure: undefined as { at: string; reason: string } | undefined };
 
 function clean(ref: AvatarRef | undefined): AvatarRef {
   return {
@@ -301,13 +317,71 @@ function recall(keys: string[]): Known | undefined {
 
 function keep(keys: string[], url: string | undefined): void {
   for (const k of keys) {
-    // a failure never replaces a picture that is still good
     const had = known.get(k);
-    if (!url && had?.url && now() < had.until) continue;
+    if (!url && had?.url && now() < had.until) {
+      // a failure never replaces a picture that is still good: it stays, and is looked up again later
+      had.checkAt = now() + FAILED_KEEP_MS;
+      continue;
+    }
     known.delete(k);
-    known.set(k, { url, until: now() + (url ? KEEP_MS : FAILED_KEEP_MS) });
+    known.set(k, url ? { url, until: now() + KEEP_MS, checkAt: now() + FRESH_MS } : { url, until: now() + FAILED_KEEP_MS, checkAt: Infinity });
   }
   while (known.size > MAX_ENTRIES) known.delete(known.keys().next().value as string);
+  if (url) saveSoon();
+}
+
+// ---------------------------------------------------------------- the file (pictures survive a restart)
+
+let storeFile: string | undefined;
+let saveTimer: NodeJS.Timeout | undefined;
+
+/**
+ * Reads the pictures kept in `file` and writes them back there as they change (index.ts gives the
+ * server's data folder). A restart - every deploy is one - then costs no lookup and no wait: the
+ * feed has every channel's picture it had before. A file that is missing or unreadable is an
+ * empty start. Returns how many entries were read.
+ */
+export function loadAvatarStore(file: string, log: (m: string) => void = () => undefined): number {
+  storeFile = file;
+  let read = 0;
+  try {
+    const saved = JSON.parse(fs.readFileSync(file, 'utf8')) as { entries?: unknown };
+    for (const row of Array.isArray(saved?.entries) ? saved.entries : []) {
+      const [key, url, until, checkAt] = Array.isArray(row) ? row : [];
+      const picture = pickAvatar([{ url }]);
+      if (typeof key !== 'string' || !/^[chv]:/.test(key) || !picture || !(Number(until) > now())) continue;
+      known.set(key, { url: picture, until: Number(until), checkAt: Number(checkAt) || 0 });
+      read++;
+    }
+    while (known.size > MAX_ENTRIES) known.delete(known.keys().next().value as string);
+    log(`youtube avatar: ${read} kept pictures read from ${file}`);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') log(`youtube avatar: the kept pictures could not be read (${(e as Error).message}); starting empty`);
+  }
+  return read;
+}
+
+/** Writes the kept pictures now (shutdown, tests); a no-op without a file. */
+export function saveAvatarStore(): void {
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = undefined;
+  if (!storeFile) return;
+  try {
+    const entries: [string, string, number, number][] = [];
+    for (const [k, e] of known) if (e.url && e.until > now()) entries.push([k, e.url, e.until, e.checkAt]);
+    fs.mkdirSync(path.dirname(storeFile), { recursive: true });
+    const tmp = `${storeFile}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ version: 1, savedAt: new Date(now()).toISOString(), entries }));
+    fs.renameSync(tmp, storeFile);
+  } catch (e) {
+    logLine(`youtube avatar: the kept pictures could not be written (${(e as Error).message})`);
+  }
+}
+
+function saveSoon(): void {
+  if (!storeFile || saveTimer) return;
+  saveTimer = setTimeout(saveAvatarStore, SAVE_AFTER_MS);
+  saveTimer.unref?.();
 }
 
 /** The channel's picture when it is already known; no request. */
@@ -407,15 +481,80 @@ async function lookUp(ref: AvatarRef, problems: string[]): Promise<string | unde
   return undefined;
 }
 
+/** One lookup in its place in line; shared by everyone who asks for the same channel meanwhile. Never throws. */
+function start(r: AvatarRef, keys: string[], say: (m: string) => void, refresh: boolean): Promise<string | undefined> {
+  const name = keys[0];
+  const shared = inFlight.get(name);
+  if (shared) return shared;
+  // (a log that throws must not end a lookup nobody awaits)
+  const log = (m: string): void => {
+    try {
+      say(m);
+    } catch {
+      // nothing to do about it
+    }
+  };
+  logLine = log;
+  const due = (e: Known | undefined): boolean => Boolean(refresh && e?.url && now() >= e.checkAt);
+  const run = (async (): Promise<string | undefined> => {
+    await acquire();
+    let timer: NodeJS.Timeout | undefined;
+    const before = recall(keys);
+    try {
+      // the channel may have been learned while this lookup waited its turn (another video of it)
+      if (before && !due(before)) return before.url;
+      stats.lookups++;
+      if (refresh) stats.refreshed++;
+      const problems: string[] = [];
+      const timeout = new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => resolve('timeout'), lookupTimeoutMs);
+      });
+      const result = await Promise.race([lookUp(r, problems), timeout]);
+      if (typeof result === 'string' && result !== 'timeout') {
+        stats.found++;
+        if (before?.url && before.url !== result) {
+          stats.changed++;
+          log(`youtube avatar: ${name.slice(2)} has a new picture`);
+        }
+        return result;
+      }
+      if (result === 'timeout') problems.push(`no answer within ${lookupTimeoutMs / 1000} s`);
+      const reason = problems.join('; ') || 'nothing to ask with';
+      // (with a picture still kept: it stays, and this is tried again in ten minutes)
+      keep(keys, undefined);
+      stats.failed++;
+      stats.lastFailure = { at: new Date().toISOString(), reason: `${name.slice(2)}: ${reason}`.slice(0, 300) };
+      log(`youtube avatar: no ${before?.url ? 'newer ' : ''}picture for ${name.slice(2)} (${reason}); asked again in ${FAILED_KEEP_MS / 60_000} min`);
+      return before?.url;
+    } catch (e) {
+      log(`youtube avatar: lookup failed (${(e as Error).message || String(e)})`);
+      return before?.url;
+    } finally {
+      if (timer) clearTimeout(timer);
+      release();
+    }
+  })();
+  inFlight.set(name, run);
+  // (run never rejects)
+  void run.finally(() => {
+    if (inFlight.get(name) === run) inFlight.delete(name);
+  });
+  return run;
+}
+
 /**
  * The address of a channel's profile picture (88-176 px, yt3.ggpht.com or
  * yt3.googleusercontent.com), from what is known about one of its videos. Never throws: undefined
  * when YouTube gives none within 5 s.
  *
- * With a channel id: one request (its page data). With a video id only: one request (the video's
- * watch data, which also names the channel). With a handle only: two (the handle's channel id,
- * then its page data). A picture is kept 24 h, a failure 10 min; lookups for the same channel
- * share one request; two lookups run at a time, the others wait their turn.
+ * A picture that is kept is answered at once, for 30 days. One older than a day is also looked up
+ * again behind that answer (avatarRefreshing() says so), so a channel's new picture shows on the
+ * next ask and nobody waits for the check.
+ *
+ * Not kept: with a channel id, one request (its page data). With a video id only: one request (the
+ * video's watch data, which also names the channel). With a handle only: two (the handle's channel
+ * id, then its page data). A failure is kept 10 min; lookups for the same channel share one
+ * request; two lookups run at a time, the others wait their turn.
  */
 export async function channelAvatar(ref: AvatarRef, log: (m: string) => void): Promise<string | undefined> {
   try {
@@ -423,46 +562,11 @@ export async function channelAvatar(ref: AvatarRef, log: (m: string) => void): P
     const keys = keysOf(r);
     if (!keys.length) return undefined;
     const kept = recall(keys);
-    if (kept) return kept.url;
-    const name = keys[0];
-    const shared = inFlight.get(name);
-    if (shared) return await shared;
-    logLine = log;
-    const run = (async (): Promise<string | undefined> => {
-      await acquire();
-      let timer: NodeJS.Timeout | undefined;
-      try {
-        // the channel may have been learned while this lookup waited its turn (another video of it)
-        const meanwhile = recall(keys);
-        if (meanwhile) return meanwhile.url;
-        stats.lookups++;
-        const problems: string[] = [];
-        const timeout = new Promise<'timeout'>((resolve) => {
-          timer = setTimeout(() => resolve('timeout'), lookupTimeoutMs);
-        });
-        const result = await Promise.race([lookUp(r, problems), timeout]);
-        if (typeof result === 'string' && result !== 'timeout') {
-          stats.found++;
-          return result;
-        }
-        if (result === 'timeout') problems.push(`no answer within ${lookupTimeoutMs / 1000} s`);
-        const reason = problems.join('; ') || 'nothing to ask with';
-        keep(keys, undefined);
-        stats.failed++;
-        stats.lastFailure = { at: new Date().toISOString(), reason: `${name.slice(2)}: ${reason}`.slice(0, 300) };
-        log(`youtube avatar: no picture for ${name.slice(2)} (${reason}); asked again in ${FAILED_KEEP_MS / 60_000} min`);
-        return undefined;
-      } finally {
-        if (timer) clearTimeout(timer);
-        release();
-      }
-    })();
-    inFlight.set(name, run);
-    try {
-      return await run;
-    } finally {
-      if (inFlight.get(name) === run) inFlight.delete(name);
+    if (kept) {
+      if (kept.url && now() >= kept.checkAt) void start(r, keys, log, true);
+      return kept.url;
     }
+    return await start(r, keys, log, false);
   } catch (e) {
     try {
       log(`youtube avatar: lookup failed (${(e as Error).message || String(e)})`);
@@ -473,10 +577,33 @@ export async function channelAvatar(ref: AvatarRef, log: (m: string) => void): P
   }
 }
 
+/**
+ * The kept picture of a channel, at once and without a request for one that is not kept (feed
+ * items on their way out). One older than a day is looked up again behind the answer, so the
+ * next feed carries the channel's current picture.
+ */
+export function avatarKept(ref: AvatarRef, log: (m: string) => void): string | undefined {
+  try {
+    const r = clean(ref);
+    const keys = keysOf(r);
+    const kept = recall(keys);
+    if (kept?.url && now() >= kept.checkAt) void start(r, keys, log, true);
+    return kept?.url;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Whether the channel's picture is being looked up right now (a kept one was just answered and is being checked). */
+export function avatarRefreshing(ref: AvatarRef): boolean {
+  const keys = keysOf(clean(ref));
+  return keys.length > 0 && inFlight.has(keys[0]);
+}
+
 // ---------------------------------------------------------------- status
 
 /** For /api/health: how many pictures are kept, and how the lookups went. */
-export const youtubeAvatarStatus = (): { kept: number; running: number; waiting: number; lookups: number; requests: number; found: number; failed: number; lastFailure?: { at: string; reason: string } } => ({
+export const youtubeAvatarStatus = (): { kept: number; running: number; waiting: number; lookups: number; requests: number; found: number; failed: number; refreshed: number; changed: number; lastFailure?: { at: string; reason: string } } => ({
   kept: known.size,
   running,
   waiting: waiting.length,
@@ -484,12 +611,15 @@ export const youtubeAvatarStatus = (): { kept: number; running: number; waiting:
   requests: stats.requests,
   found: stats.found,
   failed: stats.failed,
+  refreshed: stats.refreshed,
+  changed: stats.changed,
   lastFailure: stats.lastFailure,
 });
 
 /**
  * Tests: replace the network (undefined restores it), the clock and the 5 s limit; forget every
- * picture and count. Call it between lookups, not while one runs.
+ * picture and count (the file, when one is set, is left as it is and no longer written). Call it
+ * between lookups, not while one runs.
  */
 export function setAvatarTransport(t: AvatarTransport | undefined, opts: { now?: () => number; timeoutMs?: number } = {}): void {
   transport = t || httpTransport;
@@ -497,6 +627,9 @@ export function setAvatarTransport(t: AvatarTransport | undefined, opts: { now?:
   lookupTimeoutMs = opts.timeoutMs ?? LOOKUP_TIMEOUT_MS;
   known.clear();
   inFlight.clear();
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = undefined;
+  storeFile = undefined;
   warnedUnmasked = false;
-  Object.assign(stats, { lookups: 0, requests: 0, found: 0, failed: 0, lastFailure: undefined });
+  Object.assign(stats, { lookups: 0, requests: 0, found: 0, failed: 0, refreshed: 0, changed: 0, lastFailure: undefined });
 }

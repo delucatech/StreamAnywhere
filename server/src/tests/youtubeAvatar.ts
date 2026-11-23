@@ -5,6 +5,10 @@
  *
  * Alone: `npx tsx src/tests/youtubeAvatar.ts` from server/ (AVATAR_NETWORK=1 adds the network part).
  */
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { avatarKept, avatarRefreshing, loadAvatarStore, saveAvatarStore } from '../youtubeAvatar';
 import { avatarFromAnswer, avatarIfKnown, channelAvatar, channelFromAnswer, cleanHandle, pickAvatar, rememberAvatar, setAvatarTransport, youtubeAvatarStatus, type AvatarTransport } from '../youtubeAvatar';
 
 type Check = (name: string, cond: boolean, detail?: unknown) => void;
@@ -150,13 +154,14 @@ export async function youtubeAvatarChecks(check: Check): Promise<void> {
   check("a search result's picture is kept at 176 px and found by channel id and handle, without a request", (await channelAvatar({ channelId: COCO }, log)) === coco(176) && (await channelAvatar({ handle: 'cocomelon' }, log)) === coco(176) && f.calls.length === 0, f.calls);
   check('an address that is no picture is not kept', avatarIfKnown({ channelId: RICK }) === undefined);
 
-  // ---- failures: never thrown, kept 10 min; pictures kept 24 h
+  // ---- failures: never thrown, kept 10 min; pictures kept 30 days and checked after a day, behind the answer
   let clock = 1_800_000_000_000;
   let failing = true;
+  let newPicture = false;
   f = fake({
     browse: async (id) => {
       if (failing) throw new Error('YouTube answered 429: Too Many Requests');
-      return browseAnswer(id);
+      return newPicture ? browseAnswer(id, coco) : browseAnswer(id);
     },
   });
   setAvatarTransport(f.t, { now: () => clock });
@@ -176,10 +181,51 @@ export async function youtubeAvatarChecks(check: Check): Promise<void> {
   clock += 2 * 60 * 1000;
   check('after 10 minutes it is', (await channelAvatar({ channelId: RICK }, log)) === rick(160) && f.calls.length === 2, f.calls);
   clock += 23 * 60 * 60 * 1000;
-  check('a picture is kept for 24 hours', (await channelAvatar({ channelId: RICK }, log)) === rick(160) && f.calls.length === 2, f.calls);
+  check('within a day a kept picture costs no request', (await channelAvatar({ channelId: RICK }, log)) === rick(160) && f.calls.length === 2 && !avatarRefreshing({ channelId: RICK }), f.calls);
   clock += 2 * 60 * 60 * 1000;
   failing = true;
-  check('…then asked again; a failure then gives nothing', (await channelAvatar({ channelId: RICK }, log)) === undefined && f.calls.length === 3 && avatarIfKnown({ channelId: RICK }) === undefined, f.calls);
+  const atOnce = await channelAvatar({ channelId: RICK }, log);
+  check('older than a day: the kept picture is answered at once, and looked up again behind the answer', atOnce === rick(160) && avatarRefreshing({ channelId: RICK }), { atOnce, calls: f.calls });
+  await tick(5);
+  check('a check that fails keeps the old picture', f.calls.length === 3 && avatarIfKnown({ channelId: RICK }) === rick(160) && !avatarRefreshing({ channelId: RICK }), f.calls);
+  clock += 5 * 60 * 1000;
+  check('…and is not repeated for 10 minutes', (await channelAvatar({ channelId: RICK }, log)) === rick(160) && (await tick(5), f.calls.length === 3), f.calls);
+  clock += 6 * 60 * 1000;
+  failing = false;
+  newPicture = true;
+  const stillOld = avatarKept({ channelId: RICK }, log);
+  check('a feed item on its way out gets the kept picture at once and starts the check too', stillOld === rick(160) && avatarRefreshing({ channelId: RICK }), stillOld);
+  await tick(5);
+  st = youtubeAvatarStatus();
+  check("the channel's new picture is what the next ask gets", f.calls.length === 4 && (await channelAvatar({ channelId: RICK }, log)) === coco(160) && st.changed === 1 && st.refreshed === 2, { calls: f.calls, st });
+  check('a channel that is not kept costs a feed item no request', avatarKept({ channelId: COCO }, log) === undefined && (await tick(5), f.calls.length === 4), f.calls);
+  clock += 29 * 24 * 60 * 60 * 1000;
+  newPicture = false;
+  check('after 29 days the picture is still answered at once', (await channelAvatar({ channelId: RICK }, log)) === coco(160), f.calls);
+  await tick(5);
+  check('…and the check behind it brought the current one', f.calls.length === 5 && avatarIfKnown({ channelId: RICK }) === rick(160), f.calls);
+  clock += 31 * 24 * 60 * 60 * 1000;
+  check('after 30 days without a check it is looked up like a new one', avatarIfKnown({ channelId: RICK }) === undefined && (await channelAvatar({ channelId: RICK }, log)) === rick(160) && f.calls.length === 6, f.calls);
+
+  // ---- the file: pictures survive a restart
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sa-avatars-')), 'youtube-avatars.json');
+  setAvatarTransport(f.t, { now: () => clock });
+  check('no file yet: an empty start', loadAvatarStore(file) === 0);
+  rememberAvatar({ channelId: COCO, handle: 'CoComelon' }, coco(88));
+  await channelAvatar({ channelId: RICK }, log);
+  saveAvatarStore();
+  const callsBefore = f.calls.length;
+  setAvatarTransport(f.t, { now: () => clock }); // "restart": everything in memory is gone
+  check('after a restart nothing is known until the file is read', avatarIfKnown({ channelId: COCO }) === undefined);
+  const read = loadAvatarStore(file);
+  check('the kept pictures are read back and cost no request', read >= 3 && (await channelAvatar({ handle: 'cocomelon' }, log)) === coco(88) && (await channelAvatar({ channelId: RICK }, log)) === rick(160) && f.calls.length === callsBefore, { read, calls: f.calls.slice(callsBefore) });
+  clock += 31 * 24 * 60 * 60 * 1000;
+  setAvatarTransport(f.t, { now: () => clock });
+  check('entries past their 30 days are not read', loadAvatarStore(file) === 0);
+  fs.writeFileSync(file, 'not json');
+  check('an unreadable file is an empty start, not an error', loadAvatarStore(file) === 0);
+  fs.rmSync(path.dirname(file), { recursive: true, force: true });
+  clock = 1_800_000_000_000;
   setAvatarTransport(fake({ browse: async () => Promise.reject(new Error('down')) }).t);
   threw = false;
   try {
@@ -250,10 +296,10 @@ export async function youtubeAvatarChecks(check: Check): Promise<void> {
   check('all six end with a picture, never more than two requests at once', urls.every((u, i) => u === (i === 2 ? rick(88) : rick(160))) && most === 2 && st.running === 0 && st.waiting === 0, { most, st });
   check('a channel learned while its lookup waited costs no request', f.calls.length === 5 && !f.calls.includes(`browse ${ids[2]}`), f.calls);
 
-  // ---- at most 2000 kept
+  // ---- at most 6000 kept
   setAvatarTransport(fake().t);
-  for (let n = 0; n < 2001; n++) rememberAvatar({ channelId: `UC${String(n).padStart(22, '0')}` }, rick(88));
-  check('at most 2000 are kept; the oldest leaves first', youtubeAvatarStatus().kept === 2000 && avatarIfKnown({ channelId: `UC${'0'.repeat(22)}` }) === undefined && avatarIfKnown({ channelId: `UC${String(2000).padStart(22, '0')}` }) === rick(88), youtubeAvatarStatus().kept);
+  for (let n = 0; n < 6001; n++) rememberAvatar({ channelId: `UC${String(n).padStart(22, '0')}` }, rick(88));
+  check('at most 6000 are kept; the oldest leaves first', youtubeAvatarStatus().kept === 6000 && avatarIfKnown({ channelId: `UC${'0'.repeat(22)}` }) === undefined && avatarIfKnown({ channelId: `UC${String(6000).padStart(22, '0')}` }) === rick(88), youtubeAvatarStatus().kept);
 
   setAvatarTransport(undefined);
 }

@@ -1,10 +1,11 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { EXPLORE_CATEGORIES, YOUTUBE_CATEGORIES, platformOf } from '../../shared/types';
-import type { AvatarRequest, AvatarResponse, CommentsRequest, ConversationRequest, DownloadProbeRequest, InboxCancelResponse, LibraryCategoryRequest, LibraryEntryPatch, LibrarySaveRequest, DownloadStartRequest, FeedItem, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ServerStatus, ProbeRequest, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SessionActionRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
+import type { AvatarRequest, AvatarResponse, CommentsRequest, Platform as PlatformId, ConversationRequest, DownloadProbeRequest, InboxCancelResponse, LibraryCategoryRequest, LibraryEntryPatch, LibrarySaveRequest, DownloadStartRequest, FeedItem, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ServerStatus, ProbeRequest, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SessionActionRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
 import { registerAuth } from './auth';
 import { mirrorStats, registerMirror, shutdownMirror } from './mirror';
 import { config, findUp } from './config';
@@ -27,8 +28,8 @@ import { getProgress } from './progress';
 import { registerActivity } from './activityRoutes';
 import { say } from './activity';
 import { cancelInboxReads, cancelReads, commentsDebug, conversation, fetchComments, fetchProfile, followUser, inbox, inboxDebug, isCancelled, searchTikTok, sendMessage, SocialError } from './social';
-import { channelVideos, exploreYouTube, isYouTubeUrl, recommendedYouTube, recommendedYouTubeTv, resolveYouTube, searchYouTube, setYouTubeRoomMaker, youTubeCategory, YouTubeError, youtubeSlowLookups } from './youtube';
-import { channelAvatar, youtubeAvatarStatus } from './youtubeAvatar';
+import { channelVideos, exploreYouTube, isYouTubeUrl, recommendedYouTube, recommendedYouTubeTv, resolveYouTube, searchYouTube, setYouTubeRoomMaker, withYouTubeAvatars, youTubeCategory, YouTubeError, youtubeSlowLookups } from './youtube';
+import { avatarRefreshing, channelAvatar, loadAvatarStore, saveAvatarStore, youtubeAvatarStatus } from './youtubeAvatar';
 import { youtubePlayerStatus } from './youtubePlayer';
 import { youtubeSearchStatus } from './youtubeSearch';
 import { exploreInstagram, followInstagram, forYouInstagram, instagramCategory, instagramFollowStates, instagramStats, InstagramError, isInstagramUrl, parkInstagramBrowser, pauseInstagramPages, profileInstagram, resolveInstagram, searchInstagram, setInstagramLogger, shutdownInstagram } from './instagram';
@@ -310,6 +311,11 @@ export async function buildServer() {
   setLibraryLogger((m) => app.log.info({ what: 'library' }, m));
   setLiveTvLogger((m) => app.log.info({ what: 'livetv' }, m));
 
+  // YouTube channel pictures are kept 30 days, across restarts (every deploy is one): beside the other data folders.
+  loadAvatarStore(path.join(process.env.TIKTOK_PROFILE_DIR ? path.dirname(process.env.TIKTOK_PROFILE_DIR) : path.join(os.homedir(), '.streamanywhere'), 'youtube-avatars.json'), (m) => app.log.info({ what: 'youtube' }, m));
+  /** Feed items on their way out: YouTube's get the channel pictures the server has kept. */
+  const pictured = <T extends FeedItem>(platform: PlatformId, items: T[]): T[] => (platform === 'youtube' ? withYouTubeAvatars(items, (m) => app.log.info({ what: 'youtube' }, m)) : items);
+
   /** What the server is doing right now, in words, for the pages' "the server is busy: …" lines. */
   const serverBusy = (): string[] => {
     const out: string[] = [...liveTvBusy()];
@@ -575,7 +581,7 @@ export async function buildServer() {
       }
       // Instagram's videos were read before they are shown: who is followed is taken from what is known now.
       const out = platform === 'instagram' ? instagramFollowStates({ items: r.items }).items : r.items;
-      const resp: FeedResponse = { source, items: slimItems(out), hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
+      const resp: FeedResponse = { source, items: slimItems(pictured(platform, out)), hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
       log(`${what}: ${r.items.length} served ${r.stale ? 'from the last good batch' : r.fromStock ? 'from stock' : 'after a fill'}${prefetch ? ' (prefetch)' : ''}, ${r.ready ?? 0} ready, ${resp.elapsedMs} ms`);
       if (back && r.items.length && !r.stale) undelivered(r.items, what, back);
       return resp;
@@ -681,7 +687,7 @@ export async function buildServer() {
             if (!explore.warmIfKnown()) explore.warm();
           } else if (want > 0) explore.warm();
           if (q.items.length) {
-            const resp: FeedResponse = { source, items: slimItems(q.items), hasMore: true, warnings: q.warnings, elapsedMs: Date.now() - t0, stale: true };
+            const resp: FeedResponse = { source, items: slimItems(pictured(platform, q.items)), hasMore: true, warnings: q.warnings, elapsedMs: Date.now() - t0, stale: true };
             if (filler?.items.length) resp.note = q.items.length === filler.items.length ? `Explore videos first – your For You feed is loading` : `Recent videos and Explore first – your For You feed is loading`;
             log(`foryou: ${q.items.length} served from the last good batch, ${resp.elapsedMs} ms`);
             return resp;
@@ -689,7 +695,7 @@ export async function buildServer() {
         }
       }
       const r = await fetchForYou(count, log, quick);
-      const resp: FeedResponse = { source, items: slimItems(r.items), hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
+      const resp: FeedResponse = { source, items: slimItems(pictured(platform, r.items)), hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
       if (r.items.length && !r.stale) undelivered(r.items, 'foryou', forYouPutBack);
       return resp;
     } catch (e) {
@@ -756,7 +762,7 @@ export async function buildServer() {
         return searchTikTok(q, offset, socialLog('search'));
       });
       const known = platform === 'instagram' ? instagramFollowStates(r) : r;
-      return { ...known, items: slimItems(known.items), elapsedMs: Date.now() - t0 };
+      return { ...known, items: slimItems(pictured(platform, known.items)), elapsedMs: Date.now() - t0 };
     } catch (e) {
       return socialFail(reply, e, t0);
     }
@@ -787,7 +793,7 @@ export async function buildServer() {
       });
       // A kept Instagram page says who was followed when it was read: what is known now goes over it.
       const known = platform === 'instagram' ? instagramFollowStates(r) : r;
-      return { ...known, items: slimItems(known.items), elapsedMs: Date.now() - t0 };
+      return { ...known, items: slimItems(pictured(platform, known.items)), elapsedMs: Date.now() - t0 };
     } catch (e) {
       return socialFail(reply, e, t0);
     }
@@ -798,7 +804,10 @@ export async function buildServer() {
     const b = req.body || ({} as AvatarRequest);
     if (platformOf(b.platform) !== 'youtube') return {};
     const str = (v: unknown): string | undefined => (typeof v === 'string' && v.length <= 200 ? v : undefined);
-    return { avatar: await channelAvatar({ videoId: str(b.videoId), channelId: str(b.channelId), handle: str(b.handle) }, (m) => req.log.info({ what: 'youtube' }, m)) };
+    const ref = { videoId: str(b.videoId), channelId: str(b.channelId), handle: str(b.handle) };
+    // A kept picture is answered at once (30 days); one older than a day is checked behind this answer.
+    const avatar = await channelAvatar(ref, (m) => req.log.info({ what: 'youtube' }, m));
+    return { avatar, refreshing: (avatar && avatarRefreshing(ref)) || undefined };
   });
 
   app.post<{ Body: FollowRequest }>('/api/follow', resolveLimit, async (req, reply) => {
@@ -1222,6 +1231,7 @@ if (require.main === module) {
           shutdownMirror();
           flushLibrary();
           flushLiveTv();
+          saveAvatarStore();
           void Promise.race([Promise.all([shutdownBrowsers(), shutdownYouTubeSession(), shutdownInstagram(), shutdownInstagramSession(), shutdownFacebookSession()]), new Promise((r) => setTimeout(r, 8000))]).finally(() => process.exit(0));
         });
       }

@@ -2354,30 +2354,129 @@ async function playEntry(entry: Entry): Promise<void> {
   }
 }
 
-/**
- * YouTube's listings name a video's channel but not its picture: the server is asked for it when
- * the video comes into view (one small request per channel there, kept a day), once per video.
- */
+// ---------- channel pictures (YouTube's listings name a video's channel but not its picture) ----------
+// The picture must be there with the video, not after it, so it is never waited for twice:
+//  - this device keeps every picture it has seen for 30 days and shows it at once;
+//  - the server keeps them 30 days too and sends them along with the feed (it asks YouTube once per
+//    channel: half a kilobyte);
+//  - the pictures of the next few videos are asked for, and their images fetched, ahead of time;
+//  - a kept picture older than a day is still shown at once, and checked behind it: when the
+//    channel has a new one, it replaces the old one as soon as the server knows.
+const AVATAR_KEY = 'streamanywhere.youtube.avatars';
+const AVATAR_KEEP_MS = 30 * 24 * 3600_000;
+const AVATAR_FRESH_MS = 24 * 3600_000;
+const AVATAR_MAX = 900;
+/** The video in view and this many after it get their pictures ready */
+const AVATAR_AHEAD = 4;
+/** After an answer that says the server is checking for a newer picture, it is asked once more this much later */
+const AVATAR_RECHECK_MS = 6000;
+/** key ("c:<channel id>", "h:<handle>", "v:<video id>") -> the picture's address and when it was last confirmed */
+let avatarsKept: Record<string, { u: string; t: number }> | undefined;
+let avatarsSaveTimer = 0;
+function keptAvatars(): Record<string, { u: string; t: number }> {
+  if (avatarsKept) return avatarsKept;
+  avatarsKept = {};
+  try {
+    const saved = JSON.parse(localStorage.getItem(AVATAR_KEY) || '{}') as Record<string, { u?: unknown; t?: unknown }>;
+    const oldest = Date.now() - AVATAR_KEEP_MS;
+    for (const [k, v] of Object.entries(saved)) if (typeof v?.u === 'string' && /^https:\/\//.test(v.u) && Number(v.t) > oldest) avatarsKept[k] = { u: v.u, t: Number(v.t) };
+  } catch {
+    /* storage unavailable or not ours: start empty */
+  }
+  return avatarsKept;
+}
+const avatarKeys = (item: FeedItem): string[] => [item.author.id ? `c:${item.author.id}` : '', item.author.uniqueId ? `h:${item.author.uniqueId.toLowerCase()}` : '', `v:${item.id}`].filter(Boolean);
+/** Keeps a picture on this device (confirmed now), under everything known about the video's channel. */
+function keepAvatar(item: FeedItem, url: string): void {
+  const kept = keptAvatars();
+  const t = Date.now();
+  for (const k of avatarKeys(item)) kept[k] = { u: url, t };
+  if (avatarsSaveTimer) return;
+  avatarsSaveTimer = window.setTimeout(() => {
+    avatarsSaveTimer = 0;
+    try {
+      // the least recently confirmed leave first
+      const rows = Object.entries(kept).sort((a, b) => b[1].t - a[1].t);
+      for (const [k] of rows.slice(AVATAR_MAX)) delete kept[k];
+      localStorage.setItem(AVATAR_KEY, JSON.stringify(kept));
+    } catch {
+      /* storage full or unavailable: the pictures still show, from the server */
+    }
+  }, 2000);
+}
+/** Fetches the image now, so it is in the browser's cache when its video comes into view. */
+const avatarsPreloaded = new Set<string>();
+function preloadAvatar(url: string): void {
+  if (avatarsPreloaded.has(url)) return;
+  avatarsPreloaded.add(url);
+  const img = new Image();
+  img.decoding = 'async';
+  img.src = url;
+}
 const avatarAsked = new Set<string>();
+/** Gets a video's channel picture ready: from the item, from this device, else from the server (once per video). */
 function wantAvatar(entry: Entry): void {
+  if (P.id !== 'youtube') return;
+  const item = entry.item;
+  let confirmedAt = 0;
+  const kept = avatarKeys(item)
+    .map((k) => keptAvatars()[k])
+    .find(Boolean);
+  if (item.author.avatar) {
+    // it came with the feed: the server vouches for it now
+    if (kept?.u !== item.author.avatar || Date.now() - kept.t > AVATAR_FRESH_MS) keepAvatar(item, item.author.avatar);
+    preloadAvatar(item.author.avatar);
+    return;
+  }
+  if (kept) {
+    gotAvatar(entry, kept.u);
+    confirmedAt = kept.t;
+  }
+  // shown from this device and confirmed within the day: nothing to ask
+  if ((kept && Date.now() - confirmedAt <= AVATAR_FRESH_MS) || avatarAsked.has(item.id)) return;
+  avatarAsked.add(item.id);
+  askAvatar(entry, 0);
+}
+function askAvatar(entry: Entry, round: number): void {
   const a = entry.item.author;
-  if (P.id !== 'youtube' || a.avatar || avatarAsked.has(entry.item.id)) return;
-  avatarAsked.add(entry.item.id);
   void api.avatar({ platform: 'youtube', videoId: entry.item.id, channelId: a.id, handle: a.uniqueId }).then(
-    (r) => r.avatar && gotAvatar(entry, r.avatar),
+    (r) => {
+      if (r.avatar) {
+        keepAvatar(entry.item, r.avatar);
+        gotAvatar(entry, r.avatar, true);
+      }
+      // the server answered at once with the picture it had and is checking for a newer one: its result, a little later
+      if (r.refreshing && round < 1) window.setTimeout(() => askAvatar(entry, round + 1), AVATAR_RECHECK_MS);
+    },
     () => undefined,
   );
 }
-/** A channel's picture arrived: for this video and the channel's other videos in the feed. */
-function gotAvatar(entry: Entry, url: string): void {
+/**
+ * A channel's picture is known: for this video and the channel's other videos in the feed.
+ * `replace`: it is the server's current one, so it also goes over an older picture of that channel.
+ */
+function gotAvatar(entry: Entry, url: string, replace = false): void {
   const a = entry.item.author;
+  let changed = false;
   for (const e of state.entries) {
     const b = e.item.author;
-    if (b.avatar) continue;
-    if (e === entry || (a.id && b.id === a.id) || (a.uniqueId && b.uniqueId === a.uniqueId)) b.avatar = url;
+    if (b.avatar === url || (b.avatar && !replace)) continue;
+    if (e === entry || (a.id && b.id === a.id) || (a.uniqueId && b.uniqueId === a.uniqueId)) {
+      b.avatar = url;
+      changed = true;
+    }
   }
+  preloadAvatar(url);
   const cur = activeEntry();
-  if (cur && cur.item.author.avatar === url) syncAuthor(cur);
+  if (changed && cur && cur.item.author.avatar === url) syncAuthor(cur);
+}
+/** The pictures of the video in view and the next few, before they are needed. */
+function avatarsAhead(): void {
+  if (P.id !== 'youtube') return;
+  for (let d = 0; d <= AVATAR_AHEAD; d++) {
+    const e = state.entries[state.active + d];
+    if (e) wantAvatar(e);
+  }
 }
 
 /** The author button beside the video: its avatar, and its @name under it ("Profile" until it is known). */
@@ -2491,6 +2590,7 @@ const PREPARE_AHEAD = [2, 3];
 const PREFETCH_BYTES = 1024 * 1024;
 const prefetching = new Set<string>();
 function prepareAhead(): void {
+  avatarsAhead();
   if (!state.started) return;
   for (const d of PREPARE_AHEAD) {
     const e = state.entries[state.active + d];
