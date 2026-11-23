@@ -4,16 +4,16 @@
  * cross-origin requests, and Xtream stream URLs carry the account's password.
  *
  *  - tune (classify): open the stream once, look at the status, Content-Type and first bytes:
- *      HLS playlist      -> relayed and rewritten: every URI in it (variants, segments, keys, init
- *                           maps) becomes a same-origin path whose token is the upstream URL
- *                           encrypted (livetvCrypto), so nothing upstream is visible or forgeable;
- *      raw MPEG-TS       -> ffmpeg turns it into a live HLS playlist in a temp folder (video
- *                           copied, sound to AAC; a "remux"), served from there while someone is
- *                           watching, torn down 3 min after the last request. The playlist keeps
- *                           the last DVR_WINDOW_SEC: pause and rewind within it ("pause and
- *                           rewind"); an HLS channel goes through the same recorder when the
- *                           viewer wants that (one variant, picked here: pickVariant), else it
- *                           is relayed as below;
+ *      a live stream     -> an HLS playlist (one variant, picked here: pickVariant) or a raw
+ *                           MPEG-TS goes through the ffmpeg recorder (a "remux": video copied,
+ *                           sound to AAC) into fragmented MP4 segments in LIVETV_DIR/cache, torn
+ *                           down 3 min after the last request. The recording keeps the last
+ *                           DVR_WINDOW_SEC (pause and rewind within it), and the page plays it as
+ *                           ONE endless MP4 (/api/livetv/live/:key/stream.mp4) on a canvas;
+ *      HLS relay         -> the older path, kept but not used by the page: every URI of the
+ *                           playlist (variants, segments, keys, init maps) becomes a same-origin
+ *                           path whose token is the upstream URL encrypted (livetvCrypto), so
+ *                           nothing upstream is visible or forgeable;
  *      a media file      -> relayed as it is (Range forwarded);
  *      DASH, a web page, DRM, anything else -> "unsupported", with the reason;
  *      an error, nothing, a timeout -> "unavailable".
@@ -769,7 +769,7 @@ function hit(s: RemuxSession, viewer: string | undefined): void {
   }
 }
 
-/** The remux of a channel, started if not running; resolves once two segments exist. */
+/** The remux of a channel, started if not running; resolves once its first segment exists (waitReady). */
 export async function ensureRemux(key: string, src: RemuxSource, secrets: string[], viewer?: string): Promise<{ playUrl: string; codec?: LiveTvCodec }> {
   const ff = await detectFfmpeg();
   if (!ff.available || !ff.path) throw new Error('This channel is a raw MPEG-TS stream, which needs ffmpeg on the server to play in a browser; ffmpeg is not installed there.');

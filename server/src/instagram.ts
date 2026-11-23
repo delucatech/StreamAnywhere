@@ -23,10 +23,11 @@
  * were measured as a guest (profile anchors, embed pages) are the ones the signed-in code reuses.
  *
  * Signed in (cookies of a signed-in browser, see instagramSession.ts) the profile pages page on
- * scroll, `topsearch` finds accounts, and the Reels page (`/reels/`) is the account's own feed: its
- * GraphQL answers are captured while scrolling and only the post CODES are taken from them; the
- * playable file always comes from the embed page. The signed-in half is built from Instagram's
- * documented web behaviour but could not be tried without an account.
+ * scroll, `topsearch` finds accounts, and the Reels page (`/reels/`) is the account's own feed: only
+ * post CODES are taken from it (the page's own first JSON, the GraphQL answers captured while it is
+ * paged with ArrowDown, the address the viewer moves to; ads left out); the playable file always
+ * comes from the embed page. The signed-in half was built from Instagram's documented web behaviour
+ * without an account at hand; it has run with a real one on the VM since (For You fills, 2026-10-20).
  */
 import * as fs from 'node:fs';
 import * as os from 'node:os';

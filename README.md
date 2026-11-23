@@ -15,6 +15,8 @@ TikTok URL ─► POST /api/resolve ─► cookie-free CDN URL ─► browser fe
 
 Everything after `/api/resolve` happens in the browser. The server only resolves metadata and
 offers an opt-in, allowlisted streaming proxy for the cases where direct access is impossible.
+The same pipeline now plays every app of the site (the four feeds, the Video Library, Live TV):
+**[How it works at a glance](#how-it-works-at-a-glance)** has the whole picture on one page.
 
 Status on 2026-10-08, tested in the Chromium 152 build embedded in the Claude desktop app on
 Windows 10 (see **Test results** for exactly what was measured):
@@ -29,14 +31,69 @@ Windows 10 (see **Test results** for exactly what was measured):
 | Mode A `<video>` → Canvas, Mode C official iframe | **Working** (comparison modes) |
 | H.265 TikTok variants through WebCodecs | **Browser-dependent** – fails cleanly where `VideoDecoder.isConfigSupported` says no |
 | **Feed page** (`feed.html`): TikTok-style vertical stream, Explore feed without sign-in | **Working** (Node server and IIS handler) |
-| Feed page: personal **For You** feed after signing in to TikTok (QR code or window) | **Working mechanism** (signed-out test; QR rendered and refreshed); needs the Node server + Chrome/Edge/Chromium on that machine – see **Feed** |
+| Feed page: personal **For You** feed after signing in to TikTok (QR code or window) | **Working**, in use signed in on the VM (`session.ts` notes the first sign-in there, with TikTok's e-mail code, on 2026-10-11); needs the Node server + Chrome/Edge/Chromium on that machine – see **Feed** |
 | **YouTube sign-in**: a code approved on a phone or computer (QR code / google.com/device), or the cookies of a signed-in browser; **For You** = the account's recommendations | **Working** with a code (2026-11-20, real account on the dev PC: account named, home feed listed, sign-out withdrawn at Google). Cookies: working mechanism (built 2026-10-13; verified signed-out only) – see **YouTube** |
 | **Mirror** (built 2026-10-21): an iPhone's screen (ReplayKit broadcast extension) on the Tesla's browser, three ways: the phone's own page on its hotspot, a WebRTC direct link, the server's relay; WebCodecs or MSE on the viewer; a desktop sender page too | **Working** on the PC (relay, direct link, both decoders, with the desktop sender; 26 relay checks). The phone app exists twice: **.NET MAUI** (`mobileapp/`, compiles for iOS on Windows, hotspot + relay paths) and Swift (`mirror/ios/`, adds the WebRTC direct link); neither has **run on a phone yet** (needs a Mac to deploy) – see [mobileapp/README.md](mobileapp/README.md) |
 | **Launcher** (`home.html`, the landing page): iPad-style icons that open each platform like an app | **Working** |
 | **YouTube, guest mode**: Shorts by hashtag, search, channels; picture + sound as two files played in sync | **Working** (Node server with yt-dlp) – see **YouTube** |
-| **Facebook** (built 2026-10-15): **Reels** = the latest reels of a rotation of public Pages, read from facebook.com's own pages over plain HTTPS (no browser, no yt-dlp, no sign-in); pasted reel links; **For You** = the account's Reels feed after a cookie sign-in; one progressive 720p MP4 per reel, fetched by the viewer itself (CORS `*`) | **Working** on the VM: Reels (Page tabs) signed out, For You with a real account's cookies (2026-10-27: the feed read through facebook.com's own GraphQL query) – see **Facebook** |
-| **Instagram** (built 2026-10-13): **requires a sign-in** (Instagram serves nobody who is signed out): paste/upload the cookies of a signed-in browser (or a sign-in window on the server machine). **Reels** = the latest Reels of a rotation of big public accounts, **For You** = the account's Reels page, `@handle`/link/account search, profiles; one muxed MP4 per Reel | **Working mechanism, unverified signed in** (cookie parsing, rejection of bad cookies, the account rotation, embed resolving and playback are verified signed out; the signed-in feed awaits a real account) – see **Instagram** |
+| **Facebook** (built 2026-10-15): **Reels** = the latest reels of a rotation of public Pages, read from facebook.com's own pages over plain HTTPS (no browser, no yt-dlp, no sign-in); pasted reel links; **For You** = the account's Reels feed after a cookie sign-in; two progressive MP4s per reel (HD 720p, SD 360p), fetched by the viewer itself (CORS `*`) | **Working** on the VM: Reels (Page tabs) signed out, For You with a real account's cookies (2026-10-27: the feed read through facebook.com's own GraphQL query) – see **Facebook** |
+| **Instagram** (built 2026-10-13): **requires a sign-in** (Instagram serves nobody who is signed out): paste/upload the cookies of a signed-in browser (or a sign-in window on the server machine). **Reels** = the latest Reels of a rotation of big public accounts, **For You** = the account's Reels page, `@handle`/link/account search, profiles; one muxed MP4 per Reel | **Working** signed in on the VM (2026-10-14: the Reels tab served 12 videos 22 s after a restart; 2026-10-20: For You filled from the account's Reels page). Follow (built 2026-11-22) has not been run with a session yet – see **Instagram** |
 | **Live TV** (built 2026-10-28): M3U / M3U8 playlists and Xtream Codes accounts managed in the app's Settings (credentials encrypted on the server), free community playlists built in (iptv-org, Free-TV), a channel browser with provider / group filters, search, logos, favorites and the last channel, a programme guide (XMLTV: the playlist's own, the panel's, or any URL), playback through the server (HLS relayed with the upstream hidden behind encrypted segment tokens; raw MPEG-TS remuxed to HLS with ffmpeg) with clear *loading* / *unavailable* / *unsupported* states | **Working** on the PC (iptv-org US and UK lists, CNN live, the UK guide, a raw MPEG-TS stream through the remux, a DASH channel refused with the reason); an Xtream panel is implemented against the standard API but not yet tried against a real account – see **Live TV** |
+
+## How it works at a glance
+
+*This section is the first place to look up how playback and retrieval work. A change to how video
+renders or to how an app gets its videos updates it, and the app's own section below, in the same
+commit. Numbers here are the constants in the code (checked 2026-11-23).*
+
+### How a video gets on screen
+
+Every app plays through one player, `FeedPlayer` ([`client/src/feed/player.ts`](client/src/feed/player.ts)),
+which draws on a `<canvas>`. No `<video>` element is on screen, in the feeds, the Video Library or
+Live TV. (One exception: fullscreen in the Library on an iPhone hands the stored file to the
+system player and returns to the canvas afterwards.)
+
+| Step | What happens | Where |
+|---|---|---|
+| Bytes | `Mp4Demuxer` reads an MP4 from `fetch()` with `Range` (a URL), from `Blob.slice()` (a Library file), or from the media cache's copy of the file's head and then the network. mp4box.js parses it; fragmented files (YouTube) seek through their `sidx` index. Reading pauses above 600 queued video or 1,500 audio samples | `client/src/media/demuxer.ts` |
+| Decode | WebCodecs. `VideoDecoder`: 12 frames kept decoded ahead, at most 8 chunks in flight. `AudioDecoder`: sound decoded 6 s ahead, at most 32 chunks in flight. A sound file of its own (YouTube) gets a second demuxer | `client/src/renderers/webcodecsRenderer.ts` |
+| Clock | The `AudioContext` is the master clock. A wall clock runs the picture when there is no sound, when autoplay holds the sound back (until a tap, or the context resuming by itself), or when the context's clock stands still for 2 s | `client/src/media/audioOutput.ts` |
+| Paint | Canvas 2D `drawImage(VideoFrame)` of the newest frame at or before the clock, on every animation frame; a 100 ms timer takes over when the browser throttles animation frames. No WebGL | `webcodecsRenderer.ts` |
+| Buffering | Starts when the clock is 250 ms past the last painted frame with none ready, or when under 150 ms of sound is left with chunks still at the decoder. Ends with 3 frames ready and, when sound drives the clock, 1.5 s of sound | `webcodecsRenderer.ts` |
+| Without WebCodecs | A hidden `<video>` decodes and each frame is copied into the same canvas (`FeedPlayer` mode `video-canvas`). It plays one file, so YouTube is silent there | `client/src/renderers/videoElementRenderer.ts` |
+
+What the feed page adds ([`client/src/feed/feed.ts`](client/src/feed/feed.ts)):
+
+- **Which file**: the first H.264 format, else any format with a URL (`pickFormat`).
+- **Which address**: the direct CDN URL when the item has one, else the server's relay
+  (`/api/media/:id`). A player error on the direct URL starts over through the relay; a video from
+  the saved feed that fails again gets fresh play URLs from its page once; after that the video
+  shows its error and, with auto-scroll on, the feed moves on 1.5 s later.
+- **Which videos hold a player**: the one in view and one on each side. The two after those get
+  their play URLs looked up and their first 1 MB fetched into the media cache (not when the
+  browser asks to save data).
+- **Media cache** (`client/src/feed/mediaCache.ts`, IndexedDB): what a player downloaded, up to
+  32 MB per file, so a video seen again starts from disk. Budget: 400 MB or 20 % of the browser's
+  quota, whichever is less, never under 40 MB; unprotected files leave after 24 h, then the least
+  recently used while over budget, 12 files a sweep.
+
+### How each app gets its videos
+
+"Direct" means the viewer's browser fetches the file from the platform's CDN itself; "relay" means
+through the server's `/api/media/:id` (`server/src/proxy.ts`).
+
+| App | The list of videos | The playable file | To the viewer |
+|---|---|---|---|
+| **TikTok** | **Explore**: TikTok's unsigned `api/explore/item_list` over plain HTTPS; when that is refused, the same request from inside the server's headless browser, which then stays preferred for 15 min. **For You**: a signed-in headless Chrome on `tiktok.com/foryou`; the server reads the `api/recommend/item_list` answers that page receives and keeps 20 videos ready while someone watches. Search, profiles, comments: the same browser | Each variant's cookie-free `/aweme/v1/play` address (direct) and its cookie-bound `playAddr` (relay only). Items come with their formats; a pasted link or a search result without them goes through `POST /api/resolve` | Direct, relay as fallback |
+| **YouTube** | **Shorts**: a hashtag's Shorts tab, listed by yt-dlp. **Search**: `youtubei/v1/search` (yt-dlp as fallback). **For You**: the TV API's home feed after the code sign-in; with cookies only, yt-dlp's `feed/recommended`. Channels: yt-dlp | `youtubei/v1/player` asked by the server (about 0.2 s); yt-dlp when that fails, with Deno for "made for kids" videos (one at a time, the video in view first). The answer is an H.264 picture-only file (up to 720p) and an AAC sound file, kept 1 h | Always the relay (the addresses are bound to the server's IP), in 4 MB pieces; two demuxers in step |
+| **Instagram** | Sign-in required. **Reels**: a rotation of public accounts whose profile pages are listed into a catalog. **For You**: the post codes of the account's `/reels/` page. All in one headless Chrome page | The post's embed page, fetched from inside that page: one MP4 with picture and sound | Direct, relay as fallback |
+| **Facebook** | **Reels**: public Pages' `/reels/` tabs over plain HTTPS, kept in a catalog. **For You**: the `FBUnifiedVideoContainerQuery` GraphQL query with the saved cookies. No browser | Progressive MP4s named in the same data: HD (720p) and SD (360p) | Direct, relay as fallback |
+| **Live TV** | Channel lists from M3U playlists and Xtream accounts, kept (encrypted) on the server | The server opens the stream; an ffmpeg recorder copies the picture, re-encodes the sound to AAC and writes fragmented MP4 segments, the last 30 minutes of them | `/api/livetv/live/:key/stream.mp4`: the recording as one endless MP4 |
+| **Video Library** | Saved links in the server's `library.json` | The device's own copy in IndexedDB (8 MB parts), or the server's copy converted to MP4 | Read from the device, or `/api/library/file/:id` |
+
+On the server, a feed is filled into a stock (`server/src/reservoir.ts`) rather than inside a
+request, and an item leaves the stock once all its play URLs are within 2 minutes of expiring. Search results,
+account pages and TikTok resolves are shared jobs whose answers are kept (`server/src/jobs.ts`).
 
 ## Repository layout
 
@@ -52,39 +109,67 @@ mobileapp/StreamAnywhere.Broadcast/  the iOS broadcast extension in C# (the mirr
 mirror/README.md                  Mirror: how the three paths work, the protocol, the pieces
 mirror/ios/                       the same phone app in Swift (XcodeGen project.yml), with the WebRTC direct link
 client/   Vite 4 + TypeScript front end (no framework)
-  src/media/demuxer.ts            streaming fetch → mp4box.js, Range-based seeking, backpressure
+  src/media/demuxer.ts            streaming fetch (or Blob, or the media cache's head) → mp4box.js, Range and sidx seeking, backpressure, the recording for the media cache
   src/media/codecConfig.ts        avcC/hvcC/esds → VideoDecoderConfig / AudioDecoderConfig
   src/media/audioOutput.ts        Web Audio sink that doubles as the playback clock (+ wall clock)
   src/media/downmix.ts            7.1 / 6.1 / other layouts → stereo (Web Audio folds only 1/2/4/6 channels)
-  src/renderers/webcodecsRenderer.ts   Mode B (primary): WebCodecs → Canvas
-  src/renderers/videoElementRenderer.ts Mode A: hidden <video> → rVFC → Canvas
-  src/renderers/embedRenderer.ts        Mode C: official TikTok player iframe
+  src/renderers/types.ts          the Renderer interface, LoadSource (URL / Blob / cache head / live / second sound file), player states and stats
+  src/renderers/webcodecsRenderer.ts   the renderer every app uses (lab: Mode B): WebCodecs → Canvas
+  src/renderers/videoElementRenderer.ts the fallback without WebCodecs (lab: Mode A): hidden <video> → rVFC → Canvas
+  src/renderers/embedRenderer.ts        lab Mode C: official TikTok player iframe
   src/cors-test.ts                browser-side fetch()/<video> access tests
   src/diagnostics.ts              the six experiments (measured, with explanations)
-  src/main.ts                     UI, source/renderer selection, direct-vs-proxy decision
+  index.html + src/main.ts        the lab page: UI, source/renderer selection, direct-vs-proxy decision (src/testSources.ts: the public test MP4s)
   home.html + src/home/home.ts    the launcher: one app icon per platform (src/platforms.ts), zoom-open animation
-  mirror.html + src/mirror/       the Mirror viewer (relay + WebRTC direct link; WebCodecs or MSE decoding), mirror-send.html = a desktop sender
-  feed.html + src/feed/feed.ts    the feed page (feed.html?platform=tiktok|youtube|instagram|facebook): stream that follows the finger / mouse and snaps one video at a time (TikTok-like drag), tap-to-pause, auto-scroll, playback speed, download
-  livetv.html + src/livetv/       Live TV: the channel browser + Settings (livetv.ts), the HLS player on a <video> through hls.js (player.ts)
+  mirror.html + src/mirror/       the Mirror viewer (relay + WebRTC direct link; WebCodecs or MSE decoding), mirror-send.html = a desktop sender, mirror-local.html = the page the phone serves on its hotspot
+  feed.html + src/feed/feed.ts    the feed page (feed.html?platform=tiktok|youtube|instagram|facebook): stream that follows the finger / mouse and snaps one video at a time (TikTok-like drag), tap-to-pause, auto-scroll, playback speed, save; which videos hold a player, direct-vs-relay, the saved feed
+  src/feed/player.ts              FeedPlayer: the canvas player of the feeds, the Library and Live TV (WebCodecs, or the hidden-<video> fallback)
+  src/feed/mediaCache.ts          the feed's media cache (IndexedDB): downloaded bytes of recent videos, budget and sweeps
+  src/feed/social.ts              the feed's panels: search, account pages with follow, messages
+  library.html + src/library/     the Video Library: the page (library.ts), the IndexedDB store (db.ts), downloads (downloads.ts), what this browser can save (capabilities.ts), the player (player.ts: FeedPlayer fed from a Blob); download.html redirects here
+  livetv.html + src/livetv/       Live TV: the channel browser + Settings (livetv.ts), the canvas player (player.ts: FeedPlayer on the server's endless MP4; no <video>, no hls.js), which codecs this browser decodes (codecs.ts)
+  src/api.ts                      the API client (every slow request is registered in pending.ts)
+  src/activity.ts / pending.ts    the one-line status at the bottom of a page that waits, and the list of what it waits for
+  src/serverStatus.ts             watches /api/health and words the server's state for the waiting screens
+  src/appUpdate.ts + public/sw.js the installed app: pages from the device's copy, updates in the background
+  src/platforms.ts / ui.ts / busy.ts   the platforms (names, colours, categories); DOM and log helpers; button feedback while work runs
 server/   Fastify 4 + TypeScript (Node 16 compatible)
+  src/index.ts                    the entry point: the feed / resolve / search / session routes, the feeds' stocks
+  src/config.ts / auth.ts         settings from the environment (the relay's built-in host allowlist); the site password and its cookie
   src/tiktok.ts                   native TikTok resolver (page JSON) + server-side CORS probe
   src/feed.ts                     Explore feed (unsigned TikTok API) + itemStruct → FeedItem conversion
-  src/session.ts                  TikTok sign-in through a real Chrome/Edge (puppeteer-core) + For You capture
-  src/youtube.ts                  YouTube guest mode through yt-dlp: hashtag Shorts, search, channels, two-file resolve
-  src/instagram.ts                Instagram through a headless Chrome page: account catalog, embed-page resolver, explore/search/profile/For You
+  src/session.ts                  TikTok sign-in through a real Chrome/Edge (puppeteer-core), the For You capture and its pump, Explore from inside the browser, idle close
+  src/social.ts                   TikTok search, profiles, follow, comments and messages through the headless work page
+  src/reservoir.ts / lastBatch.ts a feed's stock, filled in the background; the stock and the last batch kept on disk
+  src/jobs.ts                     shared jobs: work that outlives its request, answers kept for the retry
+  src/homeTopUps.ts / pressure.ts the home screen's top-ups, one at a time; how starved the machine is (memory, swap, load, late timers)
+  src/youtube.ts                  YouTube: hashtag Shorts and channels through yt-dlp, the two-file resolve (direct lookup, yt-dlp behind it, the slow lane, the ad wait)
+  src/youtubePlayer.ts            a video's play URLs straight from YouTube's player API (no yt-dlp)
+  src/youtubeSearch.ts            search through youtubei/v1/search
+  src/youtubeTv.ts                the code sign-in (Google's sign-in for TVs) and the home feed from the TV API
+  src/youtubeSession.ts           YouTube sign-in, both kinds (code / cookies), the account check
+  src/youtubeAvatar.ts            channel profile pictures: one small request per channel, kept 30 days
+  src/instagram.ts                Instagram through a headless Chrome page: account catalog, embed-page resolver, explore/search/profile/For You, follow
   src/instagramSession.ts         Instagram sign-in (cookies / window), account check
   src/facebook.ts                 Facebook over plain HTTPS: Page listings (catalog), reel pages, explore/profile/search/For You
   src/facebookSession.ts          Facebook sign-in (cookies / window), settings-page account check
-  src/ytdlp.ts                    yt-dlp fallback resolver
+  src/ytdlp.ts                    yt-dlp: the warm helper processes (scripts/ytdlp-daemon.py), the CLI, the TikTok fallback resolver
   src/mirror.ts                   Mirror relay + signalling: /api/mirror/ws (WebSocket), rooms, ICE servers
-  src/proxy.ts                    GET/HEAD /api/media/:id streaming relay with Range support
+  src/proxy.ts                    the relay: GET/HEAD /api/media/:id with Range support, 4 MB pieces for YouTube, ?dl= for a file download
+  src/mediaStore.ts / http.ts     the relay's media ids (in memory, expire with the upstream URL); the HTTPS opener with cookies and the per-hop address check
+  src/library.ts                  the Video Library: saved links, details, categories, thumbnails, the qualities a browser can get
+  src/libraryFiles.ts             "Download to library": the server's own copy of a video, converted to MP4
+  src/downloader.ts / ffmpeg.ts   yt-dlp download jobs (picture + sound merged); finding ffmpeg, probing a file, planning and running a conversion
   src/livetv.ts                   Live TV: providers (encrypted credentials), cached channel lists, favorites, tuning, the routes
   src/livetvM3u.ts / livetvXtream.ts / livetvEpg.ts   playlist parsing, the Xtream Codes API, XMLTV guides (streamed, windowed)
-  src/livetvStream.ts             the stream relay: HLS rewriting with encrypted segment tokens, ffmpeg remux of raw MPEG-TS, progressive relay
+  src/livetvStream.ts             opening and classifying a stream, the ffmpeg recorder (fragmented MP4, last 30 min), the endless-MP4 route; the older HLS relay with encrypted segment tokens (kept, unused by the page)
   src/livetvCrypto.ts / livetvHttp.ts / livetvPresets.ts   AES-256-GCM at rest + tokens, http(s) opener with the private-address check, the community playlists
+  src/activity.ts / activityRoutes.ts   what the server is doing, in words (say / track), and GET /api/activity
+  src/progress.ts / logbuf.ts     per-platform progress text of slow jobs; the log tail behind /api/log
   src/ssrf.ts                     https-only, host allowlist, private-IP rejection
-  src/tests/run.ts                executable checks (offline + live network)
-shared/types.ts                   API types shared by both sides
+  src/tests/run.ts                executable checks (offline + live network); activity.ts, mirror.ts, youtubeAvatar.ts are its offline parts
+shared/types.ts                   API types shared by both sides (FeedItem, MediaFormat, the platforms' categories)
+shared/livetvHealth.ts            a Live TV stream's last tries and its good / weak / bad rating
 shared/mirror.ts                  the Mirror wire protocol (mirror/1), shared with the viewer, the sender page and (as Swift) the iPhone app
 research/                         the Python probes used to measure TikTok CDN behaviour (+ redacted results)
 docs/RESEARCH.md                  detailed findings: cookies, CORS, Referer, expiry, signatures, Range
@@ -308,46 +393,74 @@ Open **`/feed.html`** (from the launcher; `?platform=youtube` for YouTube). It i
   no sign-in; works with both the Node server and the IIS handler) and **For You** (your own feed
   after signing in; Node server only). On YouTube the two are **Shorts** (hashtag Shorts, guest)
   and **For You** (the signed-in account's recommendations, see **YouTube**).
-- Playback uses the browser's `<video>` element (several items are kept warm, H.264 variant
-  preferred, proxy fallback on error); the WebCodecs pipeline stays on the lab page.
+- Playback is the WebCodecs pipeline on each video's `<canvas>` (`FeedPlayer`, the same renderer as
+  the lab page's Mode B); no `<video>` element is on the page. Only a browser without WebCodecs
+  gets a hidden `<video>` whose frames are copied into that canvas. The video in view and one on
+  each side hold a player, the H.264 variant is preferred, and an error on the direct URL starts
+  over through the relay - see [How a video gets on screen](#how-a-video-gets-on-screen).
 
 **Signing in to TikTok (For You)** – `Sign in` offers two ways; both use the Chrome/Edge/Chromium
 installed on the machine that runs the Node server, with a private profile, and StreamAnywhere never
 handles the password:
 
 - **Sign in with QR code** (default, works on a server without a display): a headless page opens
-  TikTok's own `login/qrcode` page, the QR canvas is copied into the session status and shown in
-  the feed page; scan it with the TikTok app on the phone and confirm. The code is refreshed as
-  TikTok rotates it.
+  TikTok's own `login/qrcode` page. The QR picture is read from the answer that page gets from
+  TikTok (`passport/web/get_qrcode`, a base64 PNG; copying the page's canvas is the fallback) and
+  shown in the feed page; scan it with the TikTok app on the phone and confirm. An expired code
+  is renewed by the server: a click on the QR area, a reload of the login page, or as a last
+  resort a new `get_qrcode` call made from inside the page (so TikTok's own script signs it).
+  When TikTok asks for a verification after the phone confirmed (its error 2135: an e-mailed
+  code), the feed page shows that page live and passes on what the user types; the server never
+  enters a code by itself, and the attempt is held for 48 h so the code can be typed later.
 - **Open sign-in window on server**: a visible browser window on TikTok's login page, for a PC
   where you can see the screen (any sign-in method).
 
 When TikTok reports a session the status shows `@username` and the feed switches to For You. From
-then on a *headless* instance of that profile keeps `tiktok.com/foryou` open: TikTok's web app
+then on a *headless* instance of that profile opens `tiktok.com/foryou`: TikTok's web app
 does its own request signing (msToken / X-Bogus / X-Gnarly), and the server only reads the
-`recommend/item_list` responses it receives, nudging the page (scroll + ArrowDown) when the viewer
-needs more. `Sign out` closes the browsers and deletes the profile directory.
+`recommend/item_list` responses that page receives (ads left out). While someone watches, a pump
+keeps 20 videos ready by nudging the page (scroll to the end + ArrowDown, then 2.5 s) and stops
+3 minutes after the last request; a request waits up to 12 s for its videos and, when none come,
+checks the account and reloads the page once. The browser is not kept for good: it closes after
+10 minutes without a TikTok request (`TIKTOK_BROWSER_IDLE_MIN`; the 1 GB VM needs the memory), and
+sooner, when nothing is using it, to make room for Instagram's browser or a slow YouTube lookup;
+the next request starts it
+again with the profile and the videos already captured; a viewer with an empty screen gets the
+last batch meanwhile. `Sign out` closes the browsers and deletes the profile directory.
+
+**Explore** is two paths. The plain HTTPS request (`server/src/feed.ts`: a cookie jar from one
+visit to `/explore`, reused 30 minutes; four tries) comes first. When TikTok refuses it (from the
+VM's datacenter address the body came back empty two times out of three), the same request is
+made from inside the headless page on `/explore`, where TikTok's script signs it
+(`fetchExploreViaBrowser` in `session.ts`); that path is then preferred for 15 minutes, and
+`EXPLORE_VIA_BROWSER=1` makes it the first choice always. A top-up while nobody watches never
+starts the browser. TikTok Explore is the one feed whose stock is kept filled around the clock
+once used (`keepStocked`: target 60 videos, refilled under 40, 30 a call), because its play URLs
+last about an hour.
 
 Why this design: measured on 2026-10-08, `/api/recommend/item_list/` answers `{"status_code":0}`
 without items unless the request carries the signatures minted by TikTok's `webmssdk.js` from a
 browser fingerprint, even when replayed from the same machine; the Explore endpoint has no such
-requirement. The QR-login passport endpoints refuse the web app id ("Application has no
-permissions"), so there is no password-less flow we could drive ourselves. Headless Chrome is
-served an error page unless it hides automation (user agent without `HeadlessChrome`,
+requirement from a residential address. The QR-login passport endpoints refuse the web app id
+("Application has no permissions") when called from outside, so the server never calls them
+directly: it reads the page's own calls, and makes its own only from inside the page. Headless
+Chrome is served an error page unless it hides automation (user agent without `HeadlessChrome`,
 `--disable-blink-features=AutomationControlled`, no `--enable-automation`) – `session.ts` does that.
-Everything after sign-in was verified signed-out (TikTok's guest feed: small batches of 1–6 items,
-then a login wall); the signed-in path uses exactly the same capture. Hosted containers (Render,
-Docker) have no Chrome: the feed page then offers Explore only and says so.
+The capture was first verified signed out (TikTok's guest feed: small batches of 1–6 items,
+then a login wall); the signed-in path uses exactly the same capture and has run on the VM since.
+Hosted containers (Render, Docker) have no Chrome: the feed page then offers Explore only and says so.
 
 ### How long a video stays playable (caches and expiry)
 
-Nothing is kept past its play URL. Every item carries `formats[].expiresAt` read from the CDN URL
-(`expire=` / `x-expires=` on TikTok and YouTube, `oe=` hex seconds on Instagram and Facebook; 6 h
-`mediaTtlMs` when a URL names none) and that decides every cache:
+Nothing is kept past its play URL. An item's `formats[].expiresAt` is read from the CDN URL
+(`expire=` on TikTok feed items and YouTube, `oe=` hex seconds on Instagram and Facebook) and
+decides every cache. A format whose URL names no expiry has none: it never counts as expired in
+the stock, and only its relay id ends, after 6 h (`mediaTtlMs`). The resolver (`POST /api/resolve`)
+also reads `x-expires=` and the hex path segment of `tiktokcdn-us.com` URLs.
 
 | Where | What | Lifetime |
 |---|---|---|
-| TikTok play URL | `expire=` on primary URLs, hex path segment on tiktokcdn-us | ≈ 48–60 h |
+| TikTok play URL | `expire=` on the feed's URLs; hex path segment on a resolved tiktokcdn-us URL | Explore batches from the plain request: ≈ 1 h (measured 2026-10-27; why that stock is kept filled). From the browser path: up to 48 h. A resolved video (2026-10-08): `expire=` ≈ 48 h, hex segment ≈ 60 h |
 | YouTube play URL | googlevideo `expire=` | ≈ 6 h |
 | Instagram play URL / cover | `oe=` | ≈ 1 day (covers somewhat longer) |
 | Facebook play URL / cover | `oe=` | ≈ 1 day |
@@ -374,10 +487,11 @@ comes next:
   one is running **joins it** (no second browser trip); the answer is **kept** – search and account
   pages for 24 h on disk (`~/.streamanywhere/jobs/`, so a restart keeps them), resolves 30 min in
   memory. A kept answer younger than 10 min (resolves: 5 min) is final. An older one still goes out
-  **at once**, marked `cachedAgeSec`, and the job **runs again in the background** (one at a time,
-  2 s apart); the client asks again 20 s later (up to 3 times) and the fresh answer takes over the
-  list, newer videos first. Expired play URLs and covers are stripped from a kept answer on the way
-  out (the video's page gives fresh ones when it is played). Failures are never kept.
+  **at once** and the job **runs again in the background** (one at a time, 2 s apart). For search
+  and account pages the old answer is marked `cachedAgeSec`, its expired play URLs and covers are
+  stripped on the way out (the video's page gives fresh ones when it is played), and the client
+  asks again 20 s later (up to 3 times): the fresh answer takes over the list, newer videos first.
+  An old resolve goes out as it is. Failures are never kept.
 - **The car** retries a search or account page that failed for lack of a connection (not one the
   platform refused) four times, 3 → 12 s apart, while the panel is open and the query unchanged;
   the feed already retried. Its own search memory still shows the last results of a phrase
@@ -442,7 +556,8 @@ videos are downloaded where you want them, on the device you are using:
 
 1. **Save link** stores the URL in the library at once and looks its details up in the background
    (title, author, length, thumbnail; YouTube through yt-dlp, the others through the feed's resolvers).
-   Duplicates are recognised by the video's canonical form (`watch?v=ID`, `@user/video/ID`, `reel/CODE`).
+   Duplicates are recognised by the video's canonical form (YouTube `watch?v=ID`, TikTok `video/ID`
+   without the account, Instagram `reel/CODE`, Facebook `reel/ID`).
    A failed lookup keeps the entry with a placeholder title that can be edited. Nothing is downloaded.
 2. **Download for in-app playback** stores the video in *this* browser (IndexedDB, in 8 MB parts
    written while the download streams) and the built-in player plays it, offline too.
@@ -475,10 +590,12 @@ file link is downloaded as it is (http or https, redirects followed, every hop c
 address; web pages refused); a platform video goes through `entryOptions()` like a browser would (the
 recommended quality: YouTube through the downloader's server job, the others' ready MP4). The file
 is then inspected with ffmpeg (`probeMedia` / `planConversion` in `ffmpeg.ts`, parsed from `ffmpeg -i`:
-the ffmpeg-static package has no ffprobe). An MP4 whose streams the browsers decode is kept as it is;
-anything else becomes one: **MKV / WebM / AVI are remuxed** (streams copied, seconds) when they hold
-8-bit H.264 / H.265 / VP9 / AV1 and AAC, otherwise **re-encoded** (libx264 veryfast, ≤ 1920 px wide,
-AAC stereo), which is slow on the e2-micro and said so on the page. The default sound track is kept
+the ffmpeg-static package has no ffprobe). An MP4 with one picture track and at most one
+sound track, all of which the browsers decode, is kept as it is; anything else becomes one. Picture
+and sound are decided separately: the picture is **copied** when it is 8-bit H.264 / H.265 / VP9 /
+AV1, else **re-encoded** (libx264 veryfast, ≤ 1920 px wide), which is slow on the e2-micro and said
+so on the page; the sound is copied when it is AAC, else re-encoded to stereo AAC (160 kbps). So an
+MKV / WebM / AVI with H.264 + AAC is a remux of seconds, and H.264 + AC-3 re-encodes the sound only. The default sound track is kept
 when there are several; subtitles and attachments are dropped. A thumbnail is grabbed from the file
 when the source gave none. Progress (`entry.file`: queued → downloading → converting → ready / error,
 percent and a line of text) reaches the pages through the usual poll; one import runs at a time, a
@@ -507,7 +624,9 @@ fallback. The only addition to the pipeline is a Blob source in `Mp4Demuxer`: th
 with `Blob.slice()` where a URL would be fetched with a `Range` header (the `<video>` fallback gets an
 object URL). The pipeline has no other network dependency, so local videos play with the network off.
 Around it: tap to pause, a seekable bar, previous / next by button, vertical swipe, wheel or arrow
-keys, mute, fullscreen, auto-advance. Qualities whose codec the browser cannot decode
+keys, mute, fullscreen, auto-advance. On an iPhone (only a `<video>` can go fullscreen there) the
+fullscreen button hands the stored file to a plain `<video>` in the system player and returns to the canvas
+afterwards: the one place a `<video>` is shown. Qualities whose codec the browser cannot decode
 (`VideoDecoder.isConfigSupported`) are greyed for in-app downloads and still offered as files.
 
 Browser notes: Safari on iPhone may clear site data (the local videos) after 7 days without a visit
@@ -610,21 +729,19 @@ opens the stream once (`openLive`: http or https, any public host – the privat
 `ssrf.ts` on every hop – redirects followed, 15 s) and classifies it by status, Content-Type and
 first bytes:
 
-- an **HLS playlist** is relayed and rewritten: every URI (variant and media playlists, segments,
-  keys, init maps) becomes a same-origin path whose token is the upstream URL AES-GCM-encrypted
-  (deterministic, so a playlist reloaded every few seconds keeps its URLs); the browser sees nothing
-  upstream and cannot forge a relay request. `GET /api/livetv/hls/:key/index.m3u8`, `…/p/:token.m3u8`,
-  `/api/livetv/seg/:key/:token`. Fastify's `maxParamLength` is raised for the tokens;
 - every **live stream** (an HLS playlist or a raw MPEG-TS) goes through the ffmpeg **recorder**:
-  the picture copied (`-c:v copy`; for HLS one variant – `pickVariant`: H.264 before HEVC, the
-  best at or under 1080p / 12 Mbps; with the master and `-map p:N` when the sound is a separate
+  the picture copied (`-c:v copy`; for HLS one variant – `pickVariant`: a codec this browser
+  decodes first – the page tests `VideoDecoder.isConfigSupported` (`client/src/livetv/codecs.ts`)
+  and sends the list with the tune; H.264 before HEVC when it sent none – then the best at or
+  under 1080p / 12 Mbps and the Video quality setting; with the master and `-map p:N` when the sound is a separate
   rendition; `-http_persistent 0`, since a CDN closing its keep-alive connection mid-segment
   otherwise cost the rest of that segment), the sound re-encoded to stereo AAC-LC (ADTS AAC out
   of MPEG-TS cannot be copied into MP4; MP2 / AC-3 the page cannot decode), written as
   **fragmented MP4** (`init.mp4` + `segNNNNN.m4s`, 3 s target, keyframe-aligned) into a playlist
   that keeps the **last 30 minutes** (600 segments, deleted as they age; disk, not memory: ~400 MB
-  at 1.7 Mbps; `LIVETV_DIR/cache`, emptied at start, never a RAM-backed /tmp). Ready after two
-  segments (5–12 s measured on CNN). Without ffmpeg a live channel is *unsupported* with that said;
+  at 1.7 Mbps; `LIVETV_DIR/cache`, emptied at start, never a RAM-backed /tmp). Ready after the
+  first segment (it was two until the slow-start fix below; 5–12 s was measured on CNN with two).
+  Without ffmpeg a live channel is *unsupported* with that said;
 - the page plays the recording as **one endless MP4**: `GET /api/livetv/live/:key/stream.mp4?from=live`
   (or `from=<seconds of the recording>`) sends the init segment, then every segment from that point
   on, then each new one as ffmpeg finishes it (an async generator behind `Readable.from`, so a
@@ -634,9 +751,9 @@ first bytes:
   fragment's `tfdt`, parsed from the file's head and cached). **No `<video>` element anywhere**:
   the theater is a `<canvas>` drawn by the feed's WebCodecs pipeline (fetch → mp4box → VideoDecoder
   / AudioDecoder → canvas 2D + Web Audio), the way TikTok videos play, through `FeedPlayer` with
-  `LoadSource.live` (no duration, no in-file seeking, the clock follows a jump in the timestamps,
-  the stream ending means the channel stopped – one automatic re-tune, then *unavailable*) and
-  `startAt` (frames before the seek target are decoded and dropped). A media file (MP4) a playlist
+  `LoadSource.live` (no duration, no in-file seeking, the clock follows a jump in the timestamps;
+  the stream ending is a lost connection the player reconnects from, see *A dropped connection*
+  below) and `startAt` (frames before the seek target are decoded and dropped). A media file (MP4) a playlist
   links to goes through the same pipeline as a file;
 - **pause and rewind**: pausing freezes the renderer's clock (its download pauses with it, the
   recorder keeps going); resuming continues from the pause point (from the oldest point kept when
@@ -648,9 +765,17 @@ first bytes:
   channel stops the one nobody asked for the longest – and 3 min without any request stops one
   anyway. Lossy feeds exist: iptv-org's CNN carries 6 real seconds in every 12 s segment (a
   timestamp hole for the rest – what froze the picture on a `<video>` while the sound went on); the
-  canvas renderer jumps across such holes, and a stall under 1.2 s shows no overlay. A channel whose
-  variant turns out to be HEVC on a browser without that decoder is *unsupported* with that said;
+  canvas renderer jumps across such holes, and a stall under 1.2 s shows no overlay. The server
+  remembers each stream's codec and refuses the tune early for a browser that said it does not
+  decode it; on a codec failure the player moves to the channel's next stream, and the channel is
+  *unsupported* with that said only when none is left;
 - a **media file** (MP4 / WebM) is relayed as it is (`/api/livetv/file/:key`, Range forwarded);
+- the older **HLS relay** is still in the server but the page does not use it: an HLS playlist
+  rewritten so that every URI (variant and media playlists, segments, keys, init maps) is a
+  same-origin path whose token is the upstream URL AES-GCM-encrypted
+  (`GET /api/livetv/hls/:key/index.m3u8`, `…/p/:token.m3u8`, `/api/livetv/seg/:key/:token`;
+  Fastify's `maxParamLength` is raised for the tokens), and the recorder's own files
+  (`/api/livetv/remux/:key/:file`);
 - **MPEG-DASH**, a **web page** (a YouTube / Twitch link in a playlist), **DRM** and unknown formats are
   *unsupported* with the reason; an HTTP error, nothing, or a timeout is *unavailable* with the
   status (403 = geo-blocked or refused from the server, 404 = gone…).
@@ -732,12 +857,13 @@ anything.
 
 Sound that stops while the picture goes on (seen in the car: "audio works for about a second, then
 nothing") has a watchdog in the WebCodecs renderer (`audioWatch`, every frame step while playing with
-sound): no chunk placed on the audio timeline for 2 s although there is sound to decode means the
-decoder stopped answering or the timestamps left the clock, and the sound is restarted where the
+sound): the sound timeline run dry for 2 s (the clock past the last placed chunk) although there is
+sound to decode means the decoder stopped answering or the timestamps left the clock, and the sound
+is restarted where the
 picture is (the AudioDecoder reset and configured again, the clock re-based; up to three times in a
 row, then the picture gets a wall clock and the reason is said); an AudioContext whose clock stands
-still although it says it runs (the device handed the speakers to something else) gets the wall
-clock at once, since a frozen master clock would freeze the picture too; a context found suspended
+still for 2 s although it says it runs (the device handed the speakers to something else) gets the
+wall clock without the three restarts, since a frozen master clock would freeze the picture too; a context found suspended
 is resumed. Two things that could cause exactly that silent picture are also fixed: the sink's
 `pause()` / `resume()` now keep the last wish and apply it until the context agrees (a resume issued
 while a suspend was still in flight used to see *running*, do nothing, and leave the context
@@ -779,11 +905,14 @@ Measured 2026-10-12 (dev machine and the GCP VM; the VM's IP is not bot-checked 
   layout the parser no longer reads) the same search goes to `yt-dlp "ytsearchN:…"` (3–4 s a page
   of 20) and `/api/health` → `youtubeSearch` counts it (`fallback`, `lastFallback`).
   `YOUTUBE_SEARCH=ytdlp` sends every search to yt-dlp. Channels (`@handle/videos`) back the
-  Profile button. Everything is guest access; YouTube sign-in / a personal feed comes later.
+  Profile button (`@handle/shorts` when that tab is empty); both listings are yt-dlp's. All of
+  this is guest access; the sign-in and the personal feed are in *YouTube sign-in* below.
 - **Playback**: YouTube gives guests no muxed format (the 360p one needs a PO token and answers
-  403), so each video is resolved (cached an hour) to an H.264 video-only file (up to 720p,
-  `avc1` itags 160/133/134/135/136/298) plus an AAC audio file (itag 140, original language,
-  128 kbps). Both are fragmented MP4 and both go through the proxy: `googlevideo.com` URLs are
+  403), so each video is resolved (cached an hour) to H.264 picture-only files plus an AAC sound
+  file. The rule for the picture is "every `avc1` format without sound, plain https, at most
+  720p", highest first (in practice itags 160/133/134/135/136/298), and the feed plays the first;
+  a lookup that finds no H.264 picture goes to yt-dlp. The sound is itag 140 when there is one
+  (original language, 128 kbps). Both are fragmented MP4 and both always go through the proxy: `googlevideo.com` URLs are
   bound to the server's IP and carry no CORS header. The WebCodecs renderer runs a second demuxer
   for the sound file and syncs the picture to its audio clock (`LoadSource.audioUrl`).
 - **Video lookup** = YouTube's player API (`youtubei/v1/player`) straight from the server
@@ -796,33 +925,50 @@ Measured 2026-10-12 (dev machine and the GCP VM; the VM's IP is not bot-checked 
   confirm you're not a bot"): the id that refusal hands back is accepted, kept, and replaced when
   it wears out. The client definition is the one the installed yt-dlp reports, so the daily yt-dlp
   upgrade renews it. Any failure (a refusal, an unplayable answer, a layout the parser does not
-  read) sends the video to yt-dlp as before, and `/api/health` → `youtubePlayer` counts it
-  (`fallback`, `lastFallback`); `YOUTUBE_PLAYER=ytdlp` sends every video to yt-dlp. A viewer
-  waits 60 s for a video; a lookup slower than that goes on (up to 120 s) and its answer is kept,
-  so opening the video again plays at once.
+  read, no answer within 8 s) sends the video to yt-dlp as before, and `/api/health` →
+  `youtubePlayer` counts it (`fallback`, `lastFallback`); after a refusal no visitor id lifts, the
+  direct lookup rests 10 minutes. `YOUTUBE_PLAYER=ytdlp` sends every video to yt-dlp. A viewer
+  waits 60 s for a video; a lookup slower than that goes on (up to 120 s from the moment its
+  yt-dlp run starts) and its answer is kept. The server then answers 504 "still running" and the
+  feed asks once more by itself, so the video plays without being opened again.
+- **The slow lane** (2026-11-23). yt-dlp lookups run **one at a time** (`YOUTUBE_SLOW_LOOKUPS`
+  gives a bigger server more lanes), the video on screen before the ones the feed asks for ahead
+  of time (`ahead` on `/api/resolve`; asked again when it comes into view, a video moves up).
+  Before that, a kids' feed ran two 10 s lookups side by side in 42 s each while the video in view
+  waited behind them, past the viewer's 60 s ("HTTP 504"). A headless browser nothing is using is
+  closed when a slow lookup starts, and the home screen's top-ups wait for slow lookups.
 - **Videos marked "made for kids"** (Blippi and the like) take the slow route. YouTube answers
   "This video is not available" to the only client that works without the player's JavaScript
   (measured 2026-11-22: `visionos` and `android_vr` refuse, `android` / `ios` answer with SABR
   streams only, the TV clients hand out signed URLs). With **Deno** on the server (yt-dlp wants
   2.3 or newer; Node 20 does not count) and the `yt-dlp-ejs` package (`pip install
-  "yt-dlp[default]"`), yt-dlp runs YouTube's player script and asks as the `tv_samsung` client:
-  the direct lookup's refusal sends the video there (`player_client=default,-visionos`, so the
-  client that already refused is not asked again). The lookup takes about 5 s on a PC and 5-25 s
+  "yt-dlp[default]"`), yt-dlp runs YouTube's player script and picks its own client (`tv_samsung`
+  in its debug log, 2026-11-22; the code names none): the direct lookup's "unplayable" answer sends
+  the video there with `player_client=default,-<the client that refused>` (`-visionos` unless the
+  installed yt-dlp reports another), so that client is not asked again. The lookup takes about 5 s on a PC and 5-25 s
   on the e2-micro (7 s of it Deno when the machine is quiet; a minute or more while a headless
   Chromium runs). **The ad wait**: the TV client is shown an ad before the video, and YouTube's
   file server answers 403 for every byte range of the video's files until that ad's time is
   over - "30s ad": the files opened 21 s after a 7 s lookup; "23s ad skippable after 5s": open at
   once (measured 2026-11-22 on the PC and the VM; yt-dlp's debug log names the ad). The same
   address opens by itself, and a new lookup would start the clock again, so the server asks the
-  first file for two bytes until it answers (every 2.5 s, 75 s at most) before it hands the video
-  out, and the status strip says what the wait is. A made-for-kids video therefore opens in
-  10-40 s the first time (then from the kept answer, for an hour); upcoming videos are looked up
-  ahead while the one in view plays. The same route is the second way for every video should
+  first file for two bytes until it answers (every 2.5 s, 75 s at most, inside the lookup's 120 s)
+  before it hands the video out, and the status line says what the wait is. A made-for-kids video
+  therefore opens in 10-40 s the first time (then from the kept answer, for an hour); the feed
+  looks the next videos up ahead while the one in view plays (the neighbours, and the two after
+  them), in the slow lane behind the video in view. The same route is the second way for every video should
   YouTube close the JS-less client. `/api/health` → `ytdlpDaemon.jsRuntime` names the Deno in
   use (missing = none, and those videos answer "not available"). The VM gets Deno and the
   package from `deploy/gcp/setup-vm.sh` (step 2c).
 - **Proxy chunking**: googlevideo throttles an open-ended request to ~50 KB/s but serves a bounded
-  Range at full speed (10 MB in 0.3 s), so `chunked` media records are relayed in 4 MB chunks.
+  Range at full speed (10 MB in 0.3 s), so `chunked` media records are relayed in 4 MB chunks
+  (each tried once more after a 403 / 5xx or a failed connection).
+- **Channel pictures** (2026-11-23, [`server/src/youtubeAvatar.ts`](server/src/youtubeAvatar.ts)):
+  no YouTube listing carries the channel's picture (search results do), so the server asks for
+  it with one small request per channel (`youtubei/v1/browse` with a `fields=` mask, about half
+  a kilobyte) and keeps it 30 days on disk; one older than a day is looked up again behind the
+  answer. Feed, search and channel answers carry the pictures the server has, and the page keeps
+  them 30 days and fetches those of the next four videos ahead.
 - **Seeking in fragmented files**: mp4box only knows the fragments it has parsed, so a seek beyond
   the downloaded part uses the `sidx` index (`demuxer.ts`: fragment byte offset → restart the fetch
   there, point mp4box's parser at it, and let the fragment's `tfdt` set the time).
@@ -867,10 +1013,13 @@ The server keeps only youtube.com / google.com cookies, checks them at once with
 account menu (`youtubei/v1/account/account_menu` with the site's `SAPISIDHASH` authorisation) and
 shows the account name, handle and avatar. The file (`YOUTUBE_COOKIES_FILE`) *is* the sign-in:
 yt-dlp reads it for the feed and writes rotated cookies back, a saved file is re-checked at start,
-and **Sign out** deletes it. **For You** lists `youtube.com/feed/recommended` (the account's home
-feed; a signed-out visitor gets an empty list, which triggers the account check). Playback stays
-the guest two-file path; the cookies are used for a video only when the guest extraction is
-refused (age gate, private video, bot check). `/api/session/log?platform=youtube` shows the steps.
+and **Sign out** deletes it. With cookies alone, **For You** is yt-dlp's listing of
+`youtube.com/feed/recommended` (the account's home feed; a signed-out visitor gets an empty list,
+which triggers the account check). **When both kinds are saved the code sign-in is the one the
+feed uses** (the TV API's home feed); the cookies take over only if Google drops the code sign-in.
+Playback stays the guest two-file path either way; the cookies are used for a video only when
+yt-dlp's guest lookup is refused (age gate, private video, bot check), and the direct lookup never
+sends them. `/api/session/log?platform=youtube` shows the steps.
 
 ## Instagram
 
@@ -897,8 +1046,10 @@ saved cookies check out. Why there is no guest mode, measured 2026-10-13 from th
   pages kept working. So the server keeps a **catalog** (`INSTAGRAM_CATALOG_FILE`): one listing per
   account every 6 hours, at most 40 profile loads an hour, 3 s between loads, a back-off of 10 min
   (doubling to 1 h) after a redirect, and stale listings are served rather than an error. While
-  profiles are blocked, only accounts already in the catalog feed the stream. Signing in avoids the
-  limit (it counts per account then). The signed-in session is used for the profile pages too. `/api/stats` shows `instagram.blockedForSec` and the catalog size.
+  profiles are blocked, only accounts already in the catalog feed the stream. Every profile
+  load is made with the signed-in session, and the budget, the 3 s gap and the back-off apply all
+  the same (the code has no separate rule for a signed-in load). While someone uses the Reels tab,
+  one stale listing is renewed in the background every 45 s, until 3 minutes after the last request. `/api/stats` shows `instagram.blockedForSec` and the catalog size.
 - **Search**: the account search (`/web/search/topsearch/`) finds accounts; an `@handle` (or profile
   link) opens the account and its Reels, a pasted post/reel link plays it. **Profile** = the
   account's Reels (a signed-in account keeps paging on scroll; a guest would get 12).
@@ -931,10 +1082,12 @@ browser you exported with, and export the whole file: a thin export (no `mid`, `
 accepted with a warning.
 
 The cookies are loaded into the headless browser and **checked at once**, in three steps, because
-Instagram refuses its account API from a datacenter address (the GCP VM gets **429 at once** for
-`/api/v1/accounts/current_user/`, while the dev machine gets a plain 401 for bad cookies):
+Instagram refuses its account API from a datacenter address (2026-10-13: the GCP VM got **429 at
+once** for `/api/v1/accounts/current_user/`, while the dev machine got a plain 401 for bad cookies):
 
-1. the account API - 200 names the account; `login_required` (401/403) = bad cookies, refused (verified);
+1. the account API - `/api/v1/accounts/edit/web_form_data/`, asked from inside the page
+   (`current_user` answers with the web app's HTML since 2026-10, in a real signed-in Chrome too) -
+   200 names the account; `login_required` (401/403) = bad cookies, refused (verified);
    a 429, or its throttle text ("Please wait a few minutes…", which can come with `require_login: true`
    for good cookies too) says nothing about the cookies;
 2. the settings page `/accounts/edit/` - only a signed-in account stays on it (and the page names the
@@ -947,18 +1100,26 @@ Instagram refuses its account API from a datacenter address (the GCP VM gets **4
    it trusts the sessionid and learns from a login redirect later. The first **For You** fill settles
    it: a served Reels page confirms the sign-in (and names the account), a login redirect without the
    rate-limit flag triggers one more full check and a conclusive "signed out" deletes the cookies.
-   A saved sign-in Instagram will not check is tried again every 10 minutes, a few times, never faster
-   (quick retries lengthen Instagram's throttle); the feed does not ask for a verdict again within
-   those 10 minutes either, a refused page (429, rate-limit redirect) pauses signed-in page loads for
-   10 minutes, and the feed page waits 2 minutes after a 429 instead of retrying every few seconds.
+   A saved sign-in Instagram will not check is tried again every 10 minutes, six times at most, never
+   faster (quick retries lengthen Instagram's throttle), and a confirmed one is checked again every
+   30 minutes; the feed does not ask for a verdict again within those 10 minutes either, a refused
+   Reels page (429, rate-limit redirect) pauses loads of that page for 10 minutes (profile pages have
+   their own back-off, above), and the feed page waits 2 minutes after a 429 instead of retrying
+   every few seconds. Only Instagram's own throttle leaves pasted cookies unjudged (and
+   provisional, when they have the shape of a session): a check that failed for another reason
+   (the browser did not start, a timeout) refuses the paste with 502, to be tried again.
    Between tries the sign-in panel shows the reason (a checkpoint, the wrong browser identity, cookies
    that are no session) and the cookies form, so a fresh export can be pasted. Instagram also **deletes a `sessionid` it rejects**
    (verified with bad cookies): that counts as "signed out" whatever the pages said, and a login
    redirect that leaves the cookie in place while the address is limited is no verdict (provisional).
 
-**For You** is the account's Reels page (`/reels/`): its GraphQL answers are captured while the page
-is paged with the keyboard and only the post *codes* are taken from them - the playable file always
-comes from the embed page. **This signed-in half could not be tried without an account**;
+**For You** is the account's Reels page (`/reels/`), paged with the keyboard (ArrowDown). Only post
+*codes* are taken from it, from three places: the page's own first JSON
+(`xdt_api__v1__clips__home__connection_v2`), the GraphQL answers captured while paging, and the
+address the viewer moves to (`/reels/<code>/`); codes the data marks as ads are left out. The
+playable file always comes from the embed page. It has run on the VM with a real account
+(2026-10-20: fills from the Reels page; a later fix made the page wait until it has really left
+before the embed lookups run);
 `/api/session/log?platform=instagram` shows what Instagram answered at each step (the first words of
 each refused answer's body included) and `/api/stats` → `instagram.lastAccountCheck` the last verdict.
 If the VM's address is on Instagram's datacenter list, no cookie fixes it: the pages themselves come
@@ -1001,7 +1162,8 @@ from facebook.com's own pages over plain HTTPS (`server/src/facebook.ts`). Measu
 - From the VM's address (datacenter), Facebook serves the Page Reels tabs to a guest (10 reels per
   Page, 10-19 MB each) and the feed query to the signed-in account. A guest request that is sent to
   the login page is retried with the saved sign-in when there is one, and guest Page loads pause for
-  10 minutes (doubling) after such a refusal. Rate limits were not measured; Page loads are paced 2 s
+  10 minutes (doubling, 1 h at most) after such a refusal or a 429; the pause does not hold while
+  a sign-in is saved. Rate limits were not measured; Page loads are paced 2 s
   apart, 60 an hour.
 
 ### Facebook sign-in (For You)
@@ -1024,24 +1186,25 @@ with a real account on the VM; `/api/session/log?platform=facebook` shows each s
   device), so a problem on the Tesla or a phone can be read afterwards from any browser.
 - **`/api/health`** (public): build facts, yt-dlp and daemon status, uptime. **`/api/stats`**: feed
   stock per category, media records, the headless work page.
-- **The status strip and `/api/activity`** (built 2026-11-22). Whenever a page waits more than
-  about a second - for the server's answer, or for a video's bytes - a small panel says what the
-  page is waiting for and for how long, what the server is doing about it right now (step by
-  step: "yt-dlp: running YouTube's player script with Deno · 6 s on this step", "waiting for
-  the TikTok browser: it is busy with …", "Video relay: waiting for …googlevideo.com to send …"),
-  the last lines of the server's log, and whether the machine is short of memory; when the
-  server itself does not answer, it says that instead ("No answer from the server for 9 s…").
-  A tap shows more lines. The server's side is [`server/src/activity.ts`](server/src/activity.ts):
+- **The status line and `/api/activity`** (built 2026-11-22 as a panel, one line since
+  2026-11-23). Whenever a page waits more than 0.8 s - for the server's answer, or for a video's
+  bytes - one short line at the bottom says what the wait is, the step it is on and that it is
+  moving: "Getting video ready… step 1 of 3 · reading the video page · 6 s", "Buffering… 3.4 MB
+  of 14.0 MB loaded". The current step only: no finished steps, no log lines, nothing about the
+  server's load, and it takes no taps; the seconds show after 3 s, and after 8 s without a word
+  from the server the line says so. The whole picture (every job, the log's last lines, the
+  machine's state) stays at `/api/activity` for diagnosing. The server's side is [`server/src/activity.ts`](server/src/activity.ts):
   every API request that can be slow is listed from its route and body
   ([`activityRoutes.ts`](server/src/activityRoutes.ts)), the server's own jobs (stock top-ups,
   channel list refreshes, kept answers being refreshed) list themselves with `track()`, and
-  any code below them names its step with `say('…')` (found through AsyncLocalStorage, so no
-  handle is passed around; yt-dlp's own progress messages come through its helper process).
+  any code below them names its step with `say('…', brief)` (found through AsyncLocalStorage, so no
+  handle is passed around; `brief` is the step in a few words for the status line, which
+  otherwise shortens the text itself; yt-dlp's own progress messages come through its helper process).
   The client's side is [`client/src/activity.ts`](client/src/activity.ts) and
   [`pending.ts`](client/src/pending.ts): `api.ts` registers each slow request, a page can name
   waits of its own (`beginWait`), and waits nobody is held up by (the next batch while videos
-  play) stay off the strip. `/api/activity` (site password) answers `{ activities, recent,
-  server }` and is asked only while a strip is up.
+  play) stay off the line. `/api/activity` (site password) answers `{ activities, recent,
+  server }` and is asked (every 1.5 s) only while a wait on the server is on show.
 - **`/api/session/log`**: the last TikTok sign-in steps; `?platform=youtube` / `?platform=instagram` for those.
 
 ## Using the app
@@ -1068,22 +1231,34 @@ with `fileStart` offsets). When `moov` is parsed it builds decoder configs from 
 boxes (`avcC`/`hvcC` payload → `description`, `esds` DecoderSpecificInfo → AAC `description`),
 sets extraction options and receives samples in `onSamples`. If mp4box asks for a later file
 position (moov after mdat) the fetch restarts there with a `Range` header. Seeking calls
-`ISOFile.seek(t, useRap=true)`, aborts the fetch and restarts at the returned offset; mp4box
-re-emits samples from the previous random-access point, pre-roll frames are decoded and
-discarded until the target. Reading pauses when more than ~600 video samples are queued.
+`ISOFile.seek(t, useRap=true)`; mp4box re-emits samples from the previous random-access point and
+pre-roll frames are decoded and discarded until the target. The network is touched only when it
+must be: a file that is completely downloaded is re-read from memory, a seek to where the download
+already is lets the running fetch continue, and otherwise the fetch is aborted and restarted at the
+returned offset. A fragmented file (YouTube) seeks past what it has parsed through its `sidx` index.
+Reading pauses when more than 600 video (or 1,500 audio) samples are queued and resumes under half.
+The source may also be a Blob (the Library: `Blob.slice()` in place of `Range`) or start with the
+media cache's copy of the file's head; the demuxer records what it downloads from byte 0, up to
+32 MB, for that cache.
 
 **Decoding** – `EncodedVideoChunk`s are built from each sample (`cts` → µs, minus the edit-list
-offset, `is_sync` → key). The decoder is kept ~12 frames ahead with at most 8 chunks in flight.
-Audio chunks are decoded ~2.5 s ahead of the playhead and each `AudioData` is scheduled as an
-`AudioBufferSourceNode` at its exact timestamp.
+offset, `is_sync` → key; a sync sample without an IDR / IRAP picture is treated as a delta frame).
+The decoder is kept 12 frames ahead with at most 8 chunks in flight. Audio chunks are decoded 6 s
+ahead of the playhead (it was 2.5 s; at most 32 chunks with the decoder) and each `AudioData` is
+scheduled as an `AudioBufferSourceNode`: at the end of the chunk before it when its timestamp is
+within 4 ms of that (no gaps or overlaps from rounding), else at its own timestamp; a chunk that is
+partly late plays from the matching offset, one wholly in the past is dropped.
 
 **Scheduling** – the `AudioContext` is the master clock (its `currentTime` freezes on
 `suspend()`, so pause/resume are exact). On every animation frame the newest decoded frame whose
-timestamp ≤ clock is painted; skipped frames count as *dropped*. With no decodable audio a
-`performance.now()` wall clock is used. If the AudioContext cannot resume (autoplay policy) the
-video runs on the wall clock and the audio clock takes over on the next Play press. If the decoder
-starves, the clock pauses (*buffering*) and resumes when 3 frames are ready. A 100 ms timer keeps
-the scheduler alive in occluded tabs where `requestAnimationFrame` stops.
+timestamp ≤ clock is painted (canvas 2D `drawImage`); skipped frames count as *dropped*. With no
+decodable audio a `performance.now()` wall clock is used. If the AudioContext cannot resume
+(autoplay policy) the video runs on the wall clock and the audio clock takes over at the viewer's
+next touch of the page (or when the context resumes late by itself). The clock pauses
+(*buffering*) when it is 250 ms past the last painted frame with no frame ready, or when under
+150 ms of sound is left while chunks are still with the decoder; it resumes when 3 frames are
+ready and, with sound as the clock, 1.5 s of sound is placed. A 100 ms timer keeps the scheduler
+alive in occluded tabs where `requestAnimationFrame` stops.
 
 **Resolver** – `POST /api/resolve` with a TikTok URL fetches the public video page, reads the
 `__UNIVERSAL_DATA_FOR_REHYDRATION__` JSON and returns, per bitrate variant: the cookie-free
@@ -1095,8 +1270,14 @@ pass through with a probe and (if the host is allowlisted) a proxy id.
 **Proxy** – `GET|HEAD /api/media/:id` streams the upstream response, forwards the client's
 `Range` header and `Content-Type/Length/Range`, `Accept-Ranges`, adds the `Referer` and session
 cookies TikTok's primary CDN requires, exposes the headers through CORS and logs every relayed
-request with byte counts. Upstreams must be `https`, on the allowlist, and resolve to public IPs;
-redirects are re-validated hop by hop. Media ids are random and expire with the upstream URL.
+request with byte counts. Upstreams must be `https`, on the allowlist (built in: TikTok's hosts,
+`*.googlevideo.com`, `*.cdninstagram.com`, `*.fbcdn.net`, the test-MP4 hosts; more through
+`PROXY_ALLOWED_HOSTS`), and resolve to public IPs; redirects are re-validated hop by hop. Media ids
+are random, live in memory (a restart loses them) and expire with the
+upstream URL, after 6 h when it names no expiry. Records marked `chunked` (YouTube) are fetched
+upstream as bounded 4 MB ranges joined into one response. A `HEAD` is asked upstream as a one-byte
+ranged `GET`; `?dl=<name>` adds `Content-Disposition: attachment`; `ETag`, `Last-Modified` and
+`Cache-Control` are passed on; 120 requests a minute per address (`RATE_LIMIT_MEDIA`).
 
 ## Test results (2026-10-08)
 
@@ -1144,15 +1325,19 @@ yourself.
 
 - Only public videos. Private, login-gated, region-locked or DRM content is reported, not bypassed.
   The For You feed shows what TikTok serves to *your* signed-in browser session, nothing more.
-- The signed-in For You path was not exercised with a real account in this session (signing in
-  is yours to do); the capture mechanism was verified with TikTok's guest feed.
+- The signed-in For You path was not exercised with a real account on 2026-10-08 (signing in
+  is yours to do); the capture mechanism was verified with TikTok's guest feed then. It has run
+  signed in on the VM since (see **Feed**).
 - Rendering uses Canvas 2D (`drawImage(VideoFrame)`); a WebGL/WebGPU path is a next step.
-- No adaptive bitrate switching; the format is chosen manually.
+- No adaptive bitrate switching: the lab page's format is chosen manually, the feed takes the
+  first H.264 format, Live TV one HLS variant per tune.
 - The server-resolved CDN URL was fetched by a browser on the same machine/IP as the server. If
   TikTok's `/aweme/v1/play` hashes are IP-bound, a remote browser should use the redirect URL
-  itself (the client already tries it as the second candidate) – *Auto* mode handles this.
-- URL lifetime: `expire=` on primary URLs ≈ 48 h; the hex path segment on `tiktokcdn-us.com` URLs
-  ≈ 60 h. Re-resolve when expired (the proxy returns 404 for expired ids).
+  itself: the lab page tries it first (the server-resolved CDN URL second, the proxy last), and
+  feed items carry only the redirect URL as their direct address.
+- URL lifetime of a resolved video (2026-10-08): `expire=` on primary URLs ≈ 48 h; the hex path
+  segment on `tiktokcdn-us.com` URLs ≈ 60 h. Explore's feed URLs last about an hour (see *How long
+  a video stays playable*). Re-resolve when expired (the proxy returns 404 for expired ids).
 - Node 16 was the installed runtime, so Vite 4 / Fastify 4 / tsx 3 are pinned; mp4box 2.4.1's
   `engines` field targets Node 20 but only its browser bundle is used.
 

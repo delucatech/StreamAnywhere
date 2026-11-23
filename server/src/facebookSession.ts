@@ -17,8 +17,8 @@
  * deletes it. Treat it like a password. Next to it, `.meta.json` keeps the identity (User-Agent) of
  * the browser the cookies came from, which the server presents with them.
  *
- * Only the signed-out half could be verified without an account (bogus cookies: the settings page
- * answers 302 to login.php, 2026-10-15); the signed-in half follows Facebook's page structure
+ * The signed-out half was verified first (bogus cookies: the settings page answers 302 to login.php,
+ * 2026-10-15), the signed-in half with a real account on the VM on 2026-10-27; it follows Facebook's page structure
  * (`CurrentUserInitialData` names the viewer on every page) and is confirmed by the first signed-in
  * page the feed reads. GET /api/session/log?platform=facebook shows each step.
  */

@@ -20,8 +20,9 @@
  *  - A Page that does not exist still answers 200, with "This content isn't available right now";
  *    a wrong-case slug answers 302 to the canonical one.
  *
- * Whether Facebook serves these pages to a datacenter address (the GCP VM) is not known yet; a login
- * redirect for a guest request is retried with the saved cookies when there are any.
+ * Facebook serves these pages to a datacenter address too (the GCP VM: a guest gets the Page Reels
+ * tabs, 10 reels each); a login redirect for a guest request is retried with the saved cookies when
+ * there are any.
  */
 import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';

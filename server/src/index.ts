@@ -476,7 +476,8 @@ export async function buildServer() {
     }
 
     // One job per video (jobs.ts): the request sent again after a dropped connection joins the
-    // running one or gets the kept answer; a resolve is kept for 5 min, then redone on demand.
+    // running one or gets the kept answer; a resolve is final for 5 min and kept 30: an older one
+    // still goes out at once (as it is) while the job runs again in the background.
     const order: ('native' | 'ytdlp')[] = config.resolver === 'native' ? ['native'] : config.resolver === 'ytdlp' ? ['ytdlp'] : ['native', 'ytdlp'];
     const work = async (): Promise<ResolveResponse> => {
       const attempts: ResolveResponse['attempts'] = [];
