@@ -14,6 +14,8 @@
  * of version numbers and fixed words that identify nothing. Kept in memory (the last few requests),
  * served by GET /api/session/wire (site password).
  */
+import * as zlib from 'node:zlib';
+
 type Page = import('puppeteer-core').Page;
 
 export interface WireField {
@@ -32,6 +34,8 @@ export interface WireRecord {
   /** Everything the browser put on the wire (the network stack's own headers included), except Cookie: that is `cookies` */
   headers: WireField[];
   cookies: WireField[];
+  /** A POST's body: its size on the wire, whether it was compressed, and - when it is JSON - its top-level field names with the length of each value */
+  body?: { bytes: number; gzip: boolean; fields?: WireField[]; note?: string };
   status?: number;
   responseHeaders?: WireField[];
 }
@@ -71,6 +75,22 @@ export function cookieFields(header: unknown): WireField[] {
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/** A request body (the bytes the page sent) as its size and, when it is JSON (gzipped or not), its top-level field names and value lengths. */
+export function bodyFields(bytes: Buffer): NonNullable<WireRecord['body']> {
+  const gzip = bytes.length > 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
+  const out: NonNullable<WireRecord['body']> = { bytes: bytes.length, gzip };
+  try {
+    const text = (gzip ? zlib.gunzipSync(bytes) : bytes).toString('utf8');
+    const json = JSON.parse(text);
+    if (json && typeof json === 'object' && !Array.isArray(json)) {
+      out.fields = Object.entries(json).map(([k, v]) => ({ name: `${k}${Array.isArray(v) ? `[${v.length}]` : v && typeof v === 'object' ? `{${Object.keys(v).slice(0, 12).join(',')}}` : ''}`.slice(0, 160), len: (typeof v === 'string' ? v : JSON.stringify(v) ?? '').length }));
+    } else out.note = Array.isArray(json) ? `a JSON array of ${json.length}` : `JSON ${typeof json}`;
+  } catch {
+    out.note = 'not JSON';
+  }
+  return out;
+}
+
 /** A request URL as its path and its parameters (names and lengths; values for the fixed words). */
 export function urlFields(url: string): { path: string; query: WireField[] } {
   try {
@@ -106,6 +126,29 @@ export async function watchWire(page: Page, log?: (m: string) => void): Promise<
       if (!WATCHED.test(url)) return;
       const { path, query } = urlFields(url);
       const rec: WireRecord = { at: new Date().toISOString(), method: e.request.method, path, query, headers: fields(e.request.headers, SHOWN_HEADERS, /^cookie$/i), cookies: [] };
+      try {
+        // The body as the page handed it over (base64 pieces); its field names only.
+        const pieces: Array<{ bytes?: string }> = Array.isArray(e.request.postDataEntries) ? e.request.postDataEntries : [];
+        if (pieces.length) rec.body = bodyFields(Buffer.concat(pieces.map((x) => Buffer.from(x.bytes || '', 'base64'))));
+        else if (typeof e.request.postData === 'string' && e.request.postData) rec.body = bodyFields(Buffer.from(e.request.postData, 'utf8'));
+        else if (e.request.hasPostData) {
+          // Not in the event (a large or binary body): asked for separately. A compressed body can come back
+          // damaged as text; then its size is what is learned.
+          rec.body = { bytes: 0, gzip: false, note: 'a body the browser did not hand over' };
+          cdp
+            .send('Network.getRequestPostData', { requestId: e.requestId })
+            .then((r: any) => {
+              const text = typeof r?.postData === 'string' ? r.postData : '';
+              if (!text) return;
+              const asBytes = Buffer.from(text, r.base64Encoded ? 'base64' : 'latin1');
+              const viaLatin1 = bodyFields(asBytes);
+              rec.body = viaLatin1.fields || viaLatin1.gzip ? viaLatin1 : bodyFields(Buffer.from(text, 'utf8'));
+            })
+            .catch(() => undefined);
+        }
+      } catch {
+        /* the body stays unrecorded */
+      }
       byId.set(e.requestId, rec);
       trim(byId);
       const before = early.get(e.requestId);
@@ -151,7 +194,8 @@ export async function watchWire(page: Page, log?: (m: string) => void): Promise<
  * algorithm, uses and whether it can be exported. No value leaves the page.
  */
 export const READ_STORAGE_SHAPES = `(async () => {
-  const out = { origin: location.origin, localStorage: [], sessionStorage: [], indexedDB: [] };
+  const out = { origin: location.origin, step: 'start', localStorage: [], sessionStorage: [], indexedDB: [] };
+  window.__saStorageShapes = out;
   const like = /ticket|guard|key|sign|crypto|secsdk|token|xmst|webid|device/i;
   for (const store of ['localStorage', 'sessionStorage']) {
     try {
@@ -172,10 +216,13 @@ export const READ_STORAGE_SHAPES = `(async () => {
     return typeof v;
   };
   let dbs = [];
+  out.step = 'listing the databases';
   try { dbs = indexedDB.databases ? await indexedDB.databases() : []; } catch (e) { out.indexedDBError = String(e); }
+  out.databaseNames = dbs.map((d) => d.name);
   for (const d of dbs) {
     const entry = { name: d.name, version: d.version, stores: [] };
     out.indexedDB.push(entry);
+    out.step = 'reading database ' + d.name;
     await new Promise((done) => {
       let rq;
       try { rq = indexedDB.open(d.name); } catch (e) { entry.error = String(e); done(); return; }
@@ -202,8 +249,12 @@ export const READ_STORAGE_SHAPES = `(async () => {
       };
     });
   }
+  out.step = 'done';
   return out;
 })()`;
+
+/** What the walk above had read when it was last looked at (it leaves its result so far on the page). */
+export const READ_STORAGE_SHAPES_SO_FAR = 'window.__saStorageShapes || null';
 
 /** Whether any stored shape is a key object, and whether one of them cannot be exported. */
 export function summarizeKeys(shapes: unknown): { keys: number; lockedKeys: number; where: string[] } {

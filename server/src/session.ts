@@ -33,7 +33,7 @@ import { exploreApiUrl, FeedError, isTikTokAd, itemToFeedItem, parseExploreBody,
 import { rememberBatch, staleBatch } from './lastBatch';
 import { getProgress } from './progress';
 import { say } from './activity';
-import { READ_STORAGE_SHAPES, summarizeKeys, watchWire, wireRecords, type WireRecord } from './tiktokWire';
+import { READ_STORAGE_SHAPES, READ_STORAGE_SHAPES_SO_FAR, summarizeKeys, watchWire, wireRecords, type WireRecord } from './tiktokWire';
 
 type Browser = import('puppeteer-core').Browser;
 type Page = import('puppeteer-core').Page;
@@ -1961,7 +1961,12 @@ export async function wireReport(storage: boolean): Promise<{ signedIn: boolean;
     if (!page) out.note = (out.note ? out.note + ' ' : '') + 'The storage can only be read while the For You page is open.';
     else {
       try {
-        out.storage = await page.evaluate(READ_STORAGE_SHAPES);
+        // The walk hung on the VM's page (2026-11-25: no answer within the 45 s the browser allows): 12 s, then whatever it had read.
+        const walk = page.evaluate(READ_STORAGE_SHAPES);
+        walk.catch(() => undefined);
+        const done = await Promise.race([walk, new Promise<undefined>((r) => setTimeout(() => r(undefined), 12_000))]);
+        out.storage = done ?? (await page.evaluate(READ_STORAGE_SHAPES_SO_FAR));
+        if (!done) out.note = (out.note ? out.note + ' ' : '') + `The storage walk did not finish within 12 s; this is what it had read (it stopped at: ${String((out.storage as { step?: string } | null)?.step ?? 'nothing')}).`;
         out.keys = summarizeKeys(out.storage);
       } catch (e) {
         out.error = `storage could not be read (${(e as Error).message.split(/\r?\n/)[0]})`;

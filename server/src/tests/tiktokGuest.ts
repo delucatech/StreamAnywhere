@@ -12,7 +12,8 @@ import { closeTlsBridge, tlsBridgeStatus } from '../tlsBridge';
 import { commentsFromAnswer, fetchCommentReplies, fetchProfileAsGuest, SocialError, userFromAccountPage } from '../social';
 import { fetchExploreAsGuest, parseExploreJson } from '../feed';
 import { resolveTikTokNative } from '../tiktok';
-import { cookieFields, summarizeKeys, urlFields } from '../tiktokWire';
+import * as zlib from 'node:zlib';
+import { bodyFields, cookieFields, summarizeKeys, urlFields } from '../tiktokWire';
 
 type Check = (name: string, cond: boolean, detail?: unknown) => void;
 
@@ -90,6 +91,10 @@ export async function tiktokGuestChecks(check: Check): Promise<void> {
   const url = urlFields('https://www.tiktok.com/api/recommend/item_list/?aid=1988&count=6&device_id=7577000000000000001&msToken=secret-token&X-Bogus=1&X-Gnarly=' + 'g'.repeat(332));
   const q = (n: string) => url.query.find((f) => f.name === n);
   check('a request address: the path, fixed words shown, everything else as a length', url.path === 'www.tiktok.com/api/recommend/item_list/' && q('aid')?.value === '1988' && q('count')?.value === '6' && q('X-Bogus')?.value === '1' && q('device_id')?.value === undefined && q('device_id')?.len === 19 && q('msToken')?.value === undefined && q('X-Gnarly')?.len === 332 && !JSON.stringify(url).includes('secret-token'), url.query);
+  const sent = JSON.stringify({ itemID: '', pullType: 1, watched: [{ id: '7700000000000000001', ms: 4200 }, { id: '7700000000000000002', ms: 900 }], token: 'secret-body-token', extra: { a: 1, b: 2 } });
+  const plain = bodyFields(Buffer.from(sent));
+  const zipped = bodyFields(zlib.gzipSync(Buffer.from(sent)));
+  check("a request body is kept as its size and its field names (a list as its length, an object as its keys), gzipped or not; no value", !plain.gzip && zipped.gzip && plain.bytes === sent.length && JSON.stringify(plain.fields) === JSON.stringify(zipped.fields) && plain.fields!.map((f) => f.name).join(' ') === 'itemID pullType watched[2] token extra{a,b}' && plain.fields!.find((f) => f.name === 'token')?.len === 17 && !JSON.stringify(zipped).includes('secret-body-token') && bodyFields(Buffer.from('a=1&b=2')).note === 'not JSON', plain);
   const keyShapes = { indexedDB: [{ name: 'guard', stores: [{ name: 'keys', records: [{ key: 'current', value: { privateKey: { cryptoKey: true, type: 'private', extractable: false, algorithm: { name: 'ECDSA', namedCurve: 'P-256' }, usages: ['sign'] }, publicKey: { cryptoKey: true, type: 'public', extractable: true, algorithm: { name: 'ECDSA' }, usages: ['verify'] }, pem: 'string(120)' } }] }] }] };
   const ks = summarizeKeys(keyShapes);
   check('stored key objects are counted, and the ones that cannot leave the browser', ks.keys === 2 && ks.lockedKeys === 1 && /private key, ECDSA.*CANNOT be exported/.test(ks.where[0]) && summarizeKeys({ indexedDB: [{ name: 'x', stores: [{ name: 'y', records: [{ key: 'k', value: { a: 'string(3)' } }] }] }] }).keys === 0 && summarizeKeys(undefined).keys === 0, ks);
