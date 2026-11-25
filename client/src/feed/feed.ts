@@ -261,12 +261,22 @@ function applyLayout(): boolean {
  * the panel and the stage padding shrink, Up next narrows to 170 px, then goes. The numbers are
  * theater.css's (--side); the result goes back to it as --upnext-w / --feed-air and two classes.
  */
+/**
+ * The panel beside the video (comments, the account's videos) is open: the Up next column under it
+ * takes the width the window can spare, up to SIDE_PANEL_MAX, so there is more to read - the video
+ * keeps its size and only the empty air beside it goes. Back to the list's own width when it closes.
+ */
+let sidePanelOpen = false;
+const SIDE_PANEL_MAX = 480;
+/** The width of the Up next column as fitStage last set it (px; 0 = no such column) */
+let upnextW = 0;
 function fitStage(wide: boolean, w: number, h: number): void {
   const st = el.app.style;
   if (!wide || el.app.classList.contains('fullwindow')) {
     st.removeProperty('--upnext-w');
     st.removeProperty('--feed-air');
     el.app.classList.remove('tight', 'no-upnext', 'upnext-narrow');
+    upnextW = 0;
     return;
   }
   const stageH = h - (el.app.classList.contains('no-row2') ? 84 : 136);
@@ -283,9 +293,12 @@ function fitStage(wide: boolean, w: number, h: number): void {
   }
   if (spare() < 0) upnext = Math.max(170, upnext + spare());
   if (spare() < 0) upnext = 0;
+  const list = upnext; // the list's own width, before the panel's share
+  if (sidePanelOpen && upnext === preferred && spare() > 0) upnext = Math.min(SIDE_PANEL_MAX, Math.floor(preferred + spare()));
+  upnextW = upnext;
   el.app.classList.toggle('tight', air < 32);
   el.app.classList.toggle('no-upnext', upnext === 0);
-  el.app.classList.toggle('upnext-narrow', upnext > 0 && upnext < preferred);
+  el.app.classList.toggle('upnext-narrow', list > 0 && list < preferred);
   if (upnext === preferred) st.removeProperty('--upnext-w');
   else st.setProperty('--upnext-w', `${Math.round(upnext)}px`);
   if (air === 32) st.removeProperty('--feed-air');
@@ -622,7 +635,9 @@ initSocial({
   commentsSide: () => {
     if (!el.app.classList.contains('wide') || el.app.classList.contains('no-upnext') || el.app.classList.contains('fullwindow')) return undefined;
     const col = el.upnext.getBoundingClientRect();
-    return col.width >= COMMENTS_SIDE_MIN && col.height > 0 ? { left: col.left, top: col.top, width: col.width, height: col.height } : undefined;
+    // (the width it is going to have: the column may still be sliding there - see holdForComments)
+    const width = upnextW || col.width;
+    return width >= COMMENTS_SIDE_MIN && col.height > 0 ? { left: col.right - width, top: col.top, width, height: col.height } : undefined;
   },
   // Wide screens: the comments sheet goes over the video's own card (its place at rest: the track
   // may still be sliding to it). Phones: the sheet takes the screen.
@@ -881,6 +896,7 @@ syncActionButtons();
 // touched: once the sheet is gone the video in view ends as usual and the next one follows, or it
 // loops, as chosen.
 let commentsHold = false;
+let sideAnimTimer = 0;
 /** The comments go beside the video, over the Up next column, when that column is at least this wide (px) */
 const COMMENTS_SIDE_MIN = 220;
 /** Counts the times pending advances were dropped: a skip timer set before one of them does nothing. */
@@ -890,6 +906,15 @@ const loopNow = (): boolean => !prefs.autoscroll || commentsHold;
 function holdForComments(held: boolean): void {
   if (held === commentsHold) return;
   commentsHold = held;
+  // Wide screens: the column the panel takes grows into the room the window can spare (fitStage),
+  // sliding there with the panel (feed.css .side-anim: only for this change, not for a window resize).
+  sidePanelOpen = held;
+  if (el.app.classList.contains('wide')) {
+    el.app.classList.add('side-anim');
+    window.clearTimeout(sideAnimTimer);
+    sideAnimTimer = window.setTimeout(() => el.app.classList.remove('side-anim'), 420);
+    applyLayout();
+  }
   for (const e of state.entries) if (e.player) e.player.loop = loopNow();
   if (!held) {
     unfitVideo(); // the sheet is gone: the picture is back in its panel

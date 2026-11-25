@@ -60,6 +60,16 @@
 .app.wide.no-upnext {
   grid-template-columns: 92px minmax(0, 1fr) 0;
 }
+/* the panel beside the video opens or closes: its column slides to its new width (feed.ts
+   holdForComments; the same curve and time as the panel's own slide) */
+.app.wide.side-anim {
+  transition: grid-template-columns 0.34s cubic-bezier(0.32, 0.72, 0, 1);
+}
+@media (prefers-reduced-motion: reduce) {
+  .app.wide.side-anim {
+    transition-duration: 0.01s;
+  }
+}
 .app.wide.no-upnext .upnext {
   display: none;
 }

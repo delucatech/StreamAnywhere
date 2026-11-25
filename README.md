@@ -400,7 +400,11 @@ Open **`/feed.html`** (from the launcher; `?platform=youtube` for YouTube). It i
   sheet does, the line under the tabs slides across and the tab that comes on show slides in from
   its side. The video beside it stays whole and is still tapped, paused, liked and swiped
   (`commentsSide` in `feed.ts`; the layer lets everything outside the panel through), and the list
-  of next videos is back when it closes (✕, Esc / **C**, or moving to another video). The name
+  of next videos is back when it closes (✕, Esc / **C**, or moving to another video). **It takes
+  the width the window can spare**: while it is open its column grows from the list's 230-300 px
+  up to 480 px (`fitStage`: only the empty air beside the video goes - the video keeps its size
+  and slides a little to the left with the header, on the panel's own curve), and goes back when
+  it closes. The name
   opens the account's full page (bio, messages, the big grid), which also stays what a search
   result or a phone opens. A column narrower than 220 px (a nearly square window), a window
   without that column, and full-window mode use the sheet instead (comments only; the avatar
@@ -589,6 +593,14 @@ signature, which TikTok could hold against it. So it is a switch per account, of
   page agreeing afterwards; unfollow the same, back to 0. An account in the test also reads
   account pages as itself, so the panel's Follow button shows the real state (a guest's page says
   "not followed" for everyone). The probe: `research/tiktok_follow_direct_probe.ts`.
+- **Likes cannot be made this way (tried 2026-11-25).** `POST api/commit/item/digg/` signed the
+  same way is answered `status_code 0` - and thrown away: the answer carries
+  `tt-ticket-guard-result: 1101`, `is_digg` stays 1, the video still reads `digged: false` and the
+  account's Liked list does not get it (with and without `verifyFp`, the page's csrf token, the
+  write token of the HEAD request, a form body). TikTok's "ticket guard" wants the request signed
+  by a key the browser generated and keeps (imported cookies carry none), which a follow is not
+  asked for. So the heart stays a read-only count; a like would have to be pressed in the
+  server's browser. Probe: `research/tiktok_like_direct_probe.ts`.
 - **Still through the browser for every account**: messages (the inbox, a conversation, sending),
   the QR-code and window sign-ins, and the fallbacks behind the guest reads (comments on the
   signed-in work page, the profile page). The main account also follows, unfollows and searches
