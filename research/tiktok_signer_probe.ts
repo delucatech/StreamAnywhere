@@ -1,5 +1,5 @@
 /*
- * Probe: can TikTok's web API be read WITHOUT a browser, as a guest, with the ported signer (tiktok_sign.ts)?
+ * Probe: can TikTok's web API be read WITHOUT a browser, as a guest, with the ported signer (server/src/tiktokSign.ts)?
  *
  *   node_modules/.bin/tsx research/tiktok_signer_probe.ts [--transport node|curl] [--video <id>] [--python <exe>]
  *
@@ -15,7 +15,7 @@ import * as zlib from 'node:zlib';
 import { spawnSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { signRequest } from './tiktok_sign';
+import { signRequest } from '../server/src/tiktokSign';
 
 const ORIGIN = 'https://www.tiktok.com';
 const UA =

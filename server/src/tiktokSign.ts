@@ -1,16 +1,28 @@
 /*
- * TikTok web request signer (X-Dynosaur / X-Gnarly), used by research/tiktok_signer_probe.ts.
+ * TikTok web request signer: the X-Dynosaur / X-Gnarly values TikTok's own page script (webmssdk.js)
+ * adds to every data request, computed here without a browser. Used by tiktokGuest.ts.
  *
- * Copied unchanged (below this comment) from src/signer/tiktok-sign.ts of
- * https://github.com/sangzun-han/Tiktok-Api at commit d438d72 (read 2026-11-25), MIT License:
+ * Everything below this comment is src/signer/tiktok-sign.ts of https://github.com/sangzun-han/Tiktok-Api
+ * (commit d438d72, read 2026-11-25), copied unchanged. MIT License:
  *
- *   Copyright (c) sangzun-han. Permission is hereby granted, free of charge, to any person obtaining a copy
- *   of this software and associated documentation files (the "Software"), to deal in the Software without
- *   restriction [...]. The above copyright notice and this permission notice shall be included in all copies
- *   or substantial portions of the Software. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+ *   Copyright (c) 2026 sangzun-han
  *
- * It is an imitation of what TikTok's own webmssdk.js (build 2.0.0.561) adds to a request: pure arithmetic,
- * no network. It stops working when TikTok changes that script's maths.
+ *   Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+ *   associated documentation files (the "Software"), to deal in the Software without restriction, including
+ *   without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ *   copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the
+ *   following conditions: The above copyright notice and this permission notice shall be included in all
+ *   copies or substantial portions of the Software.
+ *
+ *   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
+ *   LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO
+ *   EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+ *   IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR
+ *   THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ *
+ * What it is: an imitation of one build of that script (2.0.0.561): pure arithmetic, no network. A
+ * request it signed is answered only together with Chrome's TLS handshake (tlsBridge.ts). When TikTok
+ * changes the script's maths this stops working; tiktokGuest.ts notices and the callers fall back.
  */
 import { createHash, randomBytes } from 'crypto';
 

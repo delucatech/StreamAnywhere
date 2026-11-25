@@ -140,6 +140,18 @@ if [ -n "$DENO_ARCH" ]; then
 fi
 if deno_ok; then echo "deno $(/usr/local/bin/deno --version | head -1)"; else echo "deno: missing"; fi
 
+echo "== 2d. curl_cffi (TikTok comments without a browser)"
+# Added 2026-11-25. TikTok answers a comment request only over a connection opened the way Chrome
+# opens it; server/scripts/tls-bridge.py does that with the curl_cffi package (server/src/tlsBridge.ts
+# starts it for the minutes it is used). In a venv of its own: yt-dlp picks up a curl_cffi it finds
+# next to it, and nothing here should change how YouTube is read. A failure is not fatal: comments
+# then go through the signed-in browser as before.
+if [ ! -x /opt/tiktoktls/bin/python3 ]; then python3 -m venv /opt/tiktoktls || echo "WARN: venv creation failed (/opt/tiktoktls)"; fi
+if [ -x /opt/tiktoktls/bin/python3 ]; then
+  /opt/tiktoktls/bin/python3 -c 'import curl_cffi' 2>/dev/null || /opt/tiktoktls/bin/pip install -q --no-cache-dir curl_cffi >/dev/null 2>&1 || echo "WARN: pip install curl_cffi failed"
+  echo "curl_cffi $(/opt/tiktoktls/bin/python3 -c 'import curl_cffi; print(curl_cffi.__version__)' 2>/dev/null || echo missing)"
+fi
+
 echo "== 3. app"
 id -u "$APP_USER" >/dev/null 2>&1 || useradd --system --create-home --home-dir /var/lib/streamanywhere --shell /usr/sbin/nologin "$APP_USER"
 # The checkout is chowned to the service user below; git (running as root here) refuses to touch a

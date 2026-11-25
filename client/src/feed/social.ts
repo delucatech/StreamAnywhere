@@ -927,9 +927,11 @@ el.inboxForm.addEventListener('submit', (e) => {
 // ---------------------------------------------------------------- comments
 
 /**
- * The comments of a video (the bubble beside it). Same shape as the inbox: the server reads them
- * from its signed-in TikTok page, which takes a while, so the read shows Cancel and is stopped
- * (here and on the server, POST /api/comments/cancel) by Cancel, closing the panel, or a new read.
+ * The comments of a video (the bubble beside it). The server asks TikTok for them as a guest, without
+ * a browser (about a second, no TikTok sign-in needed); when TikTok does not answer that, it reads
+ * them from its signed-in TikTok page, which takes a while. So, like the inbox, the read shows
+ * Cancel and is stopped (here and on the server, POST /api/comments/cancel) by Cancel, closing the
+ * panel, or a new read.
  */
 const comments = { item: undefined as FeedItem | undefined, list: [] as VideoComment[], cursor: 0, hasMore: false, total: undefined as number | undefined, ctl: undefined as AbortController | undefined, seq: 0 };
 
@@ -1028,7 +1030,7 @@ async function loadComments(more: boolean): Promise<void> {
     el.commentsList.innerHTML = '';
     el.commentsMore.classList.add('hidden');
   }
-  status(el.commentsStatus, more ? 'Loading more comments…' : 'Reading the comments… (the server opens the video on TikTok)');
+  status(el.commentsStatus, more ? 'Loading more comments…' : 'Reading the comments…');
   try {
     const r = await api.comments({ platform: host.platform.id, id: item.id, author: item.author.uniqueId, cursor: more ? comments.cursor : 0 }, signal);
     if (!endCommentsRead(seq) || comments.item !== item) return;

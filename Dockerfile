@@ -14,6 +14,8 @@ WORKDIR /app
 # yt-dlp fallback resolver (optional but cheap); ffmpeg merges the Video Downloader's files (the
 # ffmpeg-static package's binary needs glibc, so Alpine's own ffmpeg is used)
 RUN apk add --no-cache python3 py3-pip ffmpeg && pip3 install --break-system-packages --no-cache-dir yt-dlp
+# TikTok comments without a browser (server/scripts/tls-bridge.py); without it they need the signed-in browser
+RUN pip3 install --break-system-packages --no-cache-dir curl_cffi || echo "curl_cffi not installed"
 COPY package.json package-lock.json ./
 COPY client/package.json client/
 COPY server/package.json server/

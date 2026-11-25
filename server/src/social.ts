@@ -44,6 +44,8 @@ import type { ChatMessage, CommentsResponse, Conversation, ConversationResponse,
 import { itemToFeedItem, relationToState } from './feed';
 import { isLoggedIn, pageCookieHeader, resetWorkPage, withWorkPage } from './session';
 import { ytdlpInfo } from './ytdlp';
+import { guestCommentList, guestUnusable } from './tiktokGuest';
+import { say } from './activity';
 
 const TT = 'https://www.tiktok.com';
 const MESSAGES_URL = `${TT}/messages?lang=en`;
@@ -661,13 +663,53 @@ function commentFromApi(c: any): VideoComment | undefined {
 
 const videoPageUrl = (author: string, id: string): string => `${TT}/@${encodeURIComponent(author)}/video/${id}`;
 
+/** TikTok's comment/list JSON as our comments: the list, where the next page starts, whether there is one. */
+export function commentsFromAnswer(answer: any, cursor: number): { comments: VideoComment[]; cursor: number; hasMore: boolean; total?: number } {
+  const comments = (Array.isArray(answer?.comments) ? answer.comments : []).map(commentFromApi).filter(Boolean) as VideoComment[];
+  return { comments, cursor: num(answer?.cursor) ?? cursor + comments.length, hasMore: answer?.has_more === 1 || answer?.has_more === true, total: num(answer?.total) };
+}
+
 /**
- * A video's comments from the signed-in work page: the page's own comment/list answer (the list
- * scrolled for the next page), else a request from inside the page, else the rendered comments.
- * `signal` (the request's) cancels the read; POST /api/comments/cancel does as well.
+ * A video's comments, asked as a guest without a browser (tiktokGuest.ts: one signed request over a
+ * Chrome-like connection, about a second). Undefined when that path is not usable right now;
+ * GuestError when TikTok would not answer it.
+ */
+export async function fetchCommentsAsGuest(id: string, cursor: number, log: (m: string) => void, signal?: AbortSignal): Promise<CommentsResponse | undefined> {
+  if (guestUnusable()) return undefined;
+  const t0 = Date.now();
+  return tracked('comments', signal, async (sig) => {
+    const r = await guestCommentList(id, cursor, log, sig);
+    const page = commentsFromAnswer(r.json, cursor);
+    const warnings = page.comments.length || cursor > 0 ? [] : ['No comments yet'];
+    log(`comments ${id} from ${cursor}: ${page.comments.length} (guest${r.attempts > 1 ? `, attempt ${r.attempts}` : ''}), more: ${page.hasMore}, ${Date.now() - t0} ms`);
+    return { id, ...page, how: 'guest', warnings, elapsedMs: Date.now() - t0 };
+  });
+}
+
+/**
+ * A video's comments. First as a guest without a browser (fetchCommentsAsGuest). When that is not
+ * usable or TikTok does not answer it: from the signed-in work page - the page's own comment/list
+ * answer (the list scrolled for the next page), else a request from inside the page, else the
+ * rendered comments. `signal` (the request's) cancels the read; POST /api/comments/cancel does as well.
  */
 export async function fetchComments(id: string, author: string, cursor: number, log: (m: string) => void, signal?: AbortSignal): Promise<CommentsResponse> {
-  requireLogin('read comments'); // a guest page shows TikTok's login dialog and no comments (seen 2026-11-05)
+  let guestWhy = guestUnusable();
+  if (!guestWhy) {
+    try {
+      const direct = await fetchCommentsAsGuest(id, cursor, log, signal);
+      if (direct) return direct;
+    } catch (e) {
+      if (isCancelled(e)) throw e;
+      guestWhy = (e as Error).message;
+      log(`comments ${id}: the request without a browser failed (${guestWhy}); ${isLoggedIn() ? 'reading the video page in the signed-in browser instead' : 'no signed-in browser to fall back to'}`);
+    }
+  }
+  // A guest page in the browser shows TikTok's login dialog and no comments (seen 2026-11-05): the fallback needs the sign-in.
+  if (!isLoggedIn()) {
+    if (/^switched off/.test(guestWhy || '')) requireLogin('read comments');
+    throw new SocialError(`TikTok did not give the comments to the server (${guestWhy}). Signing in to TikTok (Profile) lets the server read them from the video page instead.`, 502);
+  }
+  say('reading the comments from the video page in the signed-in browser (slower)', 'opening the video on TikTok');
   const t0 = Date.now();
   return tracked('comments', signal, (sig) =>
     withWorkPage(
@@ -725,10 +767,7 @@ export async function fetchComments(id: string, author: string, cursor: number, 
         if (answer) {
           const code = Number(answer.status_code ?? answer.statusCode ?? 0);
           if (code !== 0) warnings.push(`TikTok comment list status ${code}: ${answer.status_msg || answer.statusMsg || 'unavailable'}`);
-          comments = (Array.isArray(answer.comments) ? answer.comments : []).map(commentFromApi).filter(Boolean) as VideoComment[];
-          hasMore = answer.has_more === 1 || answer.has_more === true;
-          next = num(answer.cursor) ?? cursor + comments.length;
-          total = num(answer.total);
+          ({ comments, cursor: next, hasMore, total } = commentsFromAnswer(answer, cursor));
         }
         if (!comments.length) {
           // The rendered comments (whatever the page shows), the ones after `cursor` of them.
@@ -746,6 +785,8 @@ export async function fetchComments(id: string, author: string, cursor: number, 
             warnings.push(/log in/i.test(title) ? 'TikTok shows its login dialog on the video page: the session may be signed out (Profile → sign in again)' : /no comments yet|be the first to comment/i.test(txt) ? 'No comments yet' : `No comments found on the page (${txt.slice(0, 120)})`);
           }
         }
+        // (last: the panel shows the first warning when there is nothing to list)
+        if (guestWhy) warnings.push(`the request without a browser was not used: ${guestWhy}`);
         log(`comments ${id} from ${cursor}: ${comments.length} (${how}), more: ${hasMore}, ${Date.now() - t0} ms`);
         return { id, comments, cursor: next, hasMore, total, how, warnings, elapsedMs: Date.now() - t0 };
       },

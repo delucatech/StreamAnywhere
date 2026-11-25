@@ -16,6 +16,8 @@ import { cancelJob, DOWNLOAD_SOURCES, DownloadError, downloaderStats, getJob, jo
 import { addCategory, cleanHint, deleteCategory, deleteEntry, deleteFile, entryOptions, flushLibrary, LibraryError, libraryState, libraryStats, patchEntry, refreshEntry, renameCategory, saveLink, setLibraryLogger, thumbFile } from './library';
 import { cancelImport, dismissImport, fileInfo, importLink, importStats, resumeImports, startImport, sweepFiles } from './libraryFiles';
 import { daemonStatus, detectYtDlp, resolveWithYtDlp, setYtDlpLogger, shutdownYtDlp, warmYtDlp } from './ytdlp';
+import { guestLastGoodVideo, tiktokGuestStatus } from './tiktokGuest';
+import { closeTlsBridge, setTlsBridgeLogger } from './tlsBridge';
 import { logStream, recentLog } from './logbuf';
 import { defaultExpiry, mediaCount, registerMedia } from './mediaStore';
 import { hostAllowed } from './ssrf';
@@ -27,7 +29,7 @@ import { invalidateJobs, jobStats, sharedJob } from './jobs';
 import { getProgress } from './progress';
 import { registerActivity } from './activityRoutes';
 import { say } from './activity';
-import { cancelInboxReads, cancelReads, commentsDebug, conversation, fetchComments, fetchProfile, followUser, inbox, inboxDebug, isCancelled, searchTikTok, sendMessage, SocialError } from './social';
+import { cancelInboxReads, cancelReads, commentsDebug, conversation, fetchComments, fetchCommentsAsGuest, fetchProfile, followUser, inbox, inboxDebug, isCancelled, searchTikTok, sendMessage, SocialError } from './social';
 import { channelVideos, exploreYouTube, isYouTubeUrl, recommendedYouTube, recommendedYouTubeTv, resolveYouTube, searchYouTube, setYouTubeRoomMaker, withYouTubeAvatars, youTubeCategory, YouTubeError, youtubeSlowLookups } from './youtube';
 import { avatarRefreshing, channelAvatar, loadAvatarStore, saveAvatarStore, youtubeAvatarStatus } from './youtubeAvatar';
 import { youtubePlayerStatus } from './youtubePlayer';
@@ -302,6 +304,7 @@ export async function buildServer() {
   // Mirror: the phone's screen to the Tesla through this server (relay + WebRTC signalling)
   registerMirror(app);
   setYtDlpLogger((m) => app.log.info({ what: 'yt-dlp' }, m));
+  setTlsBridgeLogger((m) => app.log.info({ what: 'tiktok-guest' }, m));
   setYouTubeSessionLogger((m) => app.log.info({ what: 'youtube-session' }, m));
   setInstagramSessionLogger((m) => app.log.info({ what: 'instagram-session' }, m));
   setInstagramLogger((m) => app.log.info({ what: 'instagram' }, m));
@@ -382,6 +385,7 @@ export async function buildServer() {
       youtubePlayer: youtubePlayerStatus(),
       youtubeAvatar: youtubeAvatarStatus(),
       youtubeSlow: youtubeSlowLookups(),
+      tiktokGuest: tiktokGuestStatus(),
       resolver: config.resolver,
       proxyAllowedHosts: config.proxyAllowedHosts,
       uptimeSec: Math.round(process.uptime()),
@@ -864,7 +868,8 @@ export async function buildServer() {
     if (cancelled) app.log.info({ what: 'inbox' }, `messages: ${cancelled} read(s) cancelled by the viewer`);
     return { cancelled };
   });
-  // A video's comments (the bubble beside it), read from the signed-in work page: slow and cancellable like the messages.
+  // A video's comments (the bubble beside it): asked as a guest without a browser (about a second), else read from the
+  // signed-in work page (slow). Cancellable like the messages either way.
   const commentArgs = (body: CommentsRequest | undefined): { id: string; author: string; cursor: number } => {
     if (platformOf(body?.platform) !== 'tiktok') throw new SocialError('Comments are available for TikTok videos only for now', 400);
     const id = String(body?.id || '').trim();
@@ -884,6 +889,21 @@ export async function buildServer() {
     const cancelled = cancelReads('comments');
     if (cancelled) app.log.info({ what: 'comments' }, `comments: ${cancelled} read(s) cancelled by the viewer`);
     return { cancelled };
+  });
+  // The path without a browser alone, on one video (the id given, else the last one it read): is TikTok still answering it?
+  app.get<{ Querystring: { id?: string } }>('/api/comments/check', resolveLimit, async (req, reply) => {
+    const t0 = Date.now();
+    const id = String(req.query.id || guestLastGoodVideo() || '').trim();
+    try {
+      if (!/^\d{5,30}$/.test(id)) throw new SocialError('Give a TikTok video id: /api/comments/check?id=<digits> (none has been read yet to ask again)', 400);
+      const r = await fetchCommentsAsGuest(id, 0, socialLog('comments'), untilGone(reply));
+      const status = tiktokGuestStatus();
+      if (!r) return { ok: false, id, reason: `not tried: ${status.state}${status.helper.reason ? ` (${status.helper.reason})` : status.pausedUntil ? ` until ${status.pausedUntil}` : ''}`, elapsedMs: Date.now() - t0, status };
+      return { ok: true, id, comments: r.comments.length, total: r.total, hasMore: r.hasMore, first: r.comments[0] ? { text: r.comments[0].text.slice(0, 80), by: r.comments[0].user.uniqueId } : undefined, elapsedMs: r.elapsedMs, status };
+    } catch (e) {
+      if (e instanceof SocialError) return socialFail(reply, e, t0);
+      return { ok: false, id, reason: (e as Error).message, elapsedMs: Date.now() - t0, status: tiktokGuestStatus() };
+    }
   });
   app.get<{ Querystring: { id?: string; author?: string } }>('/api/comments/debug', async (req, reply) => {
     const t0 = Date.now();
@@ -1228,6 +1248,7 @@ if (require.main === module) {
         process.once(sig, () => {
           app.log.info({ sig }, 'shutting down');
           shutdownYtDlp();
+          closeTlsBridge();
           shutdownDownloader();
           shutdownMirror();
           flushLibrary();

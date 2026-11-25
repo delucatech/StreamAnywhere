@@ -84,7 +84,7 @@ through the server's `/api/media/:id` (`server/src/proxy.ts`).
 
 | App | The list of videos | The playable file | To the viewer |
 |---|---|---|---|
-| **TikTok** | **Explore**: TikTok's unsigned `api/explore/item_list` over plain HTTPS; when that is refused, the same request from inside the server's headless browser, which then stays preferred for 15 min. **For You**: a signed-in headless Chrome on `tiktok.com/foryou`; the server reads the `api/recommend/item_list` answers that page receives and keeps 20 videos ready while someone watches. Search, profiles, comments: the same browser | Each variant's cookie-free `/aweme/v1/play` address (direct) and its cookie-bound `playAddr` (relay only). Items come with their formats; a pasted link or a search result without them goes through `POST /api/resolve` | Direct, relay as fallback |
+| **TikTok** | **Explore**: TikTok's unsigned `api/explore/item_list` over plain HTTPS; when that is refused, the same request from inside the server's headless browser, which then stays preferred for 15 min. **For You**: a signed-in headless Chrome on `tiktok.com/foryou`; the server reads the `api/recommend/item_list` answers that page receives and keeps 20 videos ready while someone watches. Search, profiles: the same browser. **Comments**: no browser - one request as a signed-out visitor, carrying the signature TikTok's page script would add (`tiktokSign.ts`) over a Chrome-like connection (`tlsBridge.ts`); the signed-in browser's video page when TikTok does not answer that | Each variant's cookie-free `/aweme/v1/play` address (direct) and its cookie-bound `playAddr` (relay only). Items come with their formats; a pasted link or a search result without them goes through `POST /api/resolve` | Direct, relay as fallback |
 | **YouTube** | **Shorts**: a hashtag's Shorts tab, listed by yt-dlp. **Search**: `youtubei/v1/search` (yt-dlp as fallback). **For You**: the TV API's home feed after the code sign-in; with cookies only, yt-dlp's `feed/recommended`. Channels: yt-dlp | `youtubei/v1/player` asked by the server (about 0.2 s); yt-dlp when that fails, with Deno for "made for kids" videos (one at a time, the video in view first). The answer is an H.264 picture-only file (up to 720p) and an AAC sound file, kept 1 h | Always the relay (the addresses are bound to the server's IP), in 4 MB pieces; two demuxers in step |
 | **Instagram** | Sign-in required. **Reels**: a rotation of public accounts whose profile pages are listed into a catalog. **For You**: the post codes of the account's `/reels/` page. All in one headless Chrome page | The post's embed page, fetched from inside that page: one MP4 with picture and sound | Direct, relay as fallback |
 | **Facebook** | **Reels**: public Pages' `/reels/` tabs over plain HTTPS, kept in a catalog. **For You**: the `FBUnifiedVideoContainerQuery` GraphQL query with the saved cookies. No browser | Progressive MP4s named in the same data: HD (720p) and SD (360p) | Direct, relay as fallback |
@@ -139,7 +139,10 @@ server/   Fastify 4 + TypeScript (Node 16 compatible)
   src/tiktok.ts                   native TikTok resolver (page JSON) + server-side CORS probe
   src/feed.ts                     Explore feed (unsigned TikTok API) + itemStruct → FeedItem conversion
   src/session.ts                  TikTok sign-in through a real Chrome/Edge (puppeteer-core), the For You capture and its pump, Explore from inside the browser, idle close
-  src/social.ts                   TikTok search, profiles, follow, comments and messages through the headless work page
+  src/social.ts                   TikTok search, profiles, follow and messages through the headless work page; comments (guest request first, the work page behind it)
+  src/tiktokGuest.ts              TikTok asked as a signed-out visitor without a browser: the guest visit, signed calls, the pause when TikTok stops answering
+  src/tiktokSign.ts               the request signature TikTok's page script adds (X-Dynosaur / X-Gnarly), in plain TypeScript (third-party, MIT)
+  src/tlsBridge.ts                HTTPS with Chrome's TLS handshake through a warm Python helper (scripts/tls-bridge.py, curl_cffi)
   src/reservoir.ts / lastBatch.ts a feed's stock, filled in the background; the stock and the last batch kept on disk
   src/jobs.ts                     shared jobs: work that outlives its request, answers kept for the retry
   src/homeTopUps.ts / pressure.ts the home screen's top-ups, one at a time; how starved the machine is (memory, swap, load, late timers)
@@ -178,7 +181,8 @@ docs/RESEARCH.md                  detailed findings: cookies, CORS, Referer, exp
 ## Setup
 
 Requirements: Node.js **16.17+** (tested on 16.17.0; 18/20 also fine), npm 8+. Optional:
-Python 3 with `yt-dlp` (`pip install yt-dlp`) for the fallback resolver.
+Python 3 with `yt-dlp` (`pip install yt-dlp`) for the fallback resolver, and with `curl_cffi`
+(`pip install curl_cffi`) for TikTok comments without a browser.
 
 ```bash
 npm install
@@ -427,6 +431,48 @@ sooner, when nothing is using it, to make room for Instagram's browser or a slow
 the next request starts it
 again with the profile and the videos already captured; a viewer with an empty screen gets the
 last batch meanwhile. `Sign out` closes the browsers and deletes the profile directory.
+
+### Comments without a browser (TikTok)
+
+Built 2026-11-25. The comment bubble used to need the signed-in headless browser: it opened the
+video's page and read the comment list that page received (10-60 s on the small VM, and a
+TikTok sign-in). Now the server asks TikTok itself, as a signed-out visitor, in about a second:
+
+- **Two things make TikTok answer, and each alone gets an empty reply** (measured from the PC and
+  from the VM's Google address): the **signature** TikTok's own page script (`webmssdk.js`) adds to
+  every data request (`X-Dynosaur`, `X-Gnarly`, `msToken`), and a connection **opened the way Chrome
+  opens it** (the TLS handshake). Node cannot change its handshake.
+- **The signature** is computed by [`server/src/tiktokSign.ts`](server/src/tiktokSign.ts): about 500
+  lines of arithmetic, copied unchanged from
+  [sangzun-han/Tiktok-Api](https://github.com/sangzun-han/Tiktok-Api) (MIT, notice in the file). Its
+  author worked the maths out from TikTok's public script. Every request gets a fresh one (it
+  covers the request's address and the time); nothing secret is involved. It imitates **one build**
+  of that script (2.0.0.561): TikTok served 2.0.0.569 on the day this was built and still accepted
+  it, but a change to the maths will break it.
+- **The connection** goes through one warm Python process
+  ([`server/scripts/tls-bridge.py`](server/scripts/tls-bridge.py), the `curl_cffi` package;
+  [`tlsBridge.ts`](server/src/tlsBridge.ts) starts it on the first request and stops it after 10
+  idle minutes, `TIKTOK_TLS_IDLE_MIN`). It keeps no cookies and follows no redirects.
+- **A guest visit** ([`tiktokGuest.ts`](server/src/tiktokGuest.ts)) is three requests: a device
+  registration (the `ttwid` cookie), the Explore page (the device id and region TikTok gave this
+  visitor) and one list call whose answer sets `msToken`. It is kept for 20 minutes or 150 calls
+  and replaced as soon as TikTok answers it with an empty body (TikTok throttles per visit). Calls
+  are spaced 0.6 s apart (`TIKTOK_GUEST_GAP_MS`). The user's TikTok session is never used here.
+- **When TikTok does not answer** (the kept visit, then a new visit, then - when TikTok's page now
+  loads another script build - once more signed as that build): a signed-in server reads the
+  comments from the video page as before (`how` in the answer says which: `guest`, `page`,
+  `fetch`, `dom`); a server without a TikTok sign-in says so. After 3 such failures in a row the
+  guest path is skipped for 10 minutes, so a broken signer costs nothing per open.
+- **Checking it**: `/api/health` has `tiktokGuest` (`state` ok / failing / paused / unavailable,
+  the script build seen, counts, the helper); `GET /api/comments/check?id=<video id>` (site
+  password) runs the guest path alone on one video and says what came back.
+- **Needs** Python 3 with `curl_cffi` (`pip install curl_cffi`; `TIKTOK_TLS_PYTHON` names the
+  interpreter). The GCP script installs it in its own venv (`/opt/tiktoktls`, so it cannot disturb
+  yt-dlp's). Without it, or with `TIKTOK_GUEST=0`, comments work as before through the browser.
+- **Measured** (2026-11-25): first open 2.5 s on the PC (helper start 0.7 s, guest visit 1.5 s),
+  further pages 0.3-0.6 s; on the VM a page took 0.7-1.2 s with a new Python process per request
+  (the probe, `research/tiktok_signer_probe.ts`). The same calls also answered replies, the
+  signed-out For You list and a profile's videos; none of those is wired in.
 
 **Explore** is two paths. The plain HTTPS request (`server/src/feed.ts`: a cookie jar from one
 visit to `/explore`, reused 30 minutes; four tries) comes first. When TikTok refuses it (from the
@@ -1184,7 +1230,8 @@ with a real account on the VM; `/api/session/log?platform=facebook` shows each s
   `?level=warn` for problems only. The feed page reports its own failures there too (feed batch,
   resolve, player and page errors, tagged `client=true` with the platform, video id, page and
   device), so a problem on the Tesla or a phone can be read afterwards from any browser.
-- **`/api/health`** (public): build facts, yt-dlp and daemon status, uptime. **`/api/stats`**: feed
+- **`/api/health`** (public): build facts, yt-dlp and daemon status, whether TikTok still answers
+  the requests made without a browser (`tiktokGuest`), uptime. **`/api/stats`**: feed
   stock per category, media records, the headless work page.
 - **The status line and `/api/activity`** (built 2026-11-22 as a panel, one line since
   2026-11-23). Whenever a page waits more than 0.8 s - for the server's answer, or for a video's

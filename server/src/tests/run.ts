@@ -8,6 +8,7 @@
  *  5. Concurrent yt-dlp lookups through the warm daemons (network, skipped without yt-dlp)
  *  5b/5c. YouTube direct search: parsing and pages (offline), a real search and the yt-dlp fallback (network)
  *  5f/5g. YouTube direct video lookup: parsing, the visitor id, the viewer's wait (offline), a real video and the yt-dlp fallback (network)
+ *  2g/5h. TikTok without a browser: the signer, the guest visit, the comment answer (offline), a real visit + two comment pages (network, skipped without curl_cffi)
  *
  * Network checks are skipped (not failed) when SKIP_NETWORK=1.
  */
@@ -15,6 +16,7 @@ import { buildServer } from '../index';
 import { mirrorChecks } from './mirror';
 import { activityChecks } from './activity';
 import { youtubeAvatarChecks } from './youtubeAvatar';
+import { tiktokGuestChecks, tiktokGuestNetworkChecks } from './tiktokGuest';
 import { setAvatarTransport } from '../youtubeAvatar';
 import { hostAllowed, ipIsPrivate, assertSafeUpstream } from '../ssrf';
 import { parseTikTokUrl } from '../tiktok';
@@ -1890,6 +1892,7 @@ async function homeTopUpChecks(): Promise<void> {
   await youtubePlayerOfflineChecks();
   await activityChecks(check);
   await youtubeAvatarChecks(check);
+  await tiktokGuestChecks(check);
   await youtubeTvOfflineChecks();
   await inboxCancelChecks();
   await homeTopUpChecks();
@@ -1901,6 +1904,7 @@ async function homeTopUpChecks(): Promise<void> {
     await youtubeSearchNetworkChecks();
     await youtubePlayerNetworkChecks();
     await ytdlpChecks();
+    await tiktokGuestNetworkChecks(check, parseTikTokUrl(TIKTOK_URL).videoId || '7693184538704416031');
   }
   console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : failures + ' CHECK(S) FAILED'}`);
   process.exit(failures ? 1 : 0);

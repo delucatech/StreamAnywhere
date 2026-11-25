@@ -171,6 +171,31 @@ export interface HealthResponse {
   youtubeAvatar?: { kept: number; running: number; waiting: number; lookups: number; requests: number; found: number; failed: number; refreshed: number; changed: number; lastFailure?: { at: string; reason: string } };
   /** YouTube's slow lookups (yt-dlp, one at a time): running and waiting in line, and how many were answered as the signed-in account / as a guest */
   youtubeSlow?: { running: number; queued: number; asAccount?: number; asGuest?: number; lastAccountFailure?: { at: string; reason: string } };
+  /**
+   * TikTok asked as a signed-out visitor without a browser (server/src/tiktokGuest.ts; a video's
+   * comments). `state`: unused = not asked yet, ok = the last request was answered, failing = it
+   * was not, paused = skipped for a while after failures in a row (the signed-in browser is used
+   * meanwhile), unavailable = switched off or no connection helper. `signerBuild` is the build of
+   * TikTok's page script the signer imitates, `scriptSeen` the one TikTok's page loaded last.
+   * Missing on an older build.
+   */
+  tiktokGuest?: {
+    mode: 'on' | 'off';
+    state: 'unused' | 'ok' | 'failing' | 'paused' | 'unavailable';
+    signerBuild: string;
+    signingAs: string;
+    scriptSeen?: string;
+    calls: number;
+    ok: number;
+    failed: number;
+    visits: number;
+    visit?: { ageSec: number; calls: number };
+    lastOk?: { at: string; ms: number };
+    lastFailure?: { at: string; reason: string };
+    pausedUntil?: string;
+    /** The Python helper that opens connections the way Chrome does (server/scripts/tls-bridge.py, curl_cffi) */
+    helper: { available?: boolean; running: boolean; python?: string; version?: string; requests: number; failed: number; starts: number; reason?: string; lastError?: { at: string; reason: string } };
+  };
   resolver: string;
   proxyAllowedHosts: string[];
   uptimeSec: number;
@@ -494,8 +519,12 @@ export interface CommentsResponse {
   hasMore: boolean;
   /** The video's comment count as the source says */
   total?: number;
-  /** Where the comments came from: the page's own request, a request made from inside the page, or the page's DOM */
-  how: 'page' | 'fetch' | 'dom';
+  /**
+   * Where the comments came from: `guest` = asked without a browser as a signed-out visitor (the
+   * usual way, about a second); the others are the signed-in browser's video page - its own
+   * request, a request made from inside it, or its DOM.
+   */
+  how: 'guest' | 'page' | 'fetch' | 'dom';
   warnings: string[];
   elapsedMs: number;
 }
