@@ -389,12 +389,16 @@ Open **`/feed.html`** (from the launcher; `?platform=youtube` for YouTube). It i
   hidden; the browser's fullscreen too where it allows it). **Exit full screen** (top right), **F** or Esc leaves it.
 - **Auto-scroll** (checkbox / **A**): when on, a finished video advances to the next one; when off,
   videos loop.
-- **Comments** (the bubble / **C**, TikTok): a sheet slides up over the lower two thirds of the
-  video (on wide screens: of the video's own card) with the comment count, the comments and their
-  replies. The video goes on playing above it, or stays paused if it was. The list scrolls by
-  itself. Close it with a tap anywhere beside it (that tap does nothing else: the video is not
-  paused by it), the ✕, Esc / **C**, or by dragging the handle down; dragging the handle up makes
-  the sheet taller. While it is open the feed stays on this video: with auto-scroll on, the video
+- **Comments** (the bubble / **C**, TikTok): a white sheet slides up over the lower two thirds of
+  the video (on wide screens: of the video's own card) with the comment count, the comments and
+  their replies. The video goes on playing above it, or stays paused if it was, and its picture is
+  fitted into the room the sheet leaves: made smaller and moved up, whole, so nothing of it is
+  hidden behind the comments (`fitVideoAbove`: a transform on the canvas, the cover and the pause
+  mark, following the sheet as it slides or is dragged; on phones the top bar and the action
+  column step aside meanwhile). The list scrolls by itself. Close it with a tap anywhere beside it
+  (that tap does nothing else: the video is not paused by it), the ✕, Esc / **C**, or by dragging
+  the handle down; dragging the handle up makes the sheet taller, down to a 120 px strip for the
+  picture. While it is open the feed stays on this video: with auto-scroll on, the video
   repeats instead of moving on, and auto-scroll carries on as set once the sheet is closed. Comments
   are read-only (there is no box to write one).
 - **⬇ Save** (the Save action / **D**) asks where the video goes. **Save to library** adds the link

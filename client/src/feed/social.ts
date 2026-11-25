@@ -38,6 +38,13 @@ export interface SocialHost {
    * (wide screens: the video is a card in the middle); undefined when the sheet takes the screen (phones).
    */
   videoCard?(): { left: number; top: number; width: number; height: number } | undefined;
+  /**
+   * What the comments sheet leaves of the page for the video, from `top` to `bottom` (px from the
+   * top of the window), each time the sheet moves: the host fits the picture into it, so the video
+   * is still watched above the comments. `animate`: the sheet is sliding there (SHEET_MS, the same
+   * curve); otherwise it follows a finger and the picture follows at once.
+   */
+  onCommentsView?(view: { top: number; bottom: number }, animate: boolean): void;
   /** Which platform the panels search and browse (follow: TikTok and Instagram; messages and comments: TikTok only) */
   platform: PlatformDef;
   /** The signed-in account's follow state of an account became known (a profile opened, a follow pressed) */
@@ -1139,6 +1146,8 @@ async function loadComments(more: boolean): Promise<void> {
 const SHEET_MS = 340;
 /** The share of its frame the sheet covers when it opens */
 const SHEET_SHARE = 0.66;
+/** px of video that stay in view above the sheet when it is pulled all the way up (feed.css .sheet-frame: its top padding, less the safe area) */
+const SHEET_STRIP = 120;
 /** A release faster than this (px per ms) is a flick: the sheet goes one position on in that direction */
 const SHEET_FLICK = 0.5;
 interface SheetDrag {
@@ -1160,6 +1169,9 @@ const sheet = {
   max: 0,
   /** px of the sheet in view right now (0 = out of view) */
   shown: 0,
+  /** px from the top of the window: where the video's room above the sheet begins, and the frame's lower edge */
+  viewTop: 0,
+  frameBottom: 0,
   drag: undefined as SheetDrag | undefined,
 };
 
@@ -1176,9 +1188,14 @@ function sheetMeasure(): void {
     f.style.height = `${Math.round(card.height)}px`;
   } else f.style.left = f.style.top = f.style.width = f.style.height = '';
   // the frame's top padding is the strip of video the tall sheet leaves
-  const room = f.clientHeight - (parseFloat(getComputedStyle(f).paddingTop) || 0);
+  const pad = parseFloat(getComputedStyle(f).paddingTop) || 0;
+  const room = f.clientHeight - pad;
   sheet.max = Math.max(160, Math.round(room));
   sheet.rest = Math.min(sheet.max, Math.max(160, Math.round(f.clientHeight * SHEET_SHARE)));
+  // the video's room starts under the notch / status bar (the padding is that plus SHEET_STRIP)
+  const box = f.getBoundingClientRect();
+  sheet.viewTop = box.top + Math.max(0, pad - SHEET_STRIP);
+  sheet.frameBottom = box.bottom;
 }
 /** Shows `h` px of the sheet: up to the resting height it slides, above it it grows. */
 function sheetPlace(h: number, animate: boolean): void {
@@ -1188,6 +1205,7 @@ function sheetPlace(h: number, animate: boolean): void {
   s.classList.toggle('settling', animate);
   s.style.height = `${Math.max(sheet.rest, h)}px`;
   s.style.transform = `translate3d(0, ${Math.max(0, sheet.rest - h)}px, 0)`;
+  host.onCommentsView?.({ top: sheet.viewTop, bottom: sheet.frameBottom - h }, animate);
 }
 /** Slides the sheet to one of its positions and calls `then` when it is there. */
 function sheetSettle(h: number, then?: () => void): void {

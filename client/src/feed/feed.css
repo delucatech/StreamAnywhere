@@ -1609,14 +1609,15 @@ button {
   touch-action: none;
 }
 /* The box the sheet moves in: the screen on phones; on wide screens the video's card (class `card`,
-   with left / top / width / height from social.ts). Its top padding is the strip of video that
-   stays in view when the sheet is pulled all the way up. Taps on the frame go to the layer. */
+   with left / top / width / height from social.ts). Its top padding is the strip that stays for
+   the video when the sheet is pulled all the way up (social.ts SHEET_STRIP is the same 120 px: a
+   small picture is still watched there). Taps on the frame go to the layer. */
 .sheet-frame {
   position: absolute;
   inset: 0;
   display: flex;
   align-items: flex-end;
-  padding-top: calc(var(--safe-t) + 56px);
+  padding-top: calc(var(--safe-t) + 120px);
   overflow: hidden;
   pointer-events: none;
 }
@@ -1636,20 +1637,20 @@ button {
   height: 66%;
   display: flex;
   flex-direction: column;
-  background: rgba(17, 19, 25, 0.97);
+  /* A white sheet with dark text (the app around it stays dark): the colours the comment rows and
+     the status line take from the page are set again here, for everything inside the sheet. */
+  --text: #161823;
+  --muted: #6f7178;
+  --border: #e4e4e6;
+  --err: #c81e3a;
+  --accent: #e0224a; /* the page's red, a shade darker: small text on white */
+  color: var(--text);
+  color-scheme: light;
+  background: #fff;
   border-radius: 18px 18px 0 0;
-  box-shadow:
-    0 -1px 0 rgba(255, 255, 255, 0.08),
-    0 -14px 40px rgba(0, 0, 0, 0.55);
+  box-shadow: 0 -10px 36px rgba(0, 0, 0, 0.45);
   transform: translate3d(0, 100%, 0);
   will-change: transform;
-}
-@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  .sheet {
-    background: rgba(17, 19, 25, 0.88);
-    backdrop-filter: blur(24px) saturate(1.2);
-    -webkit-backdrop-filter: blur(24px) saturate(1.2);
-  }
 }
 /* sliding to a position (open, tall, closed, back after a short drag); off while a finger holds it.
    social.ts SHEET_MS is the same 0.34 s. */
@@ -1672,7 +1673,7 @@ button {
   width: 38px;
   height: 5px;
   border-radius: 3px;
-  background: rgba(255, 255, 255, 0.3);
+  background: rgba(22, 24, 35, 0.22);
   margin: 0 auto;
 }
 .sheet-head {
@@ -1681,7 +1682,7 @@ button {
   align-items: center;
   gap: 8px;
   padding: 2px 10px 6px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  border-bottom: 1px solid var(--border);
 }
 .sheet-title {
   font-weight: 700;
@@ -1727,10 +1728,10 @@ button {
   height: 30px;
   padding: 7px;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.1);
+  background: rgba(22, 24, 35, 0.07);
 }
 .sheet-close:active svg {
-  background: rgba(255, 255, 255, 0.2);
+  background: rgba(22, 24, 35, 0.16);
 }
 .sheet-text-btn:focus-visible,
 .sheet-close:focus-visible {
@@ -1755,9 +1756,48 @@ button {
 }
 .sheet-more {
   align-self: center;
+  min-height: 40px;
+  padding: 9px 18px;
+  border: 0;
+  border-radius: 20px;
+  background: #f0f0f2;
+  color: var(--text);
+  font-weight: 600;
+}
+.sheet-more:active {
+  background: #e3e3e6;
+}
+/* an account without a picture, and a picture still loading: a light disc, not a dark one */
+.sheet .comment-row img {
+  background: #e9e9ec;
+}
+
+/* ---------- the video above the comments sheet ---------- */
+/* While the sheet is open the picture of the video in view is fitted into what the sheet leaves of
+   it (feed.ts fitVideoAbove sets the transform: smaller, moved up), so the whole picture is still
+   watched above the comments. `fitting`: sliding there with the sheet (the same 0.34 s curve);
+   without it the picture follows the finger that drags the sheet. */
+.item .fitting {
+  transition: transform 0.34s cubic-bezier(0.32, 0.72, 0, 1);
+}
+/* Phones: the bars and the action column lie over the picture, so they step aside while the
+   comments are open (the layer above them takes every tap meanwhile anyway). On wide screens they
+   are beside the video and stay. */
+.app:not(.wide) .topbar,
+.app:not(.wide) .chips,
+.app:not(.wide) .context,
+.app:not(.wide) .actions {
+  transition: opacity 0.2s;
+}
+.app.comments-open:not(.wide) .topbar,
+.app.comments-open:not(.wide) .chips,
+.app.comments-open:not(.wide) .context,
+.app.comments-open:not(.wide) .actions {
+  opacity: 0;
 }
 @media (prefers-reduced-motion: reduce) {
-  .sheet.settling {
+  .sheet.settling,
+  .item .fitting {
     transition-duration: 0.01s;
   }
 }

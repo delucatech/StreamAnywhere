@@ -609,6 +609,7 @@ initSocial({
   platform: P,
   onPanelsChange: syncOverlayPause,
   onCommentsHold: holdForComments,
+  onCommentsView: fitVideoAbove,
   // Wide screens: the comments sheet goes over the video's own card (its place at rest: the track
   // may still be sliding to it). Phones: the sheet takes the screen.
   videoCard: () => {
@@ -873,13 +874,80 @@ function holdForComments(held: boolean): void {
   if (held === commentsHold) return;
   commentsHold = held;
   for (const e of state.entries) if (e.player) e.player.loop = loopNow();
-  if (!held) return;
+  if (!held) {
+    unfitVideo(); // the sheet is gone: the picture is back in its panel
+    placeStatusStrip();
+    return;
+  }
   advanceEpoch++;
   state.wantNext = false;
   // A video that had already ended (auto-scroll on, the next one still on its way) plays again
   // rather than sit at its end: with the advance dropped, nothing else would ever move it.
   const cur = activeEntry();
   if (cur?.player?.state === 'ended' && state.started && !state.userPaused && !document.hidden && !overlayOpen()) void playEntry(cur);
+}
+
+// ---------- the video above the comments sheet ----------
+// The sheet covers the lower two thirds of the video, so the picture is fitted into what is left:
+// made smaller and moved up, whole, so it is still watched above the comments (a wide picture that
+// already fits the room only moves up). The sheet says where its upper edge is every time it moves
+// (SocialHost.onCommentsView); the picture slides with it, or follows the finger that drags it.
+// Only the picture is moved (canvas, cover and the pause mark, by a transform): the panel itself,
+// its caption and the seek bar stay where they are, under the sheet.
+let fitted: Entry | undefined;
+let fitView: { top: number; bottom: number } | undefined;
+const fitParts = (e: Entry): HTMLElement[] => [e.canvas, ...e.root.querySelectorAll<HTMLElement>('.cover, .pause-badge')];
+function unfitVideo(): void {
+  if (fitted) {
+    for (const part of fitParts(fitted)) {
+      // back in the panel at once, whatever slide is still under way (a page that was not being
+      // drawn - another tab, the car's browser behind another app - has not moved it yet)
+      part.style.transition = 'none';
+      part.classList.remove('fitting');
+      part.style.transform = '';
+      void part.offsetWidth;
+      part.style.transition = '';
+    }
+  }
+  fitted = undefined;
+  fitView = undefined;
+  el.app.classList.remove('comments-open');
+}
+function fitVideoAbove(view: { top: number; bottom: number }, animate: boolean): void {
+  const entry = activeEntry();
+  if (!entry || !commentsHold) return;
+  if (fitted && fitted !== entry) unfitVideo();
+  fitted = entry;
+  fitView = view;
+  // the panel's own box at rest (the track may still be sliding to it)
+  const boxTop = el.feed.getBoundingClientRect().top + padTop;
+  const w = entry.root.offsetWidth;
+  const h = itemH;
+  if (w <= 0 || h <= 1) return;
+  const bottom = Math.max(boxTop, Math.min(boxTop + h, view.bottom));
+  // how much of the panel the sheet covers: the room starts under the notch only once the sheet is
+  // really there, so with the sheet away the picture is exactly where it was
+  const covered = 1 - (bottom - boxTop) / h;
+  const top = boxTop + Math.max(0, view.top - boxTop) * Math.min(1, covered / 0.3);
+  const room = Math.max(24, bottom - top);
+  // phones: the bars over the picture step aside while the sheet is there (feed.css), and come back as it leaves
+  el.app.classList.toggle('comments-open', covered > 0.02);
+  // the picture as it is drawn in the panel (whole, at its own shape), and as it fits the room
+  const shape = entry.root.classList.contains('has-frame') && entry.canvas.width > 0 && entry.canvas.height > 0 ? entry.canvas.width / entry.canvas.height : coverShape(entry) || 9 / 16;
+  const drawnH = Math.min(h, w / shape);
+  const scale = covered <= 0 ? 1 : Math.min(1, Math.min(room, w / shape) / drawnH);
+  const shift = covered <= 0 ? 0 : top + room / 2 - (boxTop + h / 2);
+  const transform = scale === 1 && shift === 0 ? '' : `translate3d(0, ${shift.toFixed(1)}px, 0) scale(${scale.toFixed(4)})`;
+  for (const part of fitParts(entry)) {
+    part.classList.toggle('fitting', animate);
+    part.style.transform = transform;
+  }
+  if (animate) placeStatusStrip();
+}
+/** Width / height of the video's cover picture, once it has loaded (0 before). */
+function coverShape(e: Entry): number {
+  const img = e.root.querySelector<HTMLImageElement>('img.cover');
+  return img && img.naturalWidth > 0 && img.naturalHeight > 0 ? img.naturalWidth / img.naturalHeight : 0;
 }
 /** With auto-scroll on, a video that cannot play is passed after a moment (not while the comments are open, nor once they have been). */
 function skipSoon(entry: Entry): void {
@@ -1554,7 +1622,8 @@ function placeStatusStrip(): void {
   if (f.width <= 0) return;
   // above the caption where the video has one, else above the seek bar
   const info = root?.querySelector<HTMLElement>('.info')?.getBoundingClientRect();
-  const floor = info && info.height > 0 && info.top > f.top ? info.top : f.bottom - 22;
+  // (the comments sheet covers both: then right above the sheet, over the small picture)
+  const floor = commentsHold && fitView && fitView.bottom < f.bottom ? fitView.bottom : info && info.height > 0 && info.top > f.top ? info.top : f.bottom - 22;
   const s = document.documentElement.style;
   s.setProperty('--sa-activity-left', `${Math.round(Math.max(0, f.left) + 12)}px`);
   s.setProperty('--sa-activity-bottom', `${Math.round(Math.max(8, window.innerHeight - floor + 8))}px`);
@@ -2232,6 +2301,7 @@ function ensurePlayer(entry: Entry): FeedPlayer {
     onFirstFrame: () => {
       entry.root.classList.add('has-frame');
       entry.retrying = false;
+      if (fitted === entry && fitView) fitVideoAbove(fitView, false); // the picture's own shape is known now
       if (activeEntry() === entry) {
         syncWait();
         warmNeighbours();
