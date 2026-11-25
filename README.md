@@ -504,6 +504,13 @@ How it works:
   24 videos 0.7 s, an account that does not exist 0.4 s; replies 0.3-0.6 s; an Explore batch
   1.0-1.1 s; a pasted link 1.3-1.6 s (the lookup itself 0.26 s, the rest is following each file's
   redirect); the relay delivered the files of guest answers (206, video/mp4).
+  The VM after the second deploy (16:09-16:12 UTC), from the feed page in Chrome: 23 requests over
+  six kinds of read, all answered, none retried. Comments 0.4-0.9 s (the first 5.3 s: helper
+  start 1.0 s + guest visit 2.7 s); replies 0.5 s on the server, 1.0 s in the panel ("View 54
+  replies" listed 20); a profile 6.7 s for the first 24 videos (the For You browser was starting
+  beside it) and 1.5-2.9 s for the next 24; Explore batches of 26-29 videos in 1.7-2.0 s each,
+  four in a row; a pasted link's lookup 0.5 s (the whole resolve 14 s: the redirect and CORS
+  checks of its four files, as before).
 - **Also answered, not used**: the signed-out For You list (11-12 generic videos, not anyone's
   feed), related videos, hashtag details and search suggestions.
 - **Not tried**: signing with the signed-in TikTok session (a For You without the browser). It
