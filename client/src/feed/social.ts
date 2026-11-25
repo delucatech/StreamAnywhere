@@ -645,7 +645,7 @@ async function loadProfile(more: boolean): Promise<void> {
   clearTimeout(profileReaskTimer);
   if (!more) profileRetries = 0;
   const user = profile.user;
-  status(el.profileStatus, more ? 'Loading more videos…' : `Loading @${user}… (the server opens the account page)`);
+  status(el.profileStatus, more ? 'Loading more videos…' : `Loading @${user}…`);
   try {
     const r = await api.profile({ platform: host.platform.id, user, offset: more ? profile.offset : 0, count: 24 });
     if (profile.user !== user) return;
@@ -974,9 +974,63 @@ const whenOf = (c: VideoComment): string => {
   return new Date(c.time * 1000).toLocaleDateString();
 };
 
-function commentRow(c: VideoComment): HTMLElement {
+/**
+ * "View 3 replies" under a comment: each tap asks the server for the next few (TikTok hands out a
+ * handful per page) and lists them, indented, under the comment; once all are there the button
+ * hides and shows them. A read the panel cancels (a new comments read, Cancel) just stops.
+ */
+function repliesBlock(c: VideoComment, item: FeedItem): HTMLElement {
+  const total = c.replies || 0;
+  const wrap = document.createElement('div');
+  wrap.className = 'c-replies';
+  const list = document.createElement('div');
+  list.className = 'c-replies-list';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'c-replies-btn';
+  const plural = (n: number): string => `${host.fmtCount(n)} ${n === 1 ? 'reply' : 'replies'}`;
+  const state = { cursor: 0, shown: 0, hasMore: true, busy: false, hidden: false };
+  const label = (): void => {
+    btn.textContent = state.busy ? 'Reading the replies…' : !state.shown ? `View ${plural(total)}` : state.hasMore ? `More replies (${state.shown} of ${host.fmtCount(Math.max(total, state.shown))})` : state.hidden ? `Show ${plural(state.shown)}` : 'Hide replies';
+  };
+  label();
+  btn.addEventListener('click', () => {
+    if (state.busy) return;
+    if (state.shown && !state.hasMore) {
+      state.hidden = !state.hidden;
+      list.classList.toggle('hidden', state.hidden);
+      label();
+      return;
+    }
+    state.busy = true;
+    label();
+    void api
+      .commentReplies({ platform: host.platform.id, id: item.id, commentId: c.id, cursor: state.cursor })
+      .then((r) => {
+        for (const reply of r.comments) list.appendChild(commentRow(reply, undefined));
+        state.shown += r.comments.length;
+        state.cursor = r.cursor;
+        state.hasMore = r.hasMore && r.comments.length > 0;
+        state.busy = false;
+        label();
+        if (!state.shown) btn.textContent = 'No replies to show';
+      })
+      .catch((e) => {
+        state.busy = false;
+        label();
+        if (e instanceof ApiError && e.status === 499) return; // the panel stopped its reads
+        btn.textContent = 'Replies could not be read. Tap to try again';
+        console.warn('[comments] replies:', errMsg(e));
+      });
+  });
+  wrap.append(btn, list);
+  return wrap;
+}
+
+/** One comment's row; `item` (the video) makes its reply count a button that lists the replies - left out for a reply's own row. */
+function commentRow(c: VideoComment, item: FeedItem | undefined): HTMLElement {
   const row = document.createElement('div');
-  row.className = 'comment-row';
+  row.className = item ? 'comment-row' : 'comment-row reply';
   const img = document.createElement('img');
   if (c.user.avatar) img.src = c.user.avatar;
   img.alt = '';
@@ -998,20 +1052,23 @@ function commentRow(c: VideoComment): HTMLElement {
   text.textContent = c.text;
   const meta = document.createElement('div');
   meta.className = 'c-meta';
-  const parts = [whenOf(c), c.likes ? `${host.fmtCount(c.likes)} likes` : '', c.replies ? `${host.fmtCount(c.replies)} ${c.replies === 1 ? 'reply' : 'replies'}` : ''].filter(Boolean);
+  // The replies can be fetched for a comment with a real id (not one read off the page's DOM), on TikTok.
+  const canList = Boolean(item && c.replies && /^\d{5,30}$/.test(c.id) && host.platform.id === 'tiktok');
+  const parts = [whenOf(c), c.likes ? `${host.fmtCount(c.likes)} likes` : '', c.replies && !canList && item ? `${host.fmtCount(c.replies)} ${c.replies === 1 ? 'reply' : 'replies'}` : ''].filter(Boolean);
   for (const p of parts) {
     const s = document.createElement('span');
     s.textContent = p;
     meta.appendChild(s);
   }
   body.append(name, text, meta);
+  if (canList && item) body.appendChild(repliesBlock(c, item));
   row.appendChild(body);
   return row;
 }
 
 function renderComments(list: VideoComment[], append: boolean): void {
   if (!append) el.commentsList.innerHTML = '';
-  for (const c of list) el.commentsList.appendChild(commentRow(c));
+  for (const c of list) el.commentsList.appendChild(commentRow(c, comments.item));
 }
 
 function commentsTitle(): void {

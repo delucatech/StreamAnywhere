@@ -11,6 +11,10 @@
  *           playAddr URLs in the response are signed for THAT session (proxy-only, like the resolver).
  *           Every bitrate variant also carries the cookie-free /aweme/v1/play URL (browser-direct).
  *           TikTok occasionally answers with an empty body (anti-bot); the caller retries.
+ *           Since 2026-11-25 the request goes over a Chrome-like connection first (tiktokGuest.ts:
+ *           the same unsigned call, answered every time from the VM where Node's own connection
+ *           got an empty body about 2 times in 3); the plain request below it is the fallback,
+ *           and the headless browser behind that one (index.ts fetchExploreAny).
  *
  *  foryou:  served from a signed-in real browser (session.ts): TikTok's own web app does the
  *           request signing, we only read the JSON that comes back.
@@ -22,6 +26,7 @@ import type { CodecFamily, FeedItem, FollowState, MediaFormat } from '../../shar
 import { jarHeader, newJar, openUpstream, readBody, type CookieJar } from './http';
 import { defaultExpiry, registerMedia } from './mediaStore';
 import { tiktokAllowlist } from './tiktok';
+import { GuestError, guestGet, guestUnusable } from './tiktokGuest';
 
 export const EXPLORE_DEFAULT_CATEGORY = 120;
 const MAX_COUNT = 30;
@@ -247,6 +252,11 @@ export function parseExploreBody(text: string, upstream: UpstreamSession | undef
   } catch (e) {
     throw new FeedError(`Explore API JSON could not be parsed: ${(e as Error).message}`, 'bad_json');
   }
+  return parseExploreJson(json, upstream, warnings);
+}
+
+/** An explore API answer (already parsed) as feed items. */
+export function parseExploreJson(json: any, upstream: UpstreamSession | undefined, warnings: string[]): { items: FeedItem[]; hasMore: boolean; raw: number } {
   const code = Number(json.statusCode ?? json.status_code ?? 0);
   if (code !== 0) throw new FeedError(`TikTok explore API status ${code}: ${json.statusMsg || json.status_msg || 'unavailable'}`, 'tiktok_status_' + code);
   const list: any[] = Array.isArray(json.itemList) ? json.itemList : [];
@@ -271,7 +281,45 @@ export function normalizeExploreOptions(opts: ExploreOptions): { category: numbe
   };
 }
 
+/**
+ * One Explore batch over the Chrome-like connection, as a guest (no signature: TikTok answers this
+ * list without one, so it keeps working when the signer does not). GuestError when TikTok would
+ * not answer; undefined when that path is not usable right now.
+ */
+export async function fetchExploreAsGuest(opts: ExploreOptions = {}): Promise<ExploreResult | undefined> {
+  if (guestUnusable('explore')) return undefined;
+  const { category, count } = normalizeExploreOptions(opts);
+  const warnings: string[] = [];
+  const referer = 'https://www.tiktok.com/explore';
+  const r = await guestGet({
+    kind: 'explore',
+    path: '/api/explore/item_list/',
+    query: { categoryType: category, count, from_page: 'explore' },
+    what: 'Explore videos',
+    referer,
+    sign: false,
+    usable: (j) => Array.isArray(j?.itemList),
+    log: opts.log ?? (() => undefined),
+  });
+  const parsed = parseExploreJson(r.json, { cookieHeader: r.upstream.cookieHeader, referer }, warnings);
+  opts.log?.(`explore category ${category}: ${parsed.items.length}/${parsed.raw} items (Chrome-like connection, ${r.ms} ms${r.attempts > 1 ? `, attempt ${r.attempts}` : ''})`);
+  return { ...parsed, warnings };
+}
+
 export async function fetchExploreFeed(opts: ExploreOptions = {}): Promise<ExploreResult> {
+  try {
+    const viaGuest = await fetchExploreAsGuest(opts);
+    if (viaGuest) return viaGuest;
+  } catch (e) {
+    // TikTok's own "no" (a status code) is the same over any connection; anything else: the plain request below.
+    if (e instanceof GuestError && e.kind === 'status') throw new FeedError(`TikTok explore API ${e.message.replace(/^TikTok /, '')}`, 'tiktok_status_' + (e.code ?? 'x'));
+    opts.log?.(`explore over the Chrome-like connection failed (${(e as Error).message}); trying the plain request`);
+  }
+  return fetchExploreDirect(opts);
+}
+
+/** The original: the unsigned request over Node's own connection, with its retries. */
+export async function fetchExploreDirect(opts: ExploreOptions = {}): Promise<ExploreResult> {
   const { category, count } = normalizeExploreOptions(opts);
   const warnings: string[] = [];
   const jar = await warmJar(opts.log);

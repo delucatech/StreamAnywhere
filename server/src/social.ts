@@ -40,11 +40,11 @@
  *              shows what the page contains, for tuning on the deployed server.
  */
 import type { Page } from 'puppeteer-core';
-import type { ChatMessage, CommentsResponse, Conversation, ConversationResponse, FeedItem, FollowResponse, FollowState, InboxResponse, ProfileResponse, SearchResponse, SendMessageResponse, UserSummary, VideoComment } from '../../shared/types';
+import type { ChatMessage, CommentRepliesResponse, CommentsResponse, Conversation, ConversationResponse, FeedItem, FollowResponse, FollowState, InboxResponse, ProfileResponse, SearchResponse, SendMessageResponse, UserSummary, VideoComment } from '../../shared/types';
 import { itemToFeedItem, relationToState } from './feed';
 import { isLoggedIn, pageCookieHeader, resetWorkPage, withWorkPage } from './session';
 import { ytdlpInfo } from './ytdlp';
-import { guestCommentList, guestUnusable } from './tiktokGuest';
+import { GuestError, guestCommentList, guestGet, guestPage, guestReplyList, guestUnusable, pageScope } from './tiktokGuest';
 import { say } from './activity';
 
 const TT = 'https://www.tiktok.com';
@@ -460,7 +460,127 @@ async function openProfile(page: Page, user: string, log: (m: string) => void, s
   return profile;
 }
 
+// ---------------------------------------------------------------- profile as a guest (no browser)
+
+/**
+ * What the signed-in browser learned about who is followed (the follow button it read or pressed),
+ * by lower-cased handle. A guest answer cannot know it; a profile served from one takes it from here.
+ */
+const followKnown = new Map<string, FollowState>();
+const rememberFollow = (user: string, state: FollowState | undefined): void => {
+  if (state && state !== 'unknown') followKnown.set(user.toLowerCase(), state);
+};
+
+/** The account details in a tiktok.com account page's data block: the account, "no such account", or nothing readable. */
+export function userFromAccountPage(html: string): { info?: UserSummary; statusCode?: number; privateAccount?: boolean; readable: boolean } {
+  const detail = pageScope(html)?.['webapp.user-detail'];
+  if (!detail || typeof detail !== 'object') return { readable: false };
+  const statusCode = Number(detail.statusCode ?? 0);
+  const info = userFromDetail({ userInfo: detail.userInfo });
+  const u = detail.userInfo?.user;
+  return { info, statusCode, privateAccount: Boolean(u?.privateAccount || u?.secret), readable: true };
+}
+
+interface GuestProfile {
+  user: string;
+  info: UserSummary;
+  privateAccount: boolean;
+  /** When the account page was read (the details are asked again after GUEST_PROFILE_MS) */
+  infoAt: number;
+  items: FeedItem[];
+  ids: Set<string>;
+  cursor: string;
+  hasMore: boolean;
+}
+let guestProfile: GuestProfile | undefined;
+const GUEST_PROFILE_MS = 10 * 60 * 1000;
+
+/**
+ * An account's details and videos asked as a guest without a browser (tiktokGuest.ts): the account
+ * page over the Chrome-like connection carries the details (and the id the list call wants), the
+ * signed post/item_list call the videos, 30 a page with their play addresses. About 1-3 s for a
+ * first page, where the browser path needs the headless browser, a page load and - on the VM,
+ * whose page gets no videos - yt-dlp behind it. Undefined when the path is not usable right now;
+ * GuestError when TikTok would not answer; SocialError 404 for an account that does not exist.
+ */
+export async function fetchProfileAsGuest(user: string, offset: number, count: number, log: (m: string) => void, signal?: AbortSignal): Promise<ProfileResponse | undefined> {
+  if (guestUnusable('profile') || guestUnusable('posts')) return undefined;
+  const t0 = Date.now();
+  const warnings: string[] = [];
+  const referer = `${TT}/@${encodeURIComponent(user)}`;
+  let p = guestProfile && sameUser(guestProfile.user, user) ? guestProfile : undefined;
+  if (!p || Date.now() - p.infoAt > GUEST_PROFILE_MS) {
+    const page = await guestPage('profile', referer, 'the account page', log, signal);
+    const read = userFromAccountPage(page.html);
+    if (read.readable && read.statusCode === 10221) throw new SocialError(`@${user}: TikTok could not find this account`, 404);
+    if (!read.info?.secUid) throw new GuestError(read.readable ? `the account page carried no account (status ${read.statusCode})` : 'the account page carried no data block (TikTok served a challenge or changed the page)', 'empty');
+    p = { user, info: read.info, privateAccount: Boolean(read.privateAccount), infoAt: Date.now(), items: [], ids: new Set(), cursor: '0', hasMore: true };
+    guestProfile = p;
+  } else if (offset === 0) {
+    // A fresh open: the list from the top again (play addresses live about an hour).
+    p.items = [];
+    p.ids = new Set();
+    p.cursor = '0';
+    p.hasMore = true;
+  }
+  if (p.privateAccount) throw new SocialError(`@${user}: this account is private`, 404);
+  let pages = 0;
+  while (p.items.length < offset + count && p.hasMore && pages < 4) {
+    pages++;
+    const state = p;
+    const r = await guestGet({
+      kind: 'posts',
+      path: '/api/post/item_list/',
+      query: { secUid: state.info.secUid!, cursor: state.cursor, count: 30, coverFormat: 2, needPinnedItemIds: 'true', post_item_list_request_type: 0 },
+      what: `the videos of @${user}`,
+      referer,
+      envCode: 64,
+      log,
+      signal,
+    });
+    const list: any[] = Array.isArray(r.json.itemList) ? r.json.itemList : [];
+    let added = 0;
+    for (const raw of list) {
+      const it = itemToFeedItem(raw, { cookieHeader: r.upstream.cookieHeader, referer });
+      if (it && !state.ids.has(it.id)) {
+        state.ids.add(it.id);
+        state.items.push(it);
+        added++;
+      }
+    }
+    const next = r.json.cursor !== undefined ? String(r.json.cursor) : state.cursor;
+    state.hasMore = r.json.hasMore === true && list.length > 0 && next !== state.cursor;
+    state.cursor = next;
+    if (!added && !list.length) break;
+  }
+  // Who is followed is the signed-in browser's knowledge: a guest answer says "not followed" for everyone.
+  const followState: FollowState = isLoggedIn() ? followKnown.get(p.info.uniqueId.toLowerCase()) ?? 'unknown' : 'none';
+  const info: UserSummary = { ...p.info, followState };
+  const items = p.items.slice(offset, offset + count).map((it) => ({ ...it, author: { ...it.author, followState: followState === 'unknown' ? undefined : followState } }));
+  const hasMore = p.hasMore || p.items.length > offset + count;
+  log(`profile @${user}: ${items.length} videos served (offset ${offset}, guest, ${pages} list page(s), more: ${hasMore}, ${Date.now() - t0} ms)`);
+  return { user: info, items, offset, hasMore, warnings, elapsedMs: Date.now() - t0 };
+}
+
+/**
+ * An account's details and videos: as a guest without a browser first (fetchProfileAsGuest); when
+ * that is not usable or TikTok does not answer it, the headless work page as before
+ * (fetchProfileInBrowser, with yt-dlp's listing behind it).
+ */
 export async function fetchProfile(user: string, offset: number, count: number, log: (m: string) => void): Promise<ProfileResponse> {
+  try {
+    const direct = await fetchProfileAsGuest(user, offset, count, log);
+    if (direct) return direct;
+  } catch (e) {
+    if (isCancelled(e) || (e instanceof SocialError && e.status === 404)) throw e;
+    log(`profile @${user}: the request without a browser failed (${(e as Error).message}); opening the account page in the browser instead`);
+  }
+  say('opening the account page in the browser (slower)', 'opening the account on TikTok');
+  return fetchProfileInBrowser(user, offset, count, log);
+}
+
+/** The original: the account page in the headless work page (its own list answers), yt-dlp's listing when the page delivers no videos. */
+export async function fetchProfileInBrowser(user: string, offset: number, count: number, log: (m: string) => void): Promise<ProfileResponse> {
   const t0 = Date.now();
   const warnings: string[] = [];
   return withWorkPage(log, async (page) => {
@@ -543,7 +663,10 @@ export async function fetchProfile(user: string, offset: number, count: number, 
       } else throw new SocialError(`@${user}: TikTok did not deliver the profile (${txt.replace(/\s+/g, ' ').slice(0, 100)})`);
     }
     const btn = stateFromButton((await page.evaluate(READ_FOLLOW_BUTTON).catch(() => null)) as string | null);
-    if (btn && isLoggedIn()) p.info.followState = btn;
+    if (btn && isLoggedIn()) {
+      p.info.followState = btn;
+      rememberFollow(p.info.uniqueId, btn);
+    }
     if (p.viaYtDlp) for (const it of items) if (!it.author.avatar && sameUser(it.author.uniqueId || '', p.info.uniqueId)) it.author.avatar = p.info.avatar;
     log(`profile @${user}: ${items.length} videos served (offset ${offset}, ${served}, more: ${hasMore})`);
     return { user: p.info, items, offset, hasMore, warnings, elapsedMs: Date.now() - t0 };
@@ -569,6 +692,7 @@ export async function followUser(user: string, follow: boolean, log: (m: string)
     const followed = before !== 'none';
     if (followed === follow) {
       if (p.info) p.info.followState = before;
+      rememberFollow(user, before);
       return { user, followState: before, warnings: [`already ${follow ? 'following' : 'not following'} @${user}`] };
     }
     await page.click('[data-e2e="follow-button"]');
@@ -597,6 +721,7 @@ export async function followUser(user: string, follow: boolean, log: (m: string)
       after = before;
     }
     if (p.info) p.info.followState = after;
+    rememberFollow(user, after);
     log(`@${user}: follow state now "${after}"`);
     return { user, followState: after, warnings };
   }, `follow @${user}`);
@@ -683,6 +808,30 @@ export async function fetchCommentsAsGuest(id: string, cursor: number, log: (m: 
     const warnings = page.comments.length || cursor > 0 ? [] : ['No comments yet'];
     log(`comments ${id} from ${cursor}: ${page.comments.length} (guest${r.attempts > 1 ? `, attempt ${r.attempts}` : ''}), more: ${page.hasMore}, ${Date.now() - t0} ms`);
     return { id, ...page, how: 'guest', warnings, elapsedMs: Date.now() - t0 };
+  });
+}
+
+/**
+ * The replies under one comment, asked as a guest without a browser (there is no browser path for
+ * these: the panel never showed replies before). TikTok hands out a few per page and leaves
+ * `has_more` at 0 even when more remain, so "more" is decided by the cursor against the total.
+ */
+export async function fetchCommentReplies(id: string, commentId: string, cursor: number, log: (m: string) => void, signal?: AbortSignal): Promise<CommentRepliesResponse> {
+  const why = guestUnusable('replies');
+  if (why) throw new SocialError(`Replies cannot be read right now (${why})`, 503);
+  const t0 = Date.now();
+  return tracked('comments', signal, async (sig) => {
+    let r;
+    try {
+      r = await guestReplyList(id, commentId, cursor, log, sig);
+    } catch (e) {
+      if (isCancelled(e) || !(e instanceof GuestError)) throw e;
+      throw new SocialError(`TikTok did not give the replies to the server (${e.message})`, 502);
+    }
+    const page = commentsFromAnswer(r.json, cursor);
+    const hasMore = page.comments.length > 0 && (page.total !== undefined ? page.cursor < page.total : page.hasMore);
+    log(`replies ${id}/${commentId} from ${cursor}: ${page.comments.length} (guest), total ${page.total ?? '?'}, more: ${hasMore}, ${Date.now() - t0} ms`);
+    return { id, commentId, comments: page.comments, cursor: page.cursor, hasMore, total: page.total, warnings: [], elapsedMs: Date.now() - t0 };
   });
 }
 

@@ -67,6 +67,8 @@ export function describeRequest(method: string, path: string, body: any, query: 
         return { what: `${b.follow === false ? 'Unfollowing' : 'Following'} @${String(b.user || '').slice(0, 40)} on ${nameOf(b.platform)}`, platform: P(b.platform) };
       case '/api/comments':
         return { what: `Reading the comments of a ${nameOf(b.platform)} video`, platform: P(b.platform) };
+      case '/api/comments/replies':
+        return { what: `Reading the replies to a comment on a ${nameOf(b.platform)} video`, platform: P(b.platform) };
       case '/api/inbox/open':
         return { what: 'Opening a TikTok conversation', platform: 'tiktok' };
       case '/api/inbox/send':

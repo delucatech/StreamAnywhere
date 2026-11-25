@@ -1584,6 +1584,38 @@ button {
   display: flex;
   gap: 12px;
 }
+/* the replies under a comment: a text button (a finger-sized target), the replies indented below it */
+.comment-row .c-replies-btn {
+  display: block;
+  margin: 2px 0 0 -8px;
+  padding: 10px 8px;
+  min-height: 40px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+.comment-row .c-replies-btn:active {
+  color: var(--text);
+}
+.comment-row .c-replies-list.hidden {
+  display: none;
+}
+.comment-row.reply {
+  padding: 6px 0;
+  gap: 8px;
+}
+.comment-row.reply img {
+  width: 26px;
+  height: 26px;
+}
+.comment-row.reply .c-text {
+  font-size: 15px;
+}
 
 /* inbox */
 .inbox-card {

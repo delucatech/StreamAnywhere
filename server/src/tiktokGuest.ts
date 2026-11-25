@@ -38,7 +38,8 @@ const OFF = /^(0|off|false|no)$/i.test(process.env.TIKTOK_GUEST || '');
 export type GuestFailure = 'empty' | 'blocked' | 'status' | 'session' | 'helper';
 
 export class GuestError extends Error {
-  constructor(message: string, public readonly kind: GuestFailure) {
+  /** `code`: TikTok's own status code when it read the request and said no (kind `status`) */
+  constructor(message: string, public readonly kind: GuestFailure, public readonly code?: number) {
     super(message);
   }
 }
@@ -133,15 +134,27 @@ export interface PageIdentity {
   script?: string;
 }
 
+/** The data block a tiktok.com page carries for its own scripts (`__DEFAULT_SCOPE__`: "webapp.app-context", "webapp.user-detail", ...). */
+export function pageScope(html: string): Record<string, any> | undefined {
+  const m = /<script[^>]+id=["']__UNIVERSAL_DATA_FOR_REHYDRATION__["'][^>]*>([\s\S]*?)<\/script>/i.exec(html);
+  if (!m) return undefined;
+  try {
+    const scope = JSON.parse(m[1])?.__DEFAULT_SCOPE__;
+    return scope && typeof scope === 'object' ? scope : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** What a tiktok.com page tells its own scripts about this visitor. */
 export function pageIdentity(html: string): PageIdentity {
   const out: PageIdentity = {};
   const script = /\/webmssdk\/(\d+(?:\.\d+){2,4})\/webmssdk\.js/.exec(html);
   if (script) out.script = script[1];
-  const m = /<script[^>]+id=["']__UNIVERSAL_DATA_FOR_REHYDRATION__["'][^>]*>([\s\S]*?)<\/script>/i.exec(html);
-  if (!m) return out;
+  const scope = pageScope(html);
+  if (!scope) return out;
   try {
-    const ctx = JSON.parse(m[1])?.__DEFAULT_SCOPE__?.['webapp.app-context'] ?? {};
+    const ctx = scope['webapp.app-context'] ?? {};
     const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v : undefined);
     out.wid = str(ctx.wid);
     out.region = str(ctx.region);
@@ -170,8 +183,6 @@ let scriptSeen: string | undefined;
 /** The build number the signatures carry: the signer's own until another one is seen to work */
 let signingAs = DEFAULT_SCM_VERSION;
 let lastCallAt = 0;
-let failsInRow = 0;
-let pausedUntil = 0;
 let lastGoodVideo: string | undefined;
 /** When signing as another script build was last tried (it costs a whole extra attempt: once an hour per build is enough) */
 const otherBuildTried = new Map<string, number>();
@@ -277,10 +288,14 @@ interface CallOptions {
   referer?: string;
   /** The script build to sign as (default: the one in use) */
   scm?: string;
+  /** The signer's "environment code": TikTok wants 64 for a profile's video list, 65 (the default) elsewhere */
+  envCode?: number;
+  /** false: no signature (the Explore list answers without one, over a Chrome-like connection) */
+  sign?: boolean;
   signal?: AbortSignal;
 }
 
-/** One signed GET; the parsed JSON, or GuestError saying how TikTok refused. */
+/** One GET (signed unless told otherwise); the parsed JSON, or GuestError saying how TikTok refused. */
 async function call(s: Session, path: string, query: Record<string, string | number>, o: CallOptions = {}): Promise<{ json: any; ms: number; bytes: number }> {
   const wait = lastCallAt + GAP_MS - Date.now();
   if (wait > 0) await abortable(new Promise<void>((r) => setTimeout(r, wait)), o.signal);
@@ -288,7 +303,10 @@ async function call(s: Session, path: string, query: Record<string, string | num
   s.calls += 1;
   const pairs = commonParams(s);
   for (const [k, v] of Object.entries(query)) pairs.push([k, String(v)]);
-  const signed = signRequest(pairs, { userAgent: UA, msToken: s.jar.get('msToken') ?? '', sdkVersion: DEFAULT_SDK_VERSION, scmVersion: o.scm ?? signingAs });
+  const qs =
+    o.sign === false
+      ? pairs.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&')
+      : signRequest(pairs, { userAgent: UA, msToken: s.jar.get('msToken') ?? '', sdkVersion: DEFAULT_SDK_VERSION, scmVersion: o.scm ?? signingAs, envCode: o.envCode }).query;
   const headers: Record<string, string> = {
     'User-Agent': UA,
     Accept: 'application/json, text/plain, */*',
@@ -304,7 +322,7 @@ async function call(s: Session, path: string, query: Record<string, string | num
     priority: 'u=1, i',
   };
   if (s.csrf) headers['x-secsdk-csrf-token'] = s.csrf;
-  const answer = await send(s.jar, 'GET', `${ORIGIN}${path}?${signed.query}`, headers, undefined, o.signal);
+  const answer = await send(s.jar, 'GET', `${ORIGIN}${path}?${qs}`, headers, undefined, o.signal);
   const text = answer.body.toString('utf8');
   if (answer.status === 429) throw new GuestError('TikTok answered HTTP 429 (too many requests)', 'empty');
   if (!text.trim()) throw new GuestError(`TikTok answered HTTP ${answer.status} with an empty body`, 'empty');
@@ -318,6 +336,13 @@ async function call(s: Session, path: string, query: Record<string, string | num
   }
 }
 
+/** The fields of TikTok's bare "ok": an answer made of nothing else is its soft refusal. */
+const ENVELOPE = new Set(['status_code', 'statusCode', 'status_msg', 'statusMsg', 'log_pb', 'extra']);
+/** Whether an answer carries anything beyond TikTok's bare "ok" envelope. */
+export function beyondEnvelope(json: any): boolean {
+  return Boolean(json) && typeof json === 'object' && !Array.isArray(json) && Object.keys(json).some((k) => !ENVELOPE.has(k));
+}
+
 /**
  * Whether a comment/list answer is an answer rather than TikTok's bare "ok" envelope (its soft
  * refusal: nothing but status_code / log_pb). A video without comments, and an id TikTok does not
@@ -328,41 +353,102 @@ export function commentAnswerUsable(json: any): boolean {
   return Boolean(json) && typeof json === 'object' && !Array.isArray(json) && ('comments' in json || Number.isFinite(Number(json.total ?? NaN)));
 }
 
-function succeeded(ms: number): void {
+/**
+ * What is being read. Each kind has its own failure count and pause: TikTok refusing one path
+ * (say, search) must not send the comments back to the browser.
+ */
+export type GuestKind = 'comments' | 'replies' | 'explore' | 'profile' | 'posts' | 'video';
+
+interface KindState {
+  calls: number;
+  ok: number;
+  failed: number;
+  failsInRow: number;
+  pausedUntil: number;
+  lastOk?: { at: string; ms: number };
+  lastFailure?: { at: string; reason: string };
+}
+const kinds = new Map<GuestKind, KindState>();
+const kindState = (kind: GuestKind): KindState => {
+  let k = kinds.get(kind);
+  if (!k) kinds.set(kind, (k = { calls: 0, ok: 0, failed: 0, failsInRow: 0, pausedUntil: 0 }));
+  return k;
+};
+
+function succeeded(kind: GuestKind, ms: number): void {
+  const k = kindState(kind);
+  k.ok += 1;
+  k.lastOk = { at: new Date().toISOString(), ms };
+  k.failsInRow = 0;
+  k.pausedUntil = 0;
   stats.ok += 1;
-  stats.lastOk = { at: new Date().toISOString(), ms };
-  failsInRow = 0;
-  pausedUntil = 0;
+  stats.lastOk = k.lastOk;
 }
 
-function failed(reason: string, countsTowardsPause: boolean, log: (m: string) => void): void {
+function failed(kind: GuestKind, reason: string, countsTowardsPause: boolean, log: (m: string) => void): void {
+  const k = kindState(kind);
+  k.failed += 1;
+  k.lastFailure = { at: new Date().toISOString(), reason: `${kind}: ${reason}`.slice(0, 240) };
   stats.failed += 1;
-  stats.lastFailure = { at: new Date().toISOString(), reason: reason.slice(0, 240) };
+  stats.lastFailure = k.lastFailure;
   if (!countsTowardsPause) return;
-  failsInRow += 1;
-  if (failsInRow >= FAILS_TO_PAUSE && Date.now() >= pausedUntil) {
-    pausedUntil = Date.now() + PAUSE_MS;
-    log(`guest requests paused for ${PAUSE_MS / 60000} min after ${failsInRow} failures in a row (${reason}); the callers use their fallback meanwhile`);
+  k.failsInRow += 1;
+  if (k.failsInRow >= FAILS_TO_PAUSE && Date.now() >= k.pausedUntil) {
+    k.pausedUntil = Date.now() + PAUSE_MS;
+    log(`guest requests for ${kind} paused for ${PAUSE_MS / 60000} min after ${k.failsInRow} failures in a row (${reason}); the callers use their fallback meanwhile`);
   }
 }
 
-/** Why the guest path is not worth trying right now (undefined: try it). */
-export function guestUnusable(): string | undefined {
+/** Why the guest path is not worth trying right now for this kind of read (undefined: try it). */
+export function guestUnusable(kind: GuestKind = 'comments'): string | undefined {
   if (OFF) return 'switched off (TIKTOK_GUEST)';
   if (!tlsBridgeUsable()) return tlsBridgeStatus().reason || 'the Chrome-like connection helper cannot run here';
-  if (Date.now() < pausedUntil) return `paused until ${new Date(pausedUntil).toISOString().slice(11, 16)} UTC after ${failsInRow} failed requests in a row (${stats.lastFailure?.reason ?? 'no reason kept'})`;
+  const k = kindState(kind);
+  if (Date.now() < k.pausedUntil) return `paused until ${new Date(k.pausedUntil).toISOString().slice(11, 16)} UTC after ${k.failsInRow} failed requests in a row (${k.lastFailure?.reason ?? 'no reason kept'})`;
   return undefined;
 }
 
+/** What the relay must send with a guest answer's cookie-bound video addresses (the visit's cookies). */
+export interface GuestUpstream {
+  cookieHeader: string;
+  referer: string;
+}
+
+export interface GuestGet {
+  kind: GuestKind;
+  path: string;
+  /** The call's own parameters; a function gets the visit's region for the calls that repeat it */
+  query: Record<string, string | number> | ((visit: { region: string }) => Record<string, string | number>);
+  /** For the status line: "the comments", "the search results" */
+  what: string;
+  referer?: string;
+  envCode?: number;
+  sign?: boolean;
+  /** Is this JSON an answer? Default: anything beyond TikTok's bare "ok" envelope */
+  usable?: (json: any) => boolean;
+  /** Status codes besides 0 that still carry an answer (search: 203) */
+  okStatus?: number[];
+  log: (m: string) => void;
+  signal?: AbortSignal;
+}
+
+export interface GuestAnswer {
+  json: any;
+  ms: number;
+  attempts: number;
+  upstream: GuestUpstream;
+}
+
 /**
- * A page of a video's comments as TikTok's own JSON ({comments[], cursor, has_more, total}), asked
- * as a guest. Tries the kept visit, then a new one (TikTok throttles per visit), then - when the page
- * loads another build of the signing script than the signer says - once more signing as that build.
- * Throws GuestError when TikTok would not answer.
+ * One read as a guest, TikTok's own JSON back. Tries the kept visit, then a new one (TikTok
+ * throttles per visit), then - when its page loads another build of the signing script than the
+ * signatures carry, at most once an hour - once more signing as that build. Throws GuestError when
+ * TikTok would not answer; kind `status` means it read the request and said no (nothing to retry).
  */
-export async function guestCommentList(id: string, cursor: number, log: (m: string) => void, signal?: AbortSignal): Promise<{ json: any; ms: number; attempts: number }> {
+export async function guestGet(g: GuestGet): Promise<GuestAnswer> {
   const t0 = Date.now();
   stats.calls += 1;
+  kindState(g.kind).calls += 1;
   const tries: Array<{ fresh: boolean; scm?: string; what: string }> = [
     { fresh: false, what: 'the kept guest visit' },
     { fresh: true, what: 'a new guest visit' },
@@ -371,41 +457,87 @@ export async function guestCommentList(id: string, cursor: number, log: (m: stri
   for (let i = 0; i < tries.length; i++) {
     const t = tries[i];
     try {
-      const s = await session(log, signal, t.fresh && i > 0);
-      say(i === 0 ? 'asking TikTok for the comments' : `asking TikTok for the comments again (${t.what})`, 'asking TikTok for the comments');
-      const r = await call(s, '/api/comment/list/', { aweme_id: id, count: 20, cursor, fromWeb: 1, enter_from: 'tiktok_web', current_region: s.region }, { scm: t.scm, signal });
+      const s = await session(g.log, g.signal, t.fresh && i > 0);
+      say(i === 0 ? `asking TikTok for ${g.what}` : `asking TikTok for ${g.what} again (${t.what})`, `asking TikTok for ${g.what}`);
+      const query = typeof g.query === 'function' ? g.query({ region: s.region }) : g.query;
+      const r = await call(s, g.path, query, { referer: g.referer, envCode: g.envCode, sign: g.sign, scm: t.scm, signal: g.signal });
       const code = Number(r.json?.status_code ?? r.json?.statusCode ?? 0);
-      if (code !== 0) {
-        // TikTok read the request and said no (comments off, video gone): the signer is fine.
-        const err = new GuestError(`TikTok comment list status ${code}: ${r.json.status_msg || r.json.statusMsg || 'unavailable'}`, 'status');
-        failed(err.message, false, log);
+      if (code !== 0 && !g.okStatus?.includes(code)) {
+        // TikTok read the request and said no (comments off, no such account): the signer is fine.
+        const err = new GuestError(`TikTok status ${code}: ${r.json.status_msg || r.json.statusMsg || 'unavailable'}`, 'status', code);
+        failed(g.kind, err.message, false, g.log);
         throw err;
       }
-      if (!commentAnswerUsable(r.json)) throw new GuestError('TikTok answered "ok" without a comment list (its soft refusal)', 'empty');
+      if (!(g.usable ?? beyondEnvelope)(r.json)) throw new GuestError('TikTok answered "ok" with nothing in it (its soft refusal)', 'empty');
       if (t.scm && t.scm !== signingAs) {
-        log(`guest requests: signing as script build ${t.scm} works where ${signingAs} did not; using it from now on`);
+        g.log(`guest requests: signing as script build ${t.scm} works where ${signingAs} did not; using it from now on`);
         signingAs = t.scm;
       }
-      succeeded(Date.now() - t0);
-      if (Array.isArray(r.json.comments) && r.json.comments.length) lastGoodVideo = id;
-      return { json: r.json, ms: Date.now() - t0, attempts: i + 1 };
+      succeeded(g.kind, Date.now() - t0);
+      return { json: r.json, ms: Date.now() - t0, attempts: i + 1, upstream: { cookieHeader: jarHeader(s.jar), referer: g.referer ?? `${ORIGIN}/` } };
     } catch (e) {
       if (!(e instanceof GuestError)) throw e; // cancelled, or a bug
       if (e.kind === 'status') throw e;
       lastError = e;
-      log(`guest comments ${id}: ${e.message} (${t.what}, attempt ${i + 1})`);
+      g.log(`guest ${g.kind}: ${e.message} (${t.what}, attempt ${i + 1})`);
       if (e.kind === 'helper') break; // no connection to try again with
       current = undefined;
       // Last resort: the build TikTok's page loads now, when it is not the one the signatures carry.
-      if (i === tries.length - 1 && tries.length === 2 && scriptSeen && scriptSeen !== signingAs && Date.now() - (otherBuildTried.get(scriptSeen) ?? 0) > OTHER_BUILD_EVERY_MS) {
+      if (g.sign !== false && i === tries.length - 1 && tries.length === 2 && scriptSeen && scriptSeen !== signingAs && Date.now() - (otherBuildTried.get(scriptSeen) ?? 0) > OTHER_BUILD_EVERY_MS) {
         otherBuildTried.set(scriptSeen, Date.now());
         tries.push({ fresh: true, scm: scriptSeen, what: `signing as script build ${scriptSeen}` });
       }
     }
   }
   const err = lastError ?? new GuestError('TikTok did not answer', 'empty');
-  failed(err.message, true, log);
+  failed(g.kind, err.message, true, g.log);
   throw err;
+}
+
+/**
+ * A tiktok.com page's HTML as a guest (the account page carries the account's details in its data
+ * block; no signature is involved, only the Chrome-like connection and the visit's cookies).
+ */
+export async function guestPage(kind: GuestKind, url: string, what: string, log: (m: string) => void, signal?: AbortSignal): Promise<{ html: string; status: number; ms: number }> {
+  const t0 = Date.now();
+  stats.calls += 1;
+  kindState(kind).calls += 1;
+  try {
+    const s = await session(log, signal, false);
+    say(`asking TikTok for ${what}`, `asking TikTok for ${what}`);
+    const wait = lastCallAt + GAP_MS - Date.now();
+    if (wait > 0) await abortable(new Promise<void>((r) => setTimeout(r, wait)), signal);
+    lastCallAt = Date.now();
+    s.calls += 1;
+    const answer = await send(s.jar, 'GET', url, PAGE_HEADERS, undefined, signal);
+    const html = answer.body.toString('utf8');
+    if (answer.status >= 500 || !html.trim()) throw new GuestError(`TikTok answered HTTP ${answer.status}${html.trim() ? '' : ' with an empty page'}`, 'empty');
+    succeeded(kind, Date.now() - t0);
+    return { html, status: answer.status, ms: Date.now() - t0 };
+  } catch (e) {
+    if (e instanceof GuestError) failed(kind, e.message, true, log);
+    throw e;
+  }
+}
+
+/** A page of a video's comments as TikTok's own JSON ({comments[], cursor, has_more, total}), asked as a guest. */
+export async function guestCommentList(id: string, cursor: number, log: (m: string) => void, signal?: AbortSignal): Promise<GuestAnswer> {
+  const r = await guestGet({
+    kind: 'comments',
+    path: '/api/comment/list/',
+    query: (v) => ({ aweme_id: id, count: 20, cursor, fromWeb: 1, enter_from: 'tiktok_web', current_region: v.region }),
+    what: 'the comments',
+    usable: commentAnswerUsable,
+    log,
+    signal,
+  });
+  if (Array.isArray(r.json.comments) && r.json.comments.length) lastGoodVideo = id;
+  return r;
+}
+
+/** The replies under one comment, TikTok's own JSON (a few per page: follow `cursor` up to `total`; has_more stays 0). */
+export function guestReplyList(videoId: string, commentId: string, cursor: number, log: (m: string) => void, signal?: AbortSignal): Promise<GuestAnswer> {
+  return guestGet({ kind: 'replies', path: '/api/comment/list/reply/', query: { item_id: videoId, comment_id: commentId, count: 20, cursor }, what: 'the replies', usable: commentAnswerUsable, log, signal });
 }
 
 export interface TikTokGuestStatus {
@@ -425,13 +557,27 @@ export interface TikTokGuestStatus {
   lastOk?: { at: string; ms: number };
   lastFailure?: { at: string; reason: string };
   pausedUntil?: string;
+  /** Per kind of read, the ones asked so far: each has its own failure count and pause */
+  paths: Partial<Record<GuestKind, { state: 'ok' | 'failing' | 'paused'; calls: number; ok: number; failed: number; lastFailure?: { at: string; reason: string }; pausedUntil?: string }>>;
   helper: TlsBridgeStatus;
 }
 
 export function tiktokGuestStatus(): TikTokGuestStatus {
   const helper = tlsBridgeStatus();
-  const paused = Date.now() < pausedUntil;
-  const state: TikTokGuestStatus['state'] = OFF || helper.available === false ? 'unavailable' : paused ? 'paused' : !stats.calls ? 'unused' : failsInRow > 0 || (stats.lastFailure && (!stats.lastOk || stats.lastFailure.at > stats.lastOk.at)) ? 'failing' : 'ok';
+  const now = Date.now();
+  const paths: TikTokGuestStatus['paths'] = {};
+  let anyPaused = 0;
+  let anyFailing = false;
+  for (const [kind, k] of kinds) {
+    if (!k.calls) continue; // only looked at, never asked
+    const paused = now < k.pausedUntil;
+    const failing = k.failsInRow > 0 || Boolean(k.lastFailure && (!k.lastOk || k.lastFailure.at > k.lastOk.at));
+    if (paused) anyPaused = Math.max(anyPaused, k.pausedUntil);
+    if (failing) anyFailing = true;
+    paths[kind] = { state: paused ? 'paused' : failing ? 'failing' : 'ok', calls: k.calls, ok: k.ok, failed: k.failed, lastFailure: k.lastFailure, pausedUntil: paused ? new Date(k.pausedUntil).toISOString() : undefined };
+  }
+  // Overall: unavailable (off, or no helper), else the worst of the kinds asked so far.
+  const state: TikTokGuestStatus['state'] = OFF || helper.available === false ? 'unavailable' : !stats.calls ? 'unused' : anyPaused ? 'paused' : anyFailing ? 'failing' : 'ok';
   return {
     mode: OFF ? 'off' : 'on',
     state,
@@ -442,10 +588,11 @@ export function tiktokGuestStatus(): TikTokGuestStatus {
     ok: stats.ok,
     failed: stats.failed,
     visits: stats.sessions,
-    visit: current ? { ageSec: Math.round((Date.now() - current.createdAt) / 1000), calls: current.calls } : undefined,
+    visit: current ? { ageSec: Math.round((now - current.createdAt) / 1000), calls: current.calls } : undefined,
     lastOk: stats.lastOk,
     lastFailure: stats.lastFailure,
-    pausedUntil: paused ? new Date(pausedUntil).toISOString() : undefined,
+    pausedUntil: anyPaused ? new Date(anyPaused).toISOString() : undefined,
+    paths,
     helper,
   };
 }
@@ -460,8 +607,7 @@ export function resetTikTokGuest(): void {
   scriptSeen = undefined;
   signingAs = DEFAULT_SCM_VERSION;
   lastCallAt = 0;
-  failsInRow = 0;
-  pausedUntil = 0;
+  kinds.clear();
   lastGoodVideo = undefined;
   otherBuildTried.clear();
   Object.assign(stats, { calls: 0, ok: 0, failed: 0, sessions: 0, lastOk: undefined, lastFailure: undefined });

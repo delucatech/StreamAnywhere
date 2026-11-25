@@ -1,4 +1,4 @@
-import type { AvatarRequest, AvatarResponse, LiveTvChannelGuideResponse, LiveTvChannelsResponse, LiveTvCodec, LiveTvGuideNowResponse, LiveTvHealthReport, LiveTvPrefs, LiveTvPrefsPatch, LiveTvPreset, LiveTvWindow, LiveTvProvider, LiveTvProviderInput, LiveTvState, LiveTvTestRequest, LiveTvTestResponse, LiveTvTuneResponse, LiveTvTuneStatus, ConversationResponse, DownloadJob, DownloadProbeResponse, DownloadSource, FeedProgress, LibraryCategory, LibraryEntry, LibraryEntryPatch, LibraryOptionsResponse, LibrarySaveHint, LibrarySaveResponse, LibraryState, FeedRequest, FeedResponse, FollowRequest, FollowResponse, HealthResponse, InboxCancelResponse, InboxResponse, CommentsRequest, CommentsResponse, LoginMode, Platform, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SendMessageResponse, ServerProbe, SessionInputRequest, SessionStatus } from '../../shared/types';
+import type { AvatarRequest, AvatarResponse, LiveTvChannelGuideResponse, LiveTvChannelsResponse, LiveTvCodec, LiveTvGuideNowResponse, LiveTvHealthReport, LiveTvPrefs, LiveTvPrefsPatch, LiveTvPreset, LiveTvWindow, LiveTvProvider, LiveTvProviderInput, LiveTvState, LiveTvTestRequest, LiveTvTestResponse, LiveTvTuneResponse, LiveTvTuneStatus, ConversationResponse, DownloadJob, DownloadProbeResponse, DownloadSource, FeedProgress, LibraryCategory, LibraryEntry, LibraryEntryPatch, LibraryOptionsResponse, LibrarySaveHint, LibrarySaveResponse, LibraryState, FeedRequest, FeedResponse, FollowRequest, FollowResponse, HealthResponse, InboxCancelResponse, InboxResponse, CommentRepliesRequest, CommentRepliesResponse, CommentsRequest, CommentsResponse, LoginMode, Platform, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SendMessageResponse, ServerProbe, SessionInputRequest, SessionStatus } from '../../shared/types';
 import { beginWait, type WaitName } from './pending';
 
 /**
@@ -299,6 +299,8 @@ export const api = {
   inboxOpen: (id: string, signal?: AbortSignal): Promise<ConversationResponse> => post('/api/inbox/open', { id }, undefined, signal),
   /** A video's comments (the bubble beside it); `signal` cancels the read (ApiError 499). Pair it with commentsCancel so the server's work stops as well. */
   comments: (req: CommentsRequest, signal?: AbortSignal): Promise<CommentsResponse> => post('/api/comments', req, undefined, signal),
+  /** The replies under one comment, a few per call (pass the answer's cursor back for the next ones) */
+  commentReplies: (req: CommentRepliesRequest): Promise<CommentRepliesResponse> => post('/api/comments/replies', req),
   commentsCancel: (): Promise<InboxCancelResponse> => post('/api/comments/cancel', {}, 10_000),
   inboxSend: (req: SendMessageRequest): Promise<SendMessageResponse> => post('/api/inbox/send', req),
   // Video Library (library.html)

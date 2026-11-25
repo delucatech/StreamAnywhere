@@ -193,6 +193,8 @@ export interface HealthResponse {
     lastOk?: { at: string; ms: number };
     lastFailure?: { at: string; reason: string };
     pausedUntil?: string;
+    /** Per kind of read asked so far (comments, replies, explore, search, accounts, profile, posts): each has its own failure count and pause */
+    paths?: Record<string, { state: 'ok' | 'failing' | 'paused'; calls: number; ok: number; failed: number; lastFailure?: { at: string; reason: string }; pausedUntil?: string }>;
     /** The Python helper that opens connections the way Chrome does (server/scripts/tls-bridge.py, curl_cffi) */
     helper: { available?: boolean; running: boolean; python?: string; version?: string; requests: number; failed: number; starts: number; reason?: string; lastError?: { at: string; reason: string } };
   };
@@ -505,7 +507,7 @@ export interface VideoComment {
   time?: number;
   when?: string;
   likes?: number;
-  /** Replies under this comment (not fetched; the count tells the viewer there are some) */
+  /** Replies under this comment: the count; POST /api/comments/replies fetches them */
   replies?: number;
   /** The video's author wrote it */
   byAuthor?: boolean;
@@ -525,6 +527,28 @@ export interface CommentsResponse {
    * request, a request made from inside it, or its DOM.
    */
   how: 'guest' | 'page' | 'fetch' | 'dom';
+  warnings: string[];
+  elapsedMs: number;
+}
+
+/** POST /api/comments/replies: the replies under one comment (TikTok only) */
+export interface CommentRepliesRequest {
+  platform?: Platform;
+  /** The video's id and the comment's (VideoComment.id) */
+  id: string;
+  commentId: string;
+  /** Where the previous answer stopped (CommentRepliesResponse.cursor); 0 or absent = from the first reply */
+  cursor?: number;
+}
+
+export interface CommentRepliesResponse {
+  id: string;
+  commentId: string;
+  comments: VideoComment[];
+  cursor: number;
+  hasMore: boolean;
+  /** How many replies the comment has, as the source says */
+  total?: number;
   warnings: string[];
   elapsedMs: number;
 }

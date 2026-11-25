@@ -22,6 +22,7 @@ import type { CodecFamily, MediaFormat, ResolveResponse, ServerProbe } from '../
 import { config } from './config';
 import { newJar, openUpstream, readBody, resolveRedirect, jarHeader, type CookieJar } from './http';
 import { defaultExpiry, registerMedia } from './mediaStore';
+import { guestGet, guestUnusable } from './tiktokGuest';
 
 const TIKTOK_PAGE_HOSTS = ['www.tiktok.com', 'tiktok.com', 'm.tiktok.com', 'vm.tiktok.com', 'vt.tiktok.com'];
 
@@ -213,26 +214,47 @@ export async function resolveTikTokNative(inputUrl: string, opts: NativeResolveO
     parsed = parseTikTokUrl(target);
     if (!parsed.videoId) throw new TikTokError('Short link did not lead to a video page', 'short_link');
   }
-  const page = await fetchPage(parsed.pageUrl);
-  const scope = page.json.__DEFAULT_SCOPE__;
   let item: any;
-  if (scope) {
-    const detail = scope['webapp.video-detail'];
-    if (!detail) throw new TikTokError('Page JSON has no webapp.video-detail (login wall or unsupported post type?)', 'no_detail');
-    const code = Number(detail.statusCode ?? 0);
-    if (code !== 0) {
-      throw new TikTokError(`TikTok reports status ${code}: ${STATUS_MESSAGES[code] || detail.statusMsg || 'unavailable'}`, 'tiktok_status_' + code);
+  let cookieHeader = '';
+  let referer = parsed.pageUrl;
+  // First: TikTok's item/detail call as a guest over the Chrome-like connection (tiktokGuest.ts,
+  // about 0.3 s once a guest visit is open). The video's own page, below, is the fallback for
+  // anything that goes wrong there, a "no" from TikTok included.
+  if (parsed.videoId && !guestUnusable('video')) {
+    try {
+      const r = await guestGet({ kind: 'video', path: '/api/item/detail/', query: { itemId: parsed.videoId }, what: 'the video', usable: (j) => Boolean(j?.itemInfo?.itemStruct?.video), log: (m) => log(m) });
+      item = r.json.itemInfo.itemStruct;
+      cookieHeader = r.upstream.cookieHeader;
+      const handle = typeof item.author === 'object' ? item.author?.uniqueId : undefined;
+      referer = `https://www.tiktok.com/@${handle || '_'}/video/${item.id || parsed.videoId}`;
+      log('video details over the Chrome-like connection', { id: item.id, ms: r.ms, attempts: r.attempts });
+    } catch (e) {
+      if ((e as { cancelled?: boolean })?.cancelled) throw e;
+      item = undefined;
+      log(`video details over the Chrome-like connection failed (${(e as Error).message}); reading the video's page instead`);
     }
-    item = detail.itemInfo?.itemStruct;
-  } else if (page.json.ItemModule) {
-    // legacy SIGI_STATE layout
-    item = page.json.ItemModule[parsed.videoId || Object.keys(page.json.ItemModule)[0]];
+  }
+  if (!item) {
+    const page = await fetchPage(parsed.pageUrl);
+    const scope = page.json.__DEFAULT_SCOPE__;
+    if (scope) {
+      const detail = scope['webapp.video-detail'];
+      if (!detail) throw new TikTokError('Page JSON has no webapp.video-detail (login wall or unsupported post type?)', 'no_detail');
+      const code = Number(detail.statusCode ?? 0);
+      if (code !== 0) {
+        throw new TikTokError(`TikTok reports status ${code}: ${STATUS_MESSAGES[code] || detail.statusMsg || 'unavailable'}`, 'tiktok_status_' + code);
+      }
+      item = detail.itemInfo?.itemStruct;
+    } else if (page.json.ItemModule) {
+      // legacy SIGI_STATE layout
+      item = page.json.ItemModule[parsed.videoId || Object.keys(page.json.ItemModule)[0]];
+    }
+    cookieHeader = jarHeader(page.jar);
+    referer = page.finalUrl;
   }
   if (!item?.video) throw new TikTokError('No video item in page JSON', 'no_item');
   const video = item.video;
-  const cookieHeader = jarHeader(page.jar);
-  const referer = page.finalUrl;
-  if (!page.jar.cookies.has('tt_chain_token')) warnings.push('tt_chain_token cookie was not set by TikTok; cookie-bound URLs may fail');
+  if (!/(^|;\s*)tt_chain_token=/.test(cookieHeader)) warnings.push('tt_chain_token cookie was not set by TikTok; cookie-bound URLs may fail');
 
   const upstreamHeaders = { referer, cookie: cookieHeader };
   const formats: MediaFormat[] = [];
@@ -302,13 +324,13 @@ export async function resolveTikTokNative(inputUrl: string, opts: NativeResolveO
   formats.sort((a, b) => (a.codec === 'h264' ? -1 : 1) - (b.codec === 'h264' ? -1 : 1) || (b.bitrate || 0) - (a.bitrate || 0));
   if (!formats.length) throw new TikTokError('No playable formats found in page JSON', 'no_formats');
 
-  log('native resolve ok', { id: item.id, formats: formats.length, cookies: [...page.jar.cookies.keys()] });
+  log('native resolve ok', { id: item.id, formats: formats.length, cookies: cookieHeader.split(/;\s*/).map((c) => c.split('=')[0]).filter(Boolean) });
   return {
     source: 'tiktok',
     resolver: 'native',
     id: String(item.id || parsed.videoId),
     inputUrl,
-    canonicalUrl: page.finalUrl,
+    canonicalUrl: referer,
     title: item.desc,
     author: item.author?.uniqueId || item.author?.nickname || (typeof item.author === 'string' ? item.author : undefined),
     duration: video.duration,

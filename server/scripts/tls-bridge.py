@@ -18,6 +18,7 @@ so that the caller sees every hop's Set-Cookie.
 """
 import base64
 import json
+import os
 import sys
 
 DROP_REQUEST = {"host", "content-length", "connection", "accept-encoding"}
@@ -37,7 +38,8 @@ def main() -> int:
         out({"id": 0, "ok": False, "error": f"curl_cffi cannot be imported ({type(exc).__name__}: {exc})"})
         return 2
 
-    session = requests.Session(impersonate="chrome")
+    # "chrome" = the newest Chrome curl_cffi knows; TLS_BRIDGE_IMPERSONATE names another (e.g. chrome131)
+    session = requests.Session(impersonate=os.environ.get("TLS_BRIDGE_IMPERSONATE") or "chrome")
     out({"id": 0, "ok": True, "version": getattr(curl_cffi, "__version__", "?")})
 
     for line in sys.stdin:

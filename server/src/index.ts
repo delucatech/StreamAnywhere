@@ -5,7 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { EXPLORE_CATEGORIES, YOUTUBE_CATEGORIES, platformOf } from '../../shared/types';
-import type { AvatarRequest, AvatarResponse, CommentsRequest, Platform as PlatformId, ConversationRequest, DownloadProbeRequest, InboxCancelResponse, LibraryCategoryRequest, LibraryEntryPatch, LibrarySaveRequest, DownloadStartRequest, FeedItem, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ServerStatus, ProbeRequest, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SessionActionRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
+import type { AvatarRequest, AvatarResponse, CommentRepliesRequest, CommentsRequest, Platform as PlatformId, ConversationRequest, DownloadProbeRequest, InboxCancelResponse, LibraryCategoryRequest, LibraryEntryPatch, LibrarySaveRequest, DownloadStartRequest, FeedItem, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ServerStatus, ProbeRequest, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SessionActionRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
 import { registerAuth } from './auth';
 import { mirrorStats, registerMirror, shutdownMirror } from './mirror';
 import { config, findUp } from './config';
@@ -29,7 +29,7 @@ import { invalidateJobs, jobStats, sharedJob } from './jobs';
 import { getProgress } from './progress';
 import { registerActivity } from './activityRoutes';
 import { say } from './activity';
-import { cancelInboxReads, cancelReads, commentsDebug, conversation, fetchComments, fetchCommentsAsGuest, fetchProfile, followUser, inbox, inboxDebug, isCancelled, searchTikTok, sendMessage, SocialError } from './social';
+import { cancelInboxReads, cancelReads, commentsDebug, conversation, fetchCommentReplies, fetchComments, fetchCommentsAsGuest, fetchProfile, followUser, inbox, inboxDebug, isCancelled, searchTikTok, sendMessage, SocialError } from './social';
 import { channelVideos, exploreYouTube, isYouTubeUrl, recommendedYouTube, recommendedYouTubeTv, resolveYouTube, searchYouTube, setYouTubeRoomMaker, withYouTubeAvatars, youTubeCategory, YouTubeError, youtubeSlowLookups } from './youtube';
 import { avatarRefreshing, channelAvatar, loadAvatarStore, saveAvatarStore, youtubeAvatarStatus } from './youtubeAvatar';
 import { youtubePlayerStatus } from './youtubePlayer';
@@ -881,6 +881,18 @@ export async function buildServer() {
     try {
       const { id, author, cursor } = commentArgs(req.body);
       return await fetchComments(id, author, cursor, socialLog('comments'), untilGone(reply));
+    } catch (e) {
+      return socialFail(reply, e, t0);
+    }
+  });
+  // The replies under one comment (asked without a browser; the panel shows them under the comment).
+  app.post<{ Body: CommentRepliesRequest }>('/api/comments/replies', resolveLimit, async (req, reply) => {
+    const t0 = Date.now();
+    try {
+      const { id, cursor } = commentArgs({ platform: req.body?.platform, id: String(req.body?.id || ''), author: '_', cursor: req.body?.cursor });
+      const commentId = String(req.body?.commentId || '').trim();
+      if (!/^\d{5,30}$/.test(commentId)) throw new SocialError('That is not a TikTok comment id', 400);
+      return await fetchCommentReplies(id, commentId, cursor, socialLog('comments'), untilGone(reply));
     } catch (e) {
       return socialFail(reply, e, t0);
     }
