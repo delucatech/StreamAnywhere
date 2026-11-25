@@ -12,6 +12,7 @@ import { closeTlsBridge, tlsBridgeStatus } from '../tlsBridge';
 import { commentsFromAnswer, fetchCommentReplies, fetchProfileAsGuest, SocialError, userFromAccountPage } from '../social';
 import { fetchExploreAsGuest, parseExploreJson } from '../feed';
 import { resolveTikTokNative } from '../tiktok';
+import { cookieFields, summarizeKeys, urlFields } from '../tiktokWire';
 
 type Check = (name: string, cond: boolean, detail?: unknown) => void;
 
@@ -82,6 +83,16 @@ export async function tiktokGuestChecks(check: Check): Promise<void> {
     exploreWarnings,
   );
   check('an Explore answer already parsed gives the same feed items (the ad left out, a relay address for the cookie-bound file)', explore.items.length === 1 && explore.raw === 2 && explore.hasMore && explore.items[0].author.uniqueId === 'cats' && explore.items[0].formats[0].directKind === 'redirect' && /^\/api\/media\//.test(explore.items[0].formats[0].proxyUrl || ''), { items: explore.items.length, raw: explore.raw, f: explore.items[0]?.formats[0] });
+
+  // What the browser's own request carries is recorded as names and sizes (tiktokWire.ts).
+  const cookies = cookieFields('sessionid=0123456789abcdef; msToken=abc=def==; ttwid=1%7Cx; broken');
+  check('a Cookie header is kept as names and lengths, never values', cookies.length === 3 && cookies.every((c) => c.value === undefined) && cookies.find((c) => c.name === 'sessionid')?.len === 16 && cookies.find((c) => c.name === 'msToken')?.len === 9 && !JSON.stringify(cookies).includes('0123456789abcdef'), cookies);
+  const url = urlFields('https://www.tiktok.com/api/recommend/item_list/?aid=1988&count=6&device_id=7577000000000000001&msToken=secret-token&X-Bogus=1&X-Gnarly=' + 'g'.repeat(332));
+  const q = (n: string) => url.query.find((f) => f.name === n);
+  check('a request address: the path, fixed words shown, everything else as a length', url.path === 'www.tiktok.com/api/recommend/item_list/' && q('aid')?.value === '1988' && q('count')?.value === '6' && q('X-Bogus')?.value === '1' && q('device_id')?.value === undefined && q('device_id')?.len === 19 && q('msToken')?.value === undefined && q('X-Gnarly')?.len === 332 && !JSON.stringify(url).includes('secret-token'), url.query);
+  const keyShapes = { indexedDB: [{ name: 'guard', stores: [{ name: 'keys', records: [{ key: 'current', value: { privateKey: { cryptoKey: true, type: 'private', extractable: false, algorithm: { name: 'ECDSA', namedCurve: 'P-256' }, usages: ['sign'] }, publicKey: { cryptoKey: true, type: 'public', extractable: true, algorithm: { name: 'ECDSA' }, usages: ['verify'] }, pem: 'string(120)' } }] }] }] };
+  const ks = summarizeKeys(keyShapes);
+  check('stored key objects are counted, and the ones that cannot leave the browser', ks.keys === 2 && ks.lockedKeys === 1 && /private key, ECDSA.*CANNOT be exported/.test(ks.where[0]) && summarizeKeys({ indexedDB: [{ name: 'x', stores: [{ name: 'y', records: [{ key: 'k', value: { a: 'string(3)' } }] }] }] }).keys === 0 && summarizeKeys(undefined).keys === 0, ks);
 
   resetTikTokGuest();
   check('each kind of read has its own pause: nothing is paused before a failure, whatever the kind', guestUnusable('comments') === guestUnusable('explore') && guestUnusable('profile') === guestUnusable('video'));

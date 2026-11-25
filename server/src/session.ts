@@ -33,6 +33,7 @@ import { exploreApiUrl, FeedError, isTikTokAd, itemToFeedItem, parseExploreBody,
 import { rememberBatch, staleBatch } from './lastBatch';
 import { getProgress } from './progress';
 import { say } from './activity';
+import { READ_STORAGE_SHAPES, summarizeKeys, watchWire, wireRecords, type WireRecord } from './tiktokWire';
 
 type Browser = import('puppeteer-core').Browser;
 type Page = import('puppeteer-core').Page;
@@ -1935,6 +1936,8 @@ async function openFeedPage(): Promise<Page> {
       })
       .catch(() => undefined);
   });
+  // Listens to what this page sends by itself (names and sizes only; tiktokWire.ts). Changes nothing on the page.
+  await watchWire(page, feedLog);
   s.feedPage = page;
   feedLog?.('headless feed page: opening ' + FEED_URL);
   await page.goto(FEED_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 });
@@ -1942,6 +1945,30 @@ async function openFeedPage(): Promise<Page> {
   const cookies = await page.cookies('https://www.tiktok.com');
   s.feedCookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
   return page;
+}
+
+/**
+ * GET /api/session/wire: what the For You page's own requests carried (tiktokWire.ts) and, with
+ * `storage`, the names and shapes of what that page keeps - read from the page the server already
+ * has open; this never opens the browser and never makes a request to TikTok.
+ */
+export async function wireReport(storage: boolean): Promise<{ signedIn: boolean; feedPageOpen: boolean; records: WireRecord[]; note?: string; error?: string; storage?: unknown; keys?: { keys: number; lockedKeys: number; where: string[] } }> {
+  const page = s.feedPage && !s.feedPage.isClosed() ? s.feedPage : undefined;
+  const { records, error } = wireRecords();
+  const out: Awaited<ReturnType<typeof wireReport>> = { signedIn: isLoggedIn(), feedPageOpen: Boolean(page), records, error };
+  if (!records.length) out.note = page ? 'The For You page is open but has not asked for videos since the server started listening: scroll the feed and ask again.' : 'Nothing recorded yet: open the For You feed (signed in), then ask again.';
+  if (storage) {
+    if (!page) out.note = (out.note ? out.note + ' ' : '') + 'The storage can only be read while the For You page is open.';
+    else {
+      try {
+        out.storage = await page.evaluate(READ_STORAGE_SHAPES);
+        out.keys = summarizeKeys(out.storage);
+      } catch (e) {
+        out.error = `storage could not be read (${(e as Error).message.split(/\r?\n/)[0]})`;
+      }
+    }
+  }
+  return out;
 }
 
 /**

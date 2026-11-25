@@ -143,6 +143,7 @@ server/   Fastify 4 + TypeScript (Node 16 compatible)
   src/tiktokGuest.ts              TikTok asked as a signed-out visitor without a browser: the guest visit, signed calls and pages, a pause per kind of read when TikTok stops answering
   src/tiktokSign.ts               the request signature TikTok's page script adds (X-Dynosaur / X-Gnarly), in plain TypeScript (third-party, MIT)
   src/tlsBridge.ts                HTTPS with Chrome's TLS handshake through a warm Python helper (scripts/tls-bridge.py, curl_cffi)
+  src/tiktokWire.ts               what the signed-in For You page's own requests carry, names and sizes only (GET /api/session/wire)
   src/reservoir.ts / lastBatch.ts a feed's stock, filled in the background; the stock and the last batch kept on disk
   src/jobs.ts                     shared jobs: work that outlives its request, answers kept for the retry
   src/homeTopUps.ts / pressure.ts the home screen's top-ups, one at a time; how starved the machine is (memory, swap, load, late timers)
@@ -515,6 +516,14 @@ How it works:
   feed), related videos, hashtag details and search suggestions.
 - **Not tried**: signing with the signed-in TikTok session (a For You without the browser). It
   would put the account behind an imitated signature; it needs the owner's say-so first.
+- **Looking before trying** ([`server/src/tiktokWire.ts`](server/src/tiktokWire.ts), built
+  2026-11-25): whether that is possible at all can be read off the signed-in browser without
+  sending TikTok anything. The server listens to what its own For You page sends by itself and
+  keeps, for the last six such requests, the names and sizes of the parameters, headers and
+  cookies (values only for version numbers and fixed words); `GET /api/session/wire` (site
+  password) shows them, and `?storage=1` adds the names and shapes of what the page keeps in its
+  storage - a key object is reported with its type, uses and whether it can be exported. A proof
+  made with a key that cannot leave the browser would close the question.
 
 **Explore** is three paths. Since 2026-11-25 the request goes over the Chrome-like connection
 first (`fetchExploreAsGuest` in `server/src/feed.ts`, see the section above): the same unsigned

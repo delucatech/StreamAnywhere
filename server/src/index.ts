@@ -22,7 +22,7 @@ import { logStream, recentLog } from './logbuf';
 import { defaultExpiry, mediaCount, registerMedia } from './mediaStore';
 import { hostAllowed } from './ssrf';
 import { EXPLORE_DEFAULT_CATEGORY, FeedError, fetchExploreFeed, normalizeExploreOptions, type ExploreResult } from './feed';
-import { cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouCheap, forYouPutBack, forYouQuick, forYouStock, forYouWantsWarm, forYouWarm, headlessRunning, logout, parkHeadlessBrowser, rememberLog, workState, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
+import { wireReport, cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouCheap, forYouPutBack, forYouQuick, forYouStock, forYouWantsWarm, forYouWarm, headlessRunning, logout, parkHeadlessBrowser, rememberLog, workState, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
 import { Reservoir, type ReservoirStats } from './reservoir';
 import { hasBatch, reviveItems, slimItems } from './lastBatch';
 import { invalidateJobs, jobStats, sharedJob } from './jobs';
@@ -964,6 +964,9 @@ export async function buildServer() {
     // recheck=1 is the panel's "Check again": a deliberate check of saved Instagram cookies goes past the probe pacing.
     return platform === 'youtube' ? youtubeSessionStatus() : platform === 'instagram' ? instagramSessionStatus(req.query.recheck === '1') : platform === 'facebook' ? facebookSessionStatus(req.query.recheck === '1') : sessionProbe();
   });
+  // What the signed-in For You page sends by itself (names and sizes, never values) and, with ?storage=1, the shapes of
+  // what it keeps: does the page prove a key that cannot leave the browser? Looks only; opens nothing, asks TikTok nothing.
+  app.get<{ Querystring: { storage?: string } }>('/api/session/wire', async (req) => wireReport(req.query.storage === '1'));
   // The last sign-in log lines (what the server did on TikTok's page / with the YouTube cookies), for diagnosing without a shell.
   app.get<{ Querystring: { platform?: string } }>('/api/session/log', async (req) => {
     const platform = platformOf(req.query.platform);
