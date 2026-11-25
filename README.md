@@ -469,10 +469,15 @@ TikTok sign-in). Now the server asks TikTok itself, as a signed-out visitor, in 
 - **Needs** Python 3 with `curl_cffi` (`pip install curl_cffi`; `TIKTOK_TLS_PYTHON` names the
   interpreter). The GCP script installs it in its own venv (`/opt/tiktoktls`, so it cannot disturb
   yt-dlp's). Without it, or with `TIKTOK_GUEST=0`, comments work as before through the browser.
-- **Measured** (2026-11-25): first open 2.5 s on the PC (helper start 0.7 s, guest visit 1.5 s),
-  further pages 0.3-0.6 s; on the VM a page took 0.7-1.2 s with a new Python process per request
-  (the probe, `research/tiktok_signer_probe.ts`). The same calls also answered replies, the
-  signed-out For You list and a profile's videos; none of those is wired in.
+- **Measured** (2026-11-25). PC: first open 2.5-4 s (helper start 0.7 s, guest visit 1.5-2.9 s),
+  further pages 0.3-0.6 s. The VM after the deploy, 10 requests, all answered, no retries: the
+  first one 4.6 s (helper start 1.0 s, guest visit 2.4 s), then 0.4-0.8 s on the server and about
+  1 s in the panel (once 3.8 s, while the For You browser was loading the feed). The headless
+  browser is not started for comments. The same kind of call also answered replies, the signed-out
+  For You list, a profile's videos and the Explore list from the VM (the probe,
+  `research/tiktok_signer_probe.ts`); none of those is wired in.
+- **Not tried**: signing with the signed-in TikTok session (a For You without the browser). It
+  would put the account behind an imitated signature; it needs the owner's say-so first.
 
 **Explore** is two paths. The plain HTTPS request (`server/src/feed.ts`: a cookie jar from one
 visit to `/explore`, reused 30 minutes; four tries) comes first. When TikTok refuses it (from the
