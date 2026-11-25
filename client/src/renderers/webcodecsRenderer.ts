@@ -219,7 +219,11 @@ export class WebCodecsRenderer implements Renderer {
         onVideoSamples: () => undefined,
         onAudioSamples,
         onProgress: () => undefined,
-        onEnd: () => undefined,
+        onEnd: () => {
+          if (gen !== this.generation) return;
+          this.audioFileEnded = true;
+          this.pump();
+        },
         onError: (err) => {
           if (gen !== this.generation) return;
           // Sound is optional: the picture plays on a wall clock without it.
@@ -542,7 +546,20 @@ export class WebCodecsRenderer implements Renderer {
         this.flushing = false;
       };
       vd.flush().then(done, done);
-      if (ad && ad.state === 'configured' && !this.audioSamples.length) ad.flush().catch(() => undefined);
+    }
+    // The sound's own end of stream: its last chunks are handed over later than the picture's (they
+    // follow the clock, AUDIO_AHEAD_US before it). Once the file is read, every chunk is with the
+    // decoder and the decoder has given everything back, no sound is still to come (audioPending).
+    const soundRead = this.audioDemuxer ? this.audioFileEnded : this.demuxEnded;
+    if (ad && ad.state === 'configured' && soundRead && !this.audioSamples.length && !this.audioDraining && !this.audioEos) {
+      this.audioDraining = true;
+      const drain = this.audioDrains;
+      const drained = () => {
+        if (drain !== this.audioDrains) return; // a seek or another file since
+        this.audioDraining = false;
+        this.audioEos = true;
+      };
+      ad.flush().then(drained, drained);
     }
     this.applyBackpressure();
   }
@@ -585,6 +602,7 @@ export class WebCodecsRenderer implements Renderer {
     this.videoEos = false;
     this.flushing = false;
     this.demuxEnded = false;
+    this.resetAudioEnd();
     this.pendingSeekUs = targetUs;
     this.lastRenderedUs = targetUs;
     this.audio?.reset();
@@ -709,6 +727,7 @@ export class WebCodecsRenderer implements Renderer {
     this.demuxEnded = false;
     this.videoEos = false;
     this.flushing = false;
+    this.resetAudioEnd();
     this.pendingSeekUs = undefined;
     this.lastRenderedUs = 0;
     this.lastVideoSampleUs = 0;
@@ -905,17 +924,38 @@ export class WebCodecsRenderer implements Renderer {
       void this.clock.pause();
       this.pump();
     }
-    if (this._state === 'buffering' && this.wantPlay && this.frames.length >= MIN_START_FRAMES && this.audioReady(now)) {
+    // (videoEos: the last frames of the file are all that will ever come - a wait that began there,
+    // "sound ran dry" a few frames before the end, used to stay "buffering" for good: the video
+    // never ended, so it neither repeated nor let the feed move on)
+    if (this._state === 'buffering' && this.wantPlay && (this.frames.length >= MIN_START_FRAMES || this.videoEos) && this.audioReady(now)) {
       void this.clock.resume().then(() => this.setState('playing'));
     }
     this.audioWatch(performance.now());
   }
 
   private audioWaits = 0;
+  /** The sound file (when the sound comes as a second file) has been read to its end */
+  private audioFileEnded = false;
+  /** The sound decoder is giving back the last of a finished file / has done so (see pump) */
+  private audioDraining = false;
+  private audioEos = false;
+  /** Counts seeks and loads: a drain that began before one of them says nothing about the sound after it */
+  private audioDrains = 0;
+  private resetAudioEnd(): void {
+    this.audioFileEnded = false;
+    this.audioDraining = false;
+    this.audioEos = false;
+    this.audioDrains++;
+  }
   /** performance.now() of the last chunk handed to the sound decoder: sound is still expected for a while after it */
   private lastAudioSubmitAt = 0;
   /** Sound still to come: chunks queued, with the decoder, or handed to it a moment ago (its answer can lag by seconds) */
   private audioPending(): boolean {
+    // A finished file whose decoder has given everything back: nothing more is coming. (Without
+    // this the last 0.15 s of every video counted as "sound about to run out with more to come"
+    // for 8 s after the last chunk was handed over, which is 6 s before the end: a wait of about
+    // two seconds right before the end of each video, and of 8 s after a seek near the end.)
+    if (this.audioEos) return false;
     return this.audioSamples.length > 0 || (this.audioDecoder?.decodeQueueSize || 0) > 0 || performance.now() - this.lastAudioSubmitAt < 8000;
   }
   /** The sound drives the clock and what is on its timeline is about to run out, with more still to come from the decoder */

@@ -1597,7 +1597,170 @@ button {
   display: none;
 }
 
-/* comments */
+/* ---------- comments: a sheet that slides up over the video ---------- */
+/* The layer covers the page and is see-through: the video goes on above the sheet, and a tap
+   anywhere beside the sheet lands on the layer (social.ts closes the sheet with it), never on the
+   video or the buttons under it. Toasts and the status line stay above it. */
+.sheet-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  overflow: hidden;
+  touch-action: none;
+}
+/* The box the sheet moves in: the screen on phones; on wide screens the video's card (class `card`,
+   with left / top / width / height from social.ts). Its top padding is the strip of video that
+   stays in view when the sheet is pulled all the way up. Taps on the frame go to the layer. */
+.sheet-frame {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-end;
+  padding-top: calc(var(--safe-t) + 56px);
+  overflow: hidden;
+  pointer-events: none;
+}
+.sheet-frame.card {
+  inset: auto;
+  border-radius: 22px; /* the card's (.wide .item) */
+}
+.app.fullwindow .sheet-frame.card {
+  border-radius: 0;
+}
+/* The sheet: social.ts sets its height (the resting one, more while it is pulled up) and moves it
+   with a transform (below the resting height it slides out of the frame). */
+.sheet {
+  pointer-events: auto;
+  flex: 0 0 auto;
+  width: 100%;
+  height: 66%;
+  display: flex;
+  flex-direction: column;
+  background: rgba(17, 19, 25, 0.97);
+  border-radius: 18px 18px 0 0;
+  box-shadow:
+    0 -1px 0 rgba(255, 255, 255, 0.08),
+    0 -14px 40px rgba(0, 0, 0, 0.55);
+  transform: translate3d(0, 100%, 0);
+  will-change: transform;
+}
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .sheet {
+    background: rgba(17, 19, 25, 0.88);
+    backdrop-filter: blur(24px) saturate(1.2);
+    -webkit-backdrop-filter: blur(24px) saturate(1.2);
+  }
+}
+/* sliding to a position (open, tall, closed, back after a short drag); off while a finger holds it.
+   social.ts SHEET_MS is the same 0.34 s. */
+.sheet.settling {
+  transition:
+    transform 0.34s cubic-bezier(0.32, 0.72, 0, 1),
+    height 0.34s cubic-bezier(0.32, 0.72, 0, 1);
+}
+/* the grab area: the handle and the header (drag down: close, up: taller) */
+.sheet-grab {
+  flex: 0 0 auto;
+  padding-top: 8px;
+  touch-action: none;
+  cursor: grab;
+}
+.sheet-grab.dragging {
+  cursor: grabbing;
+}
+.sheet-handle {
+  width: 38px;
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.3);
+  margin: 0 auto;
+}
+.sheet-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 2px 10px 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+.sheet-title {
+  font-weight: 700;
+  font-size: 15px;
+  text-align: center;
+  white-space: nowrap;
+}
+.sheet-side {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.sheet-side.end {
+  justify-content: flex-end;
+}
+.sheet-text-btn {
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  min-height: 40px;
+  padding: 8px;
+  cursor: pointer;
+}
+.sheet-text-btn:active {
+  color: var(--text);
+}
+.sheet-close {
+  width: 40px;
+  height: 40px;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--text);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+.sheet-close svg {
+  width: 30px;
+  height: 30px;
+  padding: 7px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.1);
+}
+.sheet-close:active svg {
+  background: rgba(255, 255, 255, 0.2);
+}
+.sheet-text-btn:focus-visible,
+.sheet-close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+/* the comments scroll here, by themselves: the feed under the sheet never moves with them */
+.sheet-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 8px 8px calc(var(--safe-b) + 18px);
+}
+.sheet-body .panel-status {
+  padding: 6px 8px 0;
+}
+.sheet-more {
+  align-self: center;
+}
+@media (prefers-reduced-motion: reduce) {
+  .sheet.settling {
+    transition-duration: 0.01s;
+  }
+}
 .comment-list {
   display: flex;
   flex-direction: column;

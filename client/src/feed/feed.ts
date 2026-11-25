@@ -19,6 +19,9 @@
  *  - Search (top bar) and account profiles (social.ts) hand the feed a play list: search results
  *    or an account's videos then play in place of the source, with a pill to go back. The video
  *    pauses while any panel (search, profile, inbox, sign-in) covers the feed and resumes on close.
+ *  - Comments (the bubble / C): a sheet over the lower two thirds of the video (social.ts). The
+ *    video goes on, or stays paused, above it; while it is on screen the feed does not move on by
+ *    itself (holdForComments): the video repeats, and the auto-scroll choice is left as it is.
  *  - Save (D): a choice between the Video Library and a file on this device. "Save to library"
  *    adds the video's link and details to the shared library (library.html: the server keeps the
  *    link, title, author, cover and length, as "Save link" does there, never the video) and keeps
@@ -53,7 +56,7 @@ import * as libdl from '../library/downloads';
 import { currentPlatform, PLATFORMS, rememberApp, type PlatformDef } from '../platforms';
 import { fileKey, getCached, itemKey, MAX_AGE as CACHE_MAX_AGE, overBudget, putCached, sweep, type CacheRole } from './mediaCache';
 import { FeedPlayer, feedPlayerMode } from './player';
-import { closeTopPanel, initSocial, openComments, openInbox, openProfile, openSearch, panelOpen, reopenPlayList, type PlayList } from './social';
+import { closeComments, closeTopPanel, commentsOpen, initSocial, openComments, openInbox, openProfile, openSearch, panelOpen, reopenPlayList, type PlayList } from './social';
 
 // feed.html's failsafe reports whether this script ran at all
 (window as unknown as { streamAnywhereStarted: boolean }).streamAnywhereStarted = true;
@@ -458,6 +461,7 @@ function backToPanel(): void {
 }
 window.addEventListener('popstate', () => {
   if (state.mode.kind === 'source') return;
+  closeComments(true); // Back from a playing list with the comments open: the panel comes back, not over them
   if (panelOpen()) closeTopPanel();
   else reopenPlayList(state.mode);
 });
@@ -604,6 +608,16 @@ initSocial({
   fmtCount,
   platform: P,
   onPanelsChange: syncOverlayPause,
+  onCommentsHold: holdForComments,
+  // Wide screens: the comments sheet goes over the video's own card (its place at rest: the track
+  // may still be sliding to it). Phones: the sheet takes the screen.
+  videoCard: () => {
+    const root = activeEntry()?.root;
+    if (!root || !el.app.classList.contains('wide')) return undefined;
+    const card = root.getBoundingClientRect();
+    if (card.width <= 0) return undefined;
+    return { left: card.left, top: el.feed.getBoundingClientRect().top + padTop, width: card.width, height: itemH };
+  },
   onPanelClosed: (kind) => {
     // a tap on a tile closes the panel and then starts its list (host.play): only a close that
     // leaves the mode as it was means the viewer is done with the list
@@ -842,10 +856,42 @@ function syncActionButtons(): void {
 el.actDownloadIco.innerHTML = ICON.save;
 syncActionButtons();
 
+// ---------- the comments sheet holds the feed on its video ----------
+// While the sheet is on screen (from the moment it starts to open until it has slid away, see
+// social.ts) nothing moves on by itself: the video in view repeats instead of ending, a video that
+// cannot play is not skipped, and an advance that was already on its way when the sheet opened (the
+// skip timer of a failed video, "the next batch, and on to it") is dropped, so closing the sheet
+// leaves the viewer on the same video. The auto-scroll choice itself (prefs.autoscroll) is never
+// touched: once the sheet is gone the video in view ends as usual and the next one follows, or it
+// loops, as chosen.
+let commentsHold = false;
+/** Counts the times pending advances were dropped: a skip timer set before one of them does nothing. */
+let advanceEpoch = 0;
+/** A video repeats when auto-scroll is off - and, whatever the choice, while the comments are open. */
+const loopNow = (): boolean => !prefs.autoscroll || commentsHold;
+function holdForComments(held: boolean): void {
+  if (held === commentsHold) return;
+  commentsHold = held;
+  for (const e of state.entries) if (e.player) e.player.loop = loopNow();
+  if (!held) return;
+  advanceEpoch++;
+  state.wantNext = false;
+  // A video that had already ended (auto-scroll on, the next one still on its way) plays again
+  // rather than sit at its end: with the advance dropped, nothing else would ever move it.
+  const cur = activeEntry();
+  if (cur?.player?.state === 'ended' && state.started && !state.userPaused && !document.hidden && !overlayOpen()) void playEntry(cur);
+}
+/** With auto-scroll on, a video that cannot play is passed after a moment (not while the comments are open, nor once they have been). */
+function skipSoon(entry: Entry): void {
+  if (activeEntry() !== entry || !prefs.autoscroll || commentsHold) return;
+  const epoch = advanceEpoch;
+  window.setTimeout(() => epoch === advanceEpoch && !commentsHold && activeEntry() === entry && goTo(state.active + 1), 1500);
+}
+
 function toggleAutoscroll(): void {
   prefs.autoscroll = !prefs.autoscroll;
   savePrefs();
-  for (const e of state.entries) if (e.player) e.player.loop = !prefs.autoscroll;
+  for (const e of state.entries) if (e.player) e.player.loop = loopNow();
   syncActionButtons();
   toast(prefs.autoscroll ? 'Auto-scroll on: next video plays when this one ends' : 'Auto-scroll off: videos loop');
 }
@@ -1725,6 +1771,7 @@ async function reload(preloaded?: FeedItem[], startIndex = 0): Promise<void> {
   // a new feed (another tab / category, a sign-in, a play list): the saved one no longer applies
   if (!preloaded) clearResume();
   restoredSource = undefined;
+  closeComments(true); // the video they belong to goes with the old feed
   state.generation++;
   clearTimeout(state.retryTimer);
   for (const e of state.entries) releasePlayer(e);
@@ -2002,7 +2049,7 @@ async function loadMore(): Promise<number> {
   }
   if (added && state.wantNext) {
     state.wantNext = false;
-    goTo(state.active + 1);
+    if (!commentsHold) goTo(state.active + 1); // (the comments are open: the viewer stays on this video)
   }
   if (added && before) flashAdded(added);
   if (added) saveResume();
@@ -2196,6 +2243,12 @@ function ensurePlayer(entry: Entry): FeedPlayer {
     },
     onEnded: () => {
       if (activeEntry() !== entry) return;
+      if (commentsHold) {
+        // the comments are open: the video stays and plays again (it loops meanwhile, see
+        // holdForComments; this is the end that was reached just as they opened)
+        if (!state.userPaused && !document.hidden && !overlayOpen()) void playEntry(entry);
+        return;
+      }
       if (prefs.autoscroll) goTo(state.active + 1);
     },
     onError: (e) => onPlayerError(entry, e),
@@ -2217,7 +2270,7 @@ function ensurePlayer(entry: Entry): FeedPlayer {
       }
     },
   });
-  player.loop = !prefs.autoscroll;
+  player.loop = loopNow();
   player.setMuted(prefs.muted);
   player.setRate(speed);
   entry.player = player;
@@ -2355,7 +2408,7 @@ function onPlayerError(entry: Entry, e: Error): void {
   entry.err.classList.remove('hidden');
   syncWait();
   reportProblem('player', `${entry.item.id}: ${detail}`, { url: entry.src?.url, connection: entry.src?.kind });
-  if (activeEntry() === entry && prefs.autoscroll) window.setTimeout(() => activeEntry() === entry && goTo(state.active + 1), 1500);
+  skipSoon(entry);
 }
 
 /**
@@ -2432,7 +2485,7 @@ function ensureFormats(entry: Entry): Promise<boolean> {
         entry.err.classList.remove('hidden');
         syncWait();
         reportProblem('resolve', `${entry.item.id}: ${errMsg(e)}`, { url: entry.item.canonicalUrl });
-        if (activeEntry() === entry && prefs.autoscroll) window.setTimeout(() => activeEntry() === entry && goTo(state.active + 1), 1500);
+        skipSoon(entry);
         return false;
       });
   }
@@ -2444,7 +2497,7 @@ async function playEntry(entry: Entry): Promise<void> {
   if (!(await ensureFormats(entry)) || activeEntry() !== entry) return;
   if (!attachSource(entry)) return;
   const p = entry.player!;
-  p.loop = !prefs.autoscroll;
+  p.loop = loopNow();
   p.setMuted(prefs.muted);
   try {
     await p.play();
@@ -2621,6 +2674,7 @@ function setActive(idx: number): void {
   if (idx < 0 || idx >= state.entries.length) return;
   const prev = activeEntry();
   if (prev && prev !== state.entries[idx]) {
+    closeComments(true); // (nothing moves the feed while they are open; if something does, they are the other video's)
     prev.player?.pause();
     prev.root.classList.remove('paused', 'active');
     // back to its first frame once it has slid out of view (not while it is still on screen)
@@ -3112,6 +3166,17 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   const cur = activeEntry();
+  if (commentsOpen()) {
+    // The comments sheet is over the video: Escape / C close it, Space and M still act on the
+    // video above it; the keys that move the feed or open something else wait until it is closed.
+    if (e.key === 'Escape' || e.key === 'c' || e.key === 'C') closeComments();
+    else if (e.key === ' ') {
+      e.preventDefault();
+      if (cur) togglePause(cur);
+    } else if (e.key === 'm' || e.key === 'M') toggleMute();
+    else if (['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp'].includes(e.key)) e.preventDefault();
+    return;
+  }
   switch (e.key) {
     case '/':
       e.preventDefault();

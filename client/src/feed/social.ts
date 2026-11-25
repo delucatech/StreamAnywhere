@@ -27,6 +27,17 @@ export interface SocialHost {
   fmtCount(n?: number): string;
   /** Called when the first panel opens (true) and when the last one closes (false): the feed pauses behind a panel. */
   onPanelsChange(open: boolean): void;
+  /**
+   * The comments sheet is on screen: true the moment it starts to open, false once it has slid
+   * away. The video goes on as it was above the sheet (it is not a panel: nothing pauses), and
+   * meanwhile the feed must not move to another video by itself.
+   */
+  onCommentsHold(held: boolean): void;
+  /**
+   * Where the video in view is on the page, when the comments sheet belongs over that video alone
+   * (wide screens: the video is a card in the middle); undefined when the sheet takes the screen (phones).
+   */
+  videoCard?(): { left: number; top: number; width: number; height: number } | undefined;
   /** Which platform the panels search and browse (follow: TikTok and Instagram; messages and comments: TikTok only) */
   platform: PlatformDef;
   /** The signed-in account's follow state of an account became known (a profile opened, a follow pressed) */
@@ -76,6 +87,10 @@ const el = {
   inboxRefresh: $<HTMLButtonElement>('inboxRefresh'),
   inboxCancel: $<HTMLButtonElement>('inboxCancel'),
   comments: $('comments'),
+  commentsFrame: $('commentsFrame'),
+  commentsSheet: $('commentsSheet'),
+  commentsGrab: $('commentsGrab'),
+  commentsBody: $('commentsBody'),
   commentsClose: $<HTMLButtonElement>('commentsClose'),
   commentsTitle: $('commentsTitle'),
   commentsRefresh: $<HTMLButtonElement>('commentsRefresh'),
@@ -118,7 +133,6 @@ function hide(panel: HTMLElement): void {
   if (panel === el.profile) host.onPanelClosed?.('profile');
   else if (panel === el.search) host.onPanelClosed?.('search');
   else if (panel === el.inbox) cancelInboxRead(); // nobody waits for the messages any more: the server stops reading them
-  else if (panel === el.comments) cancelCommentsRead();
 }
 /** Closes the panel on top; false when none is open. */
 export function closeTopPanel(): boolean {
@@ -931,7 +945,10 @@ el.inboxForm.addEventListener('submit', (e) => {
  * a browser (about a second, no TikTok sign-in needed); when TikTok does not answer that, it reads
  * them from its signed-in TikTok page, which takes a while. So, like the inbox, the read shows
  * Cancel and is stopped (here and on the server, POST /api/comments/cancel) by Cancel, closing the
- * panel, or a new read.
+ * sheet, or a new read.
+ *
+ * They show in a sheet that slides up over the lower two thirds of the video (see "the sheet" below);
+ * it is not one of the panels above: the video is neither paused nor covered.
  */
 const comments = { item: undefined as FeedItem | undefined, list: [] as VideoComment[], cursor: 0, hasMore: false, total: undefined as number | undefined, ctl: undefined as AbortController | undefined, seq: 0 };
 
@@ -1110,7 +1127,222 @@ async function loadComments(more: boolean): Promise<void> {
   }
 }
 
-/** Opens the comments panel for `item` (the video in view); a different video starts a fresh read. */
+// ---- the sheet
+// It slides up from the bottom of its frame (the screen on phones, the video's card on wide screens)
+// to SHEET_SHARE of it, so the video stays in view above. The grab area (handle + header) drags it:
+// down to close, up to the tall position (the frame less a strip of video at the top). A tap beside
+// the sheet, the close button and Escape / C (feed.ts) close it too. From the moment it starts to
+// open until it has slid away the host holds the feed on this video (SocialHost.onCommentsHold).
+// The slide is a CSS transition; its end is a timer here, so a page that renders nothing (a hidden
+// tab) still ends up open or closed.
+/** How long the sheet takes to slide to a position (feed.css .sheet.settling uses the same) */
+const SHEET_MS = 340;
+/** The share of its frame the sheet covers when it opens */
+const SHEET_SHARE = 0.66;
+/** A release faster than this (px per ms) is a flick: the sheet goes one position on in that direction */
+const SHEET_FLICK = 0.5;
+interface SheetDrag {
+  id: number;
+  y0: number;
+  /** The sheet's height in view when it was grabbed */
+  h0: number;
+  moved: boolean;
+  /** The last moves, for the release speed */
+  samples: { y: number; t: number }[];
+}
+const sheet = {
+  state: 'closed' as 'closed' | 'opening' | 'open' | 'closing',
+  /** Pulled up to the tall position */
+  tall: false,
+  timer: 0,
+  /** px: the height it opens to, and the tall one */
+  rest: 0,
+  max: 0,
+  /** px of the sheet in view right now (0 = out of view) */
+  shown: 0,
+  drag: undefined as SheetDrag | undefined,
+};
+
+/** Places the frame (over the video's card, or the whole screen) and works out the two heights. */
+function sheetMeasure(): void {
+  const f = el.commentsFrame;
+  const card = host.videoCard?.();
+  f.classList.toggle('card', !!card);
+  if (card) {
+    const o = el.comments.getBoundingClientRect();
+    f.style.left = `${Math.round(card.left - o.left)}px`;
+    f.style.top = `${Math.round(card.top - o.top)}px`;
+    f.style.width = `${Math.round(card.width)}px`;
+    f.style.height = `${Math.round(card.height)}px`;
+  } else f.style.left = f.style.top = f.style.width = f.style.height = '';
+  // the frame's top padding is the strip of video the tall sheet leaves
+  const room = f.clientHeight - (parseFloat(getComputedStyle(f).paddingTop) || 0);
+  sheet.max = Math.max(160, Math.round(room));
+  sheet.rest = Math.min(sheet.max, Math.max(160, Math.round(f.clientHeight * SHEET_SHARE)));
+}
+/** Shows `h` px of the sheet: up to the resting height it slides, above it it grows. */
+function sheetPlace(h: number, animate: boolean): void {
+  const s = el.commentsSheet;
+  h = Math.max(0, Math.min(sheet.max, h));
+  sheet.shown = h;
+  s.classList.toggle('settling', animate);
+  s.style.height = `${Math.max(sheet.rest, h)}px`;
+  s.style.transform = `translate3d(0, ${Math.max(0, sheet.rest - h)}px, 0)`;
+}
+/** Slides the sheet to one of its positions and calls `then` when it is there. */
+function sheetSettle(h: number, then?: () => void): void {
+  clearTimeout(sheet.timer);
+  sheetPlace(h, true);
+  sheet.timer = window.setTimeout(() => {
+    sheet.timer = 0;
+    el.commentsSheet.classList.remove('settling');
+    then?.();
+  }, SHEET_MS);
+}
+function sheetOpen(): void {
+  if (sheet.state === 'open' || sheet.state === 'opening') return;
+  if (sheet.state === 'closed') {
+    host.onCommentsHold(true); // before anything moves: a video that is about to end stays
+    el.comments.classList.remove('hidden');
+    sheet.tall = false;
+    sheetMeasure();
+    sheetPlace(0, false);
+    void el.commentsSheet.offsetHeight; // the sheet is rendered below the edge before it slides up
+  }
+  // (still sliding away: it turns round from where it is; the hold was never let go)
+  sheet.state = 'opening';
+  sheetSettle(sheet.rest, () => (sheet.state = 'open'));
+}
+/**
+ * Slides the sheet away (`instant`: takes it away at once - the video it belongs to is gone). The
+ * read in flight stops now; the feed is let go only when the sheet has left, so nothing that a tap
+ * or the end of the video asked for meanwhile moves the feed.
+ */
+export function closeComments(instant = false): void {
+  if (sheet.state === 'closed' || (sheet.state === 'closing' && !instant)) return;
+  sheet.drag = undefined;
+  el.commentsGrab.classList.remove('dragging');
+  cancelCommentsRead();
+  const gone = (): void => {
+    sheet.state = 'closed';
+    el.comments.classList.add('hidden');
+    host.onCommentsHold(false);
+  };
+  sheet.state = 'closing';
+  if (instant) {
+    clearTimeout(sheet.timer);
+    sheet.timer = 0;
+    gone();
+  } else sheetSettle(0, gone);
+}
+/** The comments sheet is on screen (opening and sliding away included). */
+export const commentsOpen = (): boolean => sheet.state !== 'closed';
+
+// The grab area follows the finger / mouse; the buttons in it keep their own taps.
+el.commentsGrab.addEventListener('pointerdown', (e) => {
+  if (sheet.drag || !e.isPrimary || (e.pointerType === 'mouse' && e.button !== 0)) return;
+  if (sheet.state !== 'open' && sheet.state !== 'opening') return;
+  if ((e.target as HTMLElement).closest('button')) return;
+  sheet.drag = { id: e.pointerId, y0: e.clientY, h0: sheet.shown, moved: false, samples: [] };
+  try {
+    el.commentsGrab.setPointerCapture(e.pointerId);
+  } catch {
+    /* the pointer is gone already */
+  }
+});
+el.commentsGrab.addEventListener('pointermove', (e) => {
+  const d = sheet.drag;
+  if (!d || e.pointerId !== d.id) return;
+  const dy = e.clientY - d.y0;
+  if (!d.moved) {
+    if (Math.abs(dy) < 4) return;
+    d.moved = true;
+    // grabbed while it was still sliding up: it follows the pointer from where it was going
+    clearTimeout(sheet.timer);
+    sheet.timer = 0;
+    sheet.state = 'open';
+    el.commentsGrab.classList.add('dragging');
+  }
+  sheetPlace(d.h0 - dy, false);
+  const t = performance.now();
+  d.samples.push({ y: e.clientY, t });
+  while (d.samples.length > 1 && t - d.samples[0].t > 100) d.samples.shift();
+});
+function endSheetDrag(e: PointerEvent, cancelled: boolean): void {
+  const d = sheet.drag;
+  if (!d || e.pointerId !== d.id) return;
+  sheet.drag = undefined;
+  el.commentsGrab.classList.remove('dragging');
+  try {
+    el.commentsGrab.releasePointerCapture(e.pointerId);
+  } catch {
+    /* not captured */
+  }
+  if (!d.moved) return;
+  const s0 = d.samples[0];
+  const s1 = d.samples[d.samples.length - 1];
+  // px per ms over the last moves, positive = downwards
+  const v = !cancelled && s0 && s1 && s1.t - s0.t >= 8 ? (s1.y - s0.y) / (s1.t - s0.t) : 0;
+  const h = sheet.shown;
+  const hasTall = sheet.max - sheet.rest >= 60;
+  let to: 'close' | 'rest' | 'tall';
+  if (cancelled) to = sheet.tall ? 'tall' : 'rest';
+  else if (v >= SHEET_FLICK) to = h > sheet.rest + 20 ? 'rest' : 'close';
+  else if (v <= -SHEET_FLICK) to = h >= sheet.rest - 20 ? 'tall' : 'rest';
+  else to = h < sheet.rest * 0.65 ? 'close' : h > (sheet.rest + sheet.max) / 2 ? 'tall' : 'rest';
+  if (to === 'tall' && !hasTall) to = 'rest';
+  if (to === 'close') {
+    closeComments();
+    return;
+  }
+  sheet.tall = to === 'tall';
+  sheetSettle(sheet.tall ? sheet.max : sheet.rest);
+}
+el.commentsGrab.addEventListener('pointerup', (e) => endSheetDrag(e, false));
+el.commentsGrab.addEventListener('pointercancel', (e) => endSheetDrag(e, true));
+
+// Beside the sheet (the video above it, the rest of the page): the layer takes the tap, closes the
+// sheet and keeps the event, so the video under it is not paused, started or swiped by it. A swipe
+// there closes it as well (a moved finger makes no click, so the release is what counts).
+let outsideDown = false;
+el.comments.addEventListener('pointerdown', (e) => {
+  outsideDown = e.isPrimary && !(e.pointerType === 'mouse' && e.button !== 0) && !el.commentsSheet.contains(e.target as Node);
+});
+el.comments.addEventListener('pointerup', (e) => {
+  if (outsideDown && e.isPrimary) closeComments();
+});
+el.comments.addEventListener('pointercancel', () => (outsideDown = false));
+el.comments.addEventListener('click', (e) => {
+  if (el.commentsSheet.contains(e.target as Node)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (outsideDown) closeComments();
+  outsideDown = false;
+});
+// nothing in the sheet is dragged natively, and a wheel turn beside the list goes nowhere
+el.comments.addEventListener('dragstart', (e) => e.preventDefault());
+el.comments.addEventListener(
+  'wheel',
+  (e) => {
+    if (!el.commentsBody.contains(e.target as Node)) e.preventDefault();
+  },
+  { passive: false },
+);
+// The window changed (rotation, the car's panel, full screen): the frame and the heights with it,
+// after the feed's own layout, which listens to the same events.
+function sheetRelayout(): void {
+  window.setTimeout(() => {
+    if (sheet.state === 'closed' || sheet.state === 'closing' || sheet.drag) return;
+    sheetMeasure();
+    if (sheet.state === 'open') sheetPlace(sheet.tall ? sheet.max : sheet.rest, false);
+    else sheetSettle(sheet.rest, () => (sheet.state = 'open'));
+  }, 0);
+}
+window.addEventListener('resize', sheetRelayout);
+window.addEventListener('orientationchange', sheetRelayout);
+window.visualViewport?.addEventListener('resize', sheetRelayout);
+
+/** Opens the comments sheet for `item` (the video in view); a different video starts a fresh read. */
 export function openComments(item: FeedItem): void {
   if (!host.platform.social) {
     host.toast(`Comments are not available for ${host.platform.name} yet`);
@@ -1120,15 +1352,16 @@ export function openComments(item: FeedItem): void {
     host.toast('This video has no account to read the comments from');
     return;
   }
-  show(el.comments);
+  sheetOpen();
   if (comments.item?.id === item.id && (comments.list.length || comments.ctl)) return;
   comments.item = item;
   comments.total = undefined;
+  el.commentsBody.scrollTop = 0;
   commentsTitle();
   void loadComments(false);
 }
 
-el.commentsClose.addEventListener('click', () => hide(el.comments));
+el.commentsClose.addEventListener('click', () => closeComments());
 el.commentsRefresh.addEventListener('click', () => void loadComments(false));
 el.commentsMore.addEventListener('click', () => void loadComments(true));
 el.commentsCancel.addEventListener('click', () => {

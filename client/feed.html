@@ -144,7 +144,7 @@
             <button class="act" id="actAuthor" type="button" title="Who posted this video (P)"><span class="ico avatar"><img id="actAuthorImg" alt="" draggable="false" /></span><small id="actAuthorLabel">Profile</small></button>
             <button class="act-follow hidden" id="actFollow" type="button" title="Follow this account" aria-label="Follow this account"><span aria-hidden="true">+</span></button>
           </div>
-          <!-- the video's counts: likes (read-only) and comments (tap: the comments panel) -->
+          <!-- the video's counts: likes (read-only) and comments (tap: the comments sheet) -->
           <div class="act stat hidden" id="actLikes" title="Likes"><span class="ico"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 20.3l-1.2-1.1C5.9 14.8 3 12.1 3 8.9 3 6.3 5 4.3 7.6 4.3c1.5 0 2.9.7 3.9 1.8 1-1.1 2.4-1.8 3.9-1.8C18 4.3 20 6.3 20 8.9c0 3.2-2.9 5.9-7.8 10.3L12 20.3z" /></svg></span><small id="actLikesLabel"></small></div>
           <button class="act stat hidden" id="actComments" type="button" title="Comments (C)"><span class="ico"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 3.5c-5 0-9 3.3-9 7.4 0 2.3 1.3 4.4 3.3 5.8L5.5 20.5l4.2-1.8c.7.1 1.5.2 2.3.2 5 0 9-3.3 9-7.4s-4-7.5-9-7.5z" /></svg></span><small id="actCommentsLabel"></small></button>
           <button class="act" id="actMute" type="button" title="Sound on/off (M)"><span class="ico" id="actMuteIco"></span><small>Sound</small></button>
@@ -324,18 +324,35 @@
           </div>
         </div>
       </div>
-      <!-- the comments of the video in view (the bubble / C): read from the server's signed-in TikTok page, cancellable like the messages -->
-      <div id="comments" class="panel hidden" role="dialog" aria-label="Comments">
-        <div class="panel-card inbox-card">
-          <div class="panel-head">
-            <button id="commentsClose" class="btn ghost icon-btn" type="button" aria-label="Close">×</button>
-            <div id="commentsTitle" class="panel-title">Comments</div>
-            <button id="commentsRefresh" class="btn ghost small" type="button">Refresh</button>
-            <button id="commentsCancel" class="btn small hidden" type="button">Cancel</button>
-          </div>
-          <div id="commentsStatus" class="panel-status hidden"></div>
-          <div id="commentsList" class="comment-list"></div>
-          <button id="commentsMore" class="btn hidden" type="button">More comments</button>
+      <!-- The comments of the video in view (the bubble / C): a sheet that slides up over the lower two
+           thirds of the video, which goes on playing (or stays paused) above it. This layer covers the
+           page, so a tap beside the sheet only closes it; the frame is the screen on a phone and the
+           video's own card on wide screens (social.ts places it); the sheet moves inside the frame. -->
+      <div id="comments" class="sheet-layer hidden" role="dialog" aria-modal="true" aria-labelledby="commentsTitle">
+        <div id="commentsFrame" class="sheet-frame">
+          <section id="commentsSheet" class="sheet">
+            <!-- the grab area: a drag down closes the sheet, a drag up makes it taller -->
+            <div id="commentsGrab" class="sheet-grab">
+              <div class="sheet-handle" aria-hidden="true"></div>
+              <div class="sheet-head">
+                <div class="sheet-side">
+                  <button id="commentsRefresh" class="sheet-text-btn" type="button">Refresh</button>
+                  <button id="commentsCancel" class="sheet-text-btn hidden" type="button">Cancel</button>
+                </div>
+                <div id="commentsTitle" class="sheet-title">Comments</div>
+                <div class="sheet-side end">
+                  <button id="commentsClose" class="sheet-close" type="button" aria-label="Close comments" title="Close (Esc)">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div id="commentsBody" class="sheet-body">
+              <div id="commentsStatus" class="panel-status hidden"></div>
+              <div id="commentsList" class="comment-list"></div>
+              <button id="commentsMore" class="btn sheet-more hidden" type="button">More comments</button>
+            </div>
+          </section>
         </div>
       </div>
       <!-- Playback speed (the Speed action / S): tap a choice, or outside the card to keep the current one -->

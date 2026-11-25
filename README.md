@@ -59,7 +59,7 @@ system player and returns to the canvas afterwards.)
 | Decode | WebCodecs. `VideoDecoder`: 12 frames kept decoded ahead, at most 8 chunks in flight. `AudioDecoder`: sound decoded 6 s ahead, at most 32 chunks in flight. A sound file of its own (YouTube) gets a second demuxer | `client/src/renderers/webcodecsRenderer.ts` |
 | Clock | The `AudioContext` is the master clock. A wall clock runs the picture when there is no sound, when autoplay holds the sound back (until a tap, or the context resuming by itself), or when the context's clock stands still for 2 s | `client/src/media/audioOutput.ts` |
 | Paint | Canvas 2D `drawImage(VideoFrame)` of the newest frame at or before the clock, on every animation frame; a 100 ms timer takes over when the browser throttles animation frames. No WebGL | `webcodecsRenderer.ts` |
-| Buffering | Starts when the clock is 250 ms past the last painted frame with none ready, or when under 150 ms of sound is left with chunks still at the decoder. Ends with 3 frames ready and, when sound drives the clock, 1.5 s of sound | `webcodecsRenderer.ts` |
+| Buffering | Starts when the clock is 250 ms past the last painted frame with none ready, or when under 150 ms of sound is left with chunks still at the decoder. Ends with 3 frames ready and, when sound drives the clock, 1.5 s of sound. At the end of a file neither can come any more: the last frames are enough once the video decoder has been flushed, and once the sound decoder has given back everything of a finished file (its flush) the end of the sound is not waited for. (Before 2026-11-25 the last 150 ms of every video counted as "sound about to run out", for 8 s after the last chunk went to the decoder: a pause of about 2 s right before the end of each video, and one that never ended when fewer than 3 frames were left) | `webcodecsRenderer.ts` |
 | Without WebCodecs | A hidden `<video>` decodes and each frame is copied into the same canvas (`FeedPlayer` mode `video-canvas`). It plays one file, so YouTube is silent there | `client/src/renderers/videoElementRenderer.ts` |
 
 What the feed page adds ([`client/src/feed/feed.ts`](client/src/feed/feed.ts)):
@@ -69,6 +69,11 @@ What the feed page adds ([`client/src/feed/feed.ts`](client/src/feed/feed.ts)):
   (`/api/media/:id`). A player error on the direct URL starts over through the relay; a video from
   the saved feed that fails again gets fresh play URLs from its page once; after that the video
   shows its error and, with auto-scroll on, the feed moves on 1.5 s later.
+- **What moves the feed on by itself**: with auto-scroll on, the end of the video in view, and the
+  1.5 s skip of a video that cannot play. Neither happens while the comments sheet is on screen
+  (from the tap that opens it until it has slid away): the video repeats instead of ending, and an
+  advance that was already on its way is dropped (`holdForComments`). The auto-scroll choice
+  itself is not touched, so it applies again as soon as the sheet is gone.
 - **Which videos hold a player**: the one in view and one on each side. The two after those get
   their play URLs looked up and their first 1 MB fetched into the media cache (not when the
   browser asks to save data).
@@ -384,6 +389,14 @@ Open **`/feed.html`** (from the launcher; `?platform=youtube` for YouTube). It i
   hidden; the browser's fullscreen too where it allows it). **Exit full screen** (top right), **F** or Esc leaves it.
 - **Auto-scroll** (checkbox / **A**): when on, a finished video advances to the next one; when off,
   videos loop.
+- **Comments** (the bubble / **C**, TikTok): a sheet slides up over the lower two thirds of the
+  video (on wide screens: of the video's own card) with the comment count, the comments and their
+  replies. The video goes on playing above it, or stays paused if it was. The list scrolls by
+  itself. Close it with a tap anywhere beside it (that tap does nothing else: the video is not
+  paused by it), the ✕, Esc / **C**, or by dragging the handle down; dragging the handle up makes
+  the sheet taller. While it is open the feed stays on this video: with auto-scroll on, the video
+  repeats instead of moving on, and auto-scroll carries on as set once the sheet is closed. Comments
+  are read-only (there is no box to write one).
 - **⬇ Save** (the Save action / **D**) asks where the video goes. **Save to library** adds the link
   and its details (title, author, cover, length) to the Video Library, as *Save link* does there
   (see **Video Library**): the server keeps the link and details, never the video. The video is
