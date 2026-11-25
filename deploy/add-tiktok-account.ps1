@@ -108,11 +108,16 @@ if ($r.status -eq 401) {
   # The site password: typed here, sent to the site's own sign-in (which sets the auth cookie on the
   # client above), kept nowhere by this script.
   $secure = Read-Host 'Site password' -AsSecureString
-  $plain = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure))
-  $form = New-Object System.Net.Http.FormUrlEncodedContent ([System.Collections.Generic.Dictionary[string, string]]@{ password = $plain; next = '/api/health' })
+  $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+  try { $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+  # The form body as a plain string: PowerShell cannot cast a hashtable to the Dictionary[string,string]
+  # that FormUrlEncodedContent wants ("Cannot create object of type ... Dictionary`2").
+  $form = New-Object System.Net.Http.StringContent(('password=' + [Uri]::EscapeDataString($plain) + '&next=%2Fapi%2Fhealth'), [Text.Encoding]::UTF8, 'application/x-www-form-urlencoded')
   $plain = $null
-  try { $client.PostAsync("$Server/login", $form).GetAwaiter().GetResult() | Out-Null } catch { }
+  $loginError = $null
+  try { $client.PostAsync("$Server/login", $form).GetAwaiter().GetResult() | Out-Null } catch { $loginError = $_.Exception.GetBaseException().Message }
   $form.Dispose()
+  if ($loginError) { Write-Host "The site's sign-in could not be reached: $loginError" -ForegroundColor Red; exit 3 }
   $r = Invoke-Api GET '/api/session/accounts' $null
   if ($r.status -eq 401) { Write-Host 'The site did not accept that password.' -ForegroundColor Red; exit 3 }
 }
