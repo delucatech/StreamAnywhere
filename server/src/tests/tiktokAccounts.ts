@@ -7,7 +7,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { accountProfileDir, accountRecords, activeAccountId, activeProfileDir, configureTikTokAccounts, createAccount, forgetAccountIdentity, MAIN_ACCOUNT, parseTikTokCookies, rememberAccount, removeAccount, setActiveAccount, TikTokAccountError, toBrowserCookies, unlinkHosts } from '../tiktokAccounts';
+import { accountDirect, accountProfileDir, accountRecords, activeAccountId, activeProfileDir, configureTikTokAccounts, cookieMap, createAccount, directAllowed, forgetAccountIdentity, loadAccountCookies, MAIN_ACCOUNT, noteDirect, parseTikTokCookies, rememberAccount, removeAccount, saveAccountCookies, setAccountDirect, setActiveAccount, TikTokAccountError, toBrowserCookies, unlinkHosts } from '../tiktokAccounts';
 
 type Check = (name: string, cond: boolean, detail?: unknown) => void;
 
@@ -50,6 +50,32 @@ export async function tiktokAccountsChecks(check: Check): Promise<void> {
     rememberAccount(MAIN_ACCOUNT, { username: 'the.real.one', via: 'browser' });
     forgetAccountIdentity(MAIN_ACCOUNT);
     check('signing the main account out forgets who it was, and keeps the account', accountRecords()[0].id === MAIN_ACCOUNT && accountRecords()[0].username === undefined);
+
+    // "For You without the browser": a test for any account but the main one.
+    const burner = createAccount('Burner');
+    check('the main account refuses the test, on the server', refused(() => setAccountDirect(MAIN_ACCOUNT, true))?.status === 409 && !accountDirect(MAIN_ACCOUNT) && !directAllowed(MAIN_ACCOUNT) && directAllowed(burner.id));
+    setAccountDirect(burner.id, true);
+    noteDirect(burner.id, true);
+    noteDirect(burner.id, false, 'TikTok answered "ok" without any For You videos');
+    noteDirect(MAIN_ACCOUNT, true);
+    configureTikTokAccounts(main);
+    const recs = accountRecords();
+    const b = recs.find((a) => a.id === burner.id)!;
+    check('another account takes the test; its requests are counted and survive a restart; nothing is counted for the main one', accountDirect(burner.id) && b.directCalls === 2 && b.directOk === 1 && /without any For You/.test(b.directLastFailure?.reason || '') && Boolean(b.directSince) && recs[0].directCalls === undefined, b);
+    // an index edited by hand cannot put the main account into the test
+    const indexFile = path.join(dir, 'tiktok-accounts.json');
+    const edited = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
+    edited.accounts.find((a: { id: string }) => a.id === MAIN_ACCOUNT).direct = true;
+    fs.writeFileSync(indexFile, JSON.stringify(edited));
+    configureTikTokAccounts(main);
+    check('an index edited by hand cannot switch the main account to the test', !accountDirect(MAIN_ACCOUNT) && accountRecords()[0].direct === undefined);
+    saveAccountCookies(burner.id, new Map([['sessionid', 'abc'], ['msToken', 'tok']]));
+    saveAccountCookies(MAIN_ACCOUNT, new Map([['sessionid', 'the-real-one']]));
+    check("another account's cookies are kept in its own folder; the main account's are never written out", loadAccountCookies(burner.id)?.get('sessionid') === 'abc' && loadAccountCookies(MAIN_ACCOUNT) === undefined && fs.existsSync(path.join(dir, 'tiktok-accounts', burner.id, 'cookies.json')) && !fs.readdirSync(dir).some((f) => /cookies/i.test(f)) && !fs.existsSync(path.join(main, 'cookies.json')));
+    setAccountDirect(burner.id, false);
+    check('the test can be switched off again; the record of it stays', !accountDirect(burner.id) && accountRecords().find((a) => a.id === burner.id)?.directCalls === 2);
+    removeAccount(burner.id);
+    check('where a name comes for the site and for one host, the site-wide cookie is used', cookieMap([{ domain: '.tiktok.com', path: '/', secure: true, httpOnly: false, expires: 0, name: 'msToken', value: 'site' }, { domain: 'www.tiktok.com', path: '/', secure: false, httpOnly: false, expires: 0, name: 'msToken', value: 'host' }]).get('msToken') === 'site');
 
     for (let i = 0; i < 7; i++) createAccount();
     check('eight accounts are the limit', accountRecords().length === 8 && refused(() => createAccount())?.status === 409);

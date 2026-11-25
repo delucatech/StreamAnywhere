@@ -486,6 +486,48 @@ in the sign-in panel):
   loaded, main ↔ spare switched three times (3 s each to the saved sign-in), a third account added
   and removed; the main profile's folder was never touched.
 
+**Picking an account from the profile icon.** With more than one account on the server, the
+profile icon (left rail, or the bottom bar on a phone) opens a short list, "Use TikTok as": tap an
+account to switch to it, or "Accounts and sign-in…" for the full panel. The accounts and the
+choice live on the server, so every browser that opens the site (the car, a phone, another
+computer) shows the same list and needs no TikTok sign-in of its own; the one account that is
+active is active for all of them. A picked account that turns out to be signed out opens the
+panel to sign it in.
+
+#### For You without the browser (a test, per account, never the main one)
+
+Built 2026-11-25. The personalised For You is the last thing that needs the headless browser, and
+the browser is the heaviest thing on the small server. It can be asked from TikTok directly - the
+account's own cookies, the copied signer, the Chrome-like connection (`accountForYou` in
+[`tiktokGuest.ts`](server/src/tiktokGuest.ts)) - but that puts the account behind an **imitated**
+signature, which TikTok could hold against it. So it is a switch per account, off by default:
+
+- **The main account cannot be switched to it.** The server refuses (`setAccountDirect` in
+  `tiktokAccounts.ts`: HTTP 409), whatever the page or a hand-made request asks; an index file
+  edited by hand is read back without the flag; and the main account's cookies are never copied
+  out of its browser profile, so there is nothing such a request could be made with. Its For You
+  goes through the browser, as always.
+- **Another account**: "Turn on" in its row of the account list (two taps; the row says what is
+  at stake). From then on its For You is fetched without starting the browser: TikTok's `/foryou`
+  page over the Chrome-like connection says who the cookies belong to (that is also the check of
+  the saved sign-in), then `api/recommend/item_list` is asked, signed, about 6 videos and 2 s a
+  request; the stock is filled behind the viewer's answer. The account's cookies are kept in
+  `tiktok-accounts/<id>/cookies.json` (written when it signs in with cookies, or when the browser
+  opens its feed) and updated as TikTok rotates them.
+- **Fallback**: a refusal, an empty answer or "signed out" sends that request through the browser
+  as before; three failures in a row pause the direct path for 10 minutes (`tiktokGuest.paths.foryou`
+  in `/api/health`).
+- **The record**: every direct request is counted in the account's entry (`directCalls`,
+  `directOk`, the last refusal and when), across restarts, and shown in its row ("Since Nov 25: 20
+  of 20 requests answered"). That, and whether the account still signs in, is the evidence for
+  ever offering it to the main account.
+- `TIKTOK_DIRECT=0` switches the test off for every account.
+- **Measured** with a spare account on the PC: after a restart its feed loaded with the browser
+  never started - first request 4.5 s (the account page 1.4 s + the first list), later ones 0-2 s;
+  36 different videos in six requests; 20 of 20 direct requests answered; the relay delivered a
+  video's file with the account's cookies (206); the main account's feed request did not touch the
+  direct path.
+
 ### TikTok without a browser (comments, replies, profiles, Explore, video lookups)
 
 Built 2026-11-25. Much of what the server reads from TikTok needed the headless browser: the
@@ -567,8 +609,9 @@ How it works:
   checks of its four files, as before).
 - **Also answered, not used**: the signed-out For You list (11-12 generic videos, not anyone's
   feed), related videos, hashtag details and search suggestions.
-- **Not tried**: signing with the signed-in TikTok session (a For You without the browser). It
-  would put the account behind an imitated signature; it needs the owner's say-so first.
+- **With an account's own session** (a For You without the browser): tried on 2026-11-25 with a
+  spare account and built as a per-account test that the main account cannot be switched to - see
+  "For You without the browser" under "Several TikTok accounts" above.
 - **Looking before trying** ([`server/src/tiktokWire.ts`](server/src/tiktokWire.ts), built
   2026-11-25): whether that is possible at all can be read off the signed-in browser without
   sending TikTok anything. The server listens to what its own For You page sends by itself and

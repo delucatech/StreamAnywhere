@@ -978,6 +978,104 @@ button {
   color: var(--text);
   font: inherit;
 }
+.session-accounts .acct-test {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: -2px 0 4px 46px;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.35;
+}
+.session-accounts .acct-test span {
+  flex: 1 1 auto;
+}
+.session-accounts .acct-test.on b {
+  color: var(--accent);
+}
+/* the account picker on the profile icon */
+.account-menu {
+  position: fixed;
+  z-index: 30;
+  width: min(320px, calc(100vw - 16px));
+  padding: 8px;
+  border-radius: 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.account-menu.hidden {
+  display: none;
+}
+.account-menu .am-title {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 4px 8px;
+}
+.account-menu .am-row,
+.account-menu .am-manage {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 52px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.account-menu .am-row.active {
+  background: rgba(255, 255, 255, 0.07);
+}
+.account-menu .am-row:active,
+.account-menu .am-manage:active {
+  background: rgba(255, 255, 255, 0.12);
+}
+.account-menu .am-row img,
+.account-menu .am-row .acct-noimg {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: #222;
+  flex: 0 0 auto;
+}
+.account-menu .am-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.account-menu .am-name b,
+.account-menu .am-name span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.account-menu .am-name span {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.account-menu .am-check {
+  color: var(--accent);
+  font-weight: 700;
+  width: 18px;
+  text-align: center;
+}
+.account-menu .am-manage {
+  min-height: 44px;
+  color: var(--muted);
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 10px 10px;
+  margin-top: 2px;
+}
 .session-label {
   font-size: 13px;
   color: var(--muted);

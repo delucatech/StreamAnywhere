@@ -42,6 +42,14 @@ export interface AccountRecord {
   addedAt: number;
   /** How it was last signed in */
   via?: 'browser' | 'cookies';
+  /** The test "For You without the browser" is on for this account (never the main one) */
+  direct?: boolean;
+  /** When the test was first switched on, and how its requests went since */
+  directSince?: number;
+  directCalls?: number;
+  directOk?: number;
+  directLastOk?: number;
+  directLastFailure?: { at: number; reason: string };
 }
 
 interface Store {
@@ -83,6 +91,13 @@ function load(): Store {
       avatar: typeof a.avatar === 'string' ? a.avatar : undefined,
       addedAt: Number(a.addedAt) || 0,
       via: a.via === 'cookies' ? 'cookies' : a.via === 'browser' ? 'browser' : undefined,
+      // (the main account can never carry the switch, whatever the file says)
+      direct: a.id !== MAIN_ACCOUNT && a.direct === true ? true : undefined,
+      directSince: Number(a.directSince) || undefined,
+      directCalls: Number(a.directCalls) || undefined,
+      directOk: Number(a.directOk) || undefined,
+      directLastOk: Number(a.directLastOk) || undefined,
+      directLastFailure: a.directLastFailure && typeof a.directLastFailure.reason === 'string' ? { at: Number(a.directLastFailure.at) || 0, reason: a.directLastFailure.reason.slice(0, 200) } : undefined,
     });
   }
   if (!accounts.some((a) => a.id === MAIN_ACCOUNT)) accounts.unshift({ id: MAIN_ACCOUNT, addedAt: 0 });
@@ -169,6 +184,93 @@ export function removeAccount(id: string): void {
   fs.rmSync(dir, { recursive: true, force: true });
   s.accounts = s.accounts.filter((a) => a.id !== id);
   save();
+}
+
+// ---------------------------------------------------------------- "For You without the browser" (a test, per account)
+
+/**
+ * Whether an account's For You may be asked without the browser (tiktokGuest.ts accountForYou: the
+ * account's cookies behind an imitated signature). NEVER the main account: the question "does
+ * TikTok restrict an account for this?" is answered with an account that may be lost. The switch is
+ * refused for it here, on the server, whatever the page or a hand-made request asks for; and the
+ * main account's cookies are never copied out of its browser profile, so there is nothing such a
+ * request could be made with.
+ */
+export const directAllowed = (id: string): boolean => id !== MAIN_ACCOUNT && !/^(0|off|false|no)$/i.test(process.env.TIKTOK_DIRECT || '');
+
+export function setAccountDirect(id: string, on: boolean): AccountRecord {
+  const s = load();
+  const rec = s.accounts.find((a) => a.id === id);
+  if (!rec) throw new TikTokAccountError('That account is not on this server', 404);
+  if (on && id === MAIN_ACCOUNT) throw new TikTokAccountError('The main account always uses the browser. "For You without the browser" is a test for another account, until it has proved itself there.', 409);
+  if (on && !directAllowed(id)) throw new TikTokAccountError('"For You without the browser" is switched off on this server (TIKTOK_DIRECT)', 409);
+  if (Boolean(rec.direct) !== on) {
+    rec.direct = on || undefined;
+    if (on && !rec.directSince) rec.directSince = Date.now();
+    save();
+  }
+  return { ...rec };
+}
+
+/** true only for an account other than the main one that was switched to the test */
+export const accountDirect = (id: string): boolean => directAllowed(id) && Boolean(load().accounts.find((a) => a.id === id)?.direct);
+
+/** One browserless For You request of an account, for the record of the test (kept in the index: it has to outlive restarts). */
+export function noteDirect(id: string, ok: boolean, reason?: string): void {
+  const s = load();
+  const rec = s.accounts.find((a) => a.id === id);
+  if (!rec || id === MAIN_ACCOUNT) return;
+  rec.directCalls = (rec.directCalls || 0) + 1;
+  if (ok) {
+    rec.directOk = (rec.directOk || 0) + 1;
+    rec.directLastOk = Date.now();
+  } else rec.directLastFailure = { at: Date.now(), reason: (reason || 'no reason kept').slice(0, 200) };
+  // (a counter: written at most every 20 s, and always on a failure)
+  if (!ok || Date.now() - lastDirectSave > 20_000) {
+    lastDirectSave = Date.now();
+    save();
+  }
+}
+let lastDirectSave = 0;
+
+const cookieFile = (id: string): string => {
+  if (id === MAIN_ACCOUNT || !validId(id)) throw new TikTokAccountError('The main account has no cookie file', 409);
+  return path.join(accountsDir(), id, 'cookies.json');
+};
+
+/** An account's cookies outside its browser profile, for the browserless requests. Never the main account's. */
+export function saveAccountCookies(id: string, cookies: Map<string, string>): void {
+  if (id === MAIN_ACCOUNT || !cookies.get('sessionid')) return;
+  try {
+    const file = cookieFile(id);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const tmp = file + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify({ savedAt: Date.now(), cookies: [...cookies] }), { mode: 0o600 });
+    fs.renameSync(tmp, file);
+  } catch {
+    /* the browser profile still has them */
+  }
+}
+
+export function loadAccountCookies(id: string): Map<string, string> | undefined {
+  if (id === MAIN_ACCOUNT) return undefined;
+  try {
+    const j = JSON.parse(fs.readFileSync(cookieFile(id), 'utf8'));
+    const map = new Map<string, string>(Array.isArray(j?.cookies) ? j.cookies.filter((p: unknown) => Array.isArray(p) && typeof p[0] === 'string' && typeof p[1] === 'string') : []);
+    return map.get('sessionid') ? map : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Name -> value for requests to www.tiktok.com out of parsed cookies: where a name comes both for
+ * the whole site (.tiktok.com) and for one host, the site-wide one is the account's.
+ */
+export function cookieMap(cookies: ParsedCookie[]): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const c of [...cookies].sort((a, b) => Number(a.domain.startsWith('.')) - Number(b.domain.startsWith('.')))) map.set(c.name, c.value);
+  return map;
 }
 
 // ---------------------------------------------------------------- pasted cookies

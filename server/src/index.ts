@@ -23,7 +23,7 @@ import { logStream, recentLog } from './logbuf';
 import { defaultExpiry, mediaCount, registerMedia } from './mediaStore';
 import { hostAllowed } from './ssrf';
 import { EXPLORE_DEFAULT_CATEGORY, FeedError, fetchExploreFeed, normalizeExploreOptions, type ExploreResult } from './feed';
-import { addTikTokAccount, removeTikTokAccount, switchTikTokAccount, tiktokAccountList, wireReport, cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouCheap, forYouPutBack, forYouQuick, forYouStock, forYouWantsWarm, forYouWarm, headlessRunning, logout, parkHeadlessBrowser, rememberLog, workState, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
+import { addTikTokAccount, removeTikTokAccount, setTikTokDirect, switchTikTokAccount, tiktokAccountList, wireReport, cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouCheap, forYouPutBack, forYouQuick, forYouStock, forYouWantsWarm, forYouWarm, headlessRunning, logout, parkHeadlessBrowser, rememberLog, workState, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
 import { Reservoir, type ReservoirStats } from './reservoir';
 import { hasBatch, reviveItems, slimItems } from './lastBatch';
 import { invalidateJobs, jobStats, sharedJob } from './jobs';
@@ -977,7 +977,8 @@ export async function buildServer() {
       if (action === 'add') await addTikTokAccount(typeof req.body?.label === 'string' ? req.body.label : undefined, log);
       else if (action === 'switch') await switchTikTokAccount(id, log);
       else if (action === 'remove') removeTikTokAccount(id, log);
-      else throw new TikTokAccountError('action must be add, switch or remove');
+      else if (action === 'direct') setTikTokDirect(id, req.body?.on === true, log);
+      else throw new TikTokAccountError('action must be add, switch, remove or direct');
       return await accountsNow();
     } catch (e) {
       return reply.code(e instanceof TikTokAccountError ? e.status : 500).send({ ...(await accountsNow()), error: (e as Error).message });

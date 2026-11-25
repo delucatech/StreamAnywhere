@@ -33,7 +33,8 @@ import { exploreApiUrl, FeedError, isTikTokAd, itemToFeedItem, parseExploreBody,
 import { rememberBatch, staleBatch } from './lastBatch';
 import { getProgress } from './progress';
 import { say } from './activity';
-import { accountProfileDir, accountRecord, accountRecords, activeAccountId, activeProfileDir, createAccount, forgetAccountIdentity, MAIN_ACCOUNT, parseTikTokCookies, rememberAccount, removeAccount, setActiveAccount, TikTokAccountError, toBrowserCookies } from './tiktokAccounts';
+import { accountDirect, accountProfileDir, accountRecord, accountRecords, activeAccountId, activeProfileDir, cookieMap, createAccount, directAllowed, forgetAccountIdentity, loadAccountCookies, MAIN_ACCOUNT, noteDirect, parseTikTokCookies, rememberAccount, removeAccount, saveAccountCookies, setAccountDirect, setActiveAccount, TikTokAccountError, toBrowserCookies } from './tiktokAccounts';
+import { accountForYou, GuestError, guestUnusable, openAccountVisit, visitCookies, type AccountVisit } from './tiktokGuest';
 import { READ_STORAGE_SHAPES, READ_STORAGE_SHAPES_SO_FAR, summarizeKeys, watchWire, wireRecords, type WireRecord } from './tiktokWire';
 
 type Browser = import('puppeteer-core').Browser;
@@ -502,6 +503,23 @@ const PROBE_RETRY_MS = 30_000;
  * verification for nothing.
  */
 export async function sessionProbe(wait = false): Promise<SessionStatus> {
+  // An account in the test "For You without the browser": TikTok is asked who it is the same way,
+  // so that opening its feed does not start the browser just for the check. A failure here leaves
+  // the checking to the browser (below) for ten minutes.
+  if (!probed && !probe && s.state === 'none' && Date.now() - directCheckFailedAt > 10 * 60 * 1000 && directOn()) {
+    probe = (async () => {
+      try {
+        await directVisitNow(feedLog ?? (() => undefined));
+        feedLog?.(`saved sign-in checked without the browser: @${s.username}`);
+      } catch (e) {
+        directCheckFailedAt = Date.now();
+        feedLog?.(`saved sign-in could not be checked without the browser (${(e as Error).message.split(/\r?\n/)[0]}); the browser checks it`);
+      } finally {
+        probe = undefined;
+      }
+    })();
+    if (wait) await probe;
+  }
   if (!probed && s.state === 'none' && profileExists() && sessionSupported().ok && Date.now() >= probeRetryAt) {
     probe =
       probe ||
@@ -630,6 +648,9 @@ export function tiktokAccountList(): TikTokAccount[] {
       // an account that is not active: a browser profile on disk is a sign-in that was saved
       saved: isActive ? profileExists() : fs.existsSync(path.join(accountProfileDir(a.id), 'Default')) || fs.existsSync(path.join(accountProfileDir(a.id), 'Local State')),
       via: a.via,
+      directAllowed: directAllowed(a.id),
+      direct: accountDirect(a.id),
+      directStats: a.directSince ? { since: a.directSince, calls: a.directCalls || 0, ok: a.directOk || 0, lastOk: a.directLastOk, lastFailure: a.directLastFailure } : undefined,
     };
   });
 }
@@ -654,6 +675,9 @@ async function standDown(): Promise<void> {
   s.seenIds = new Set();
   s.feedCookieHeader = undefined;
   s.lastFeedError = undefined;
+  directVisit = undefined;
+  directRound = 0;
+  directCheckFailedAt = 0;
 }
 
 /** Makes `id` the active account: the current one's browser is closed (its sign-in stays on disk), the other's is checked on first use. */
@@ -738,7 +762,10 @@ async function startCookieLogin(text: string | undefined, log: (m: string) => vo
       s.loginMode = undefined;
       s.error = s.error || 'TikTok did not accept these cookies: it reports no valid session for them. Sign in at tiktok.com again, export fresh cookies and paste those (and keep that browser tab closed afterwards).';
       log(`cookie sign-in for account "${account}" failed: ${s.error}`);
-    } else log(`cookie sign-in for account "${account}": signed in as @${s.username}`);
+    } else {
+      log(`cookie sign-in for account "${account}": signed in as @${s.username}`);
+      saveAccountCookies(account, cookieMap(cookies));
+    }
   } catch (e) {
     s.state = 'none';
     s.loginMode = undefined;
@@ -2102,6 +2129,9 @@ async function openFeedPage(): Promise<Page> {
   feedLog?.('headless feed page: loaded "' + (await page.title()) + '"');
   const cookies = await page.cookies('https://www.tiktok.com');
   s.feedCookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
+  // An account other than the main one: its cookies are also kept outside the profile, where the
+  // browserless requests can use them once that test is switched on. The main account's never are.
+  if (activeAccountId() !== MAIN_ACCOUNT) saveAccountCookies(activeAccountId(), new Map(cookies.map((c): [string, string] => [c.name, c.value])));
   return page;
 }
 
@@ -2331,7 +2361,103 @@ let forYouPump: Promise<void> | undefined;
 /** Feed requests being answered right now (the browser must not be parked under them) */
 let forYouInFlight = 0;
 
-export const forYouStock = (): { pending: number; pumping: boolean; lastError?: string } => ({ pending: s.pending.length, pumping: Boolean(forYouPump), lastError: s.lastFeedError });
+export const forYouStock = (): { pending: number; pumping: boolean; lastError?: string } => ({ pending: s.pending.length, pumping: Boolean(forYouPump) || Boolean(directFill), lastError: s.lastFeedError });
+
+// ---------------------------------------------------------------- For You without the browser (a test; never the main account)
+
+/**
+ * For an account that was switched to the test (tiktokAccounts.ts: any account but the main one),
+ * the For You videos are asked from TikTok directly - the account's cookies, the imitated signature,
+ * the Chrome-like connection (tiktokGuest.ts accountForYou) - and the browser is not started for
+ * them. When TikTok does not answer that, the request goes on to the browser exactly as before.
+ * Every request is counted in the account's record (noteDirect), so "did TikTok keep answering, did
+ * the account survive" can be read off after days, across restarts.
+ */
+let directVisit: { account: string; visit: AccountVisit } | undefined;
+let directFill: Promise<number> | undefined;
+let directRound = 0;
+/** After the browserless sign-in check failed: the browser does the checking for a while */
+let directCheckFailedAt = 0;
+const DIRECT_VISIT_MS = 20 * 60 * 1000;
+
+/** The active account is in the test, is not the main one, and its cookies are at hand. */
+function directOn(): boolean {
+  const id = activeAccountId();
+  if (id === MAIN_ACCOUNT) return false;
+  return accountDirect(id) && !guestUnusable('foryou') && Boolean(loadAccountCookies(id));
+}
+
+async function directVisitNow(log: (m: string) => void): Promise<AccountVisit> {
+  const id = activeAccountId();
+  if (id === MAIN_ACCOUNT) throw new Error('the main account never uses the browserless path');
+  if (directVisit?.account === id && Date.now() - directVisit.visit.createdAt < DIRECT_VISIT_MS && directVisit.visit.calls < 150) return directVisit.visit;
+  const cookies = loadAccountCookies(id);
+  if (!cookies) throw new GuestError('no cookies are saved for this account yet', 'session');
+  const visit = await openAccountVisit(cookies, log);
+  if (activeAccountId() !== id) throw new Error('the active account changed');
+  directVisit = { account: id, visit };
+  saveAccountCookies(id, visitCookies(visit));
+  // TikTok's page said who this is: the same conclusion the browser's check reaches.
+  if (s.state !== 'logged_in' && s.state !== 'login_pending') markLoggedIn(visit.user);
+  return visit;
+}
+
+/** Fills the pending list from TikTok without the browser until `want` are pending (at most 3 requests); how many were added. */
+function directFillNow(want: number, log: (m: string) => void): Promise<number> {
+  if (directFill) return directFill;
+  directFill = (async () => {
+    const id = activeAccountId();
+    let added = 0;
+    try {
+      const visit = await directVisitNow(log);
+      for (let i = 0; i < 3 && s.pending.length < want; i++) {
+        directRound++;
+        const r = await accountForYou(visit, directRound, 12, log);
+        if (activeAccountId() !== id) break;
+        noteDirect(id, true);
+        const upstream = { cookieHeader: r.upstream.cookieHeader, referer: FEED_URL };
+        let fresh = 0;
+        let ads = 0;
+        for (const raw of r.json.itemList as unknown[]) {
+          if (isTikTokAd(raw)) {
+            ads++;
+            continue;
+          }
+          const it = itemToFeedItem(raw, upstream);
+          if (it && !s.seenIds.has(it.id)) {
+            s.seenIds.add(it.id);
+            s.pending.push(it);
+            fresh++;
+          }
+        }
+        added += fresh;
+        s.lastFeedError = undefined;
+        log(`For You without the browser: ${fresh} new of ${(r.json.itemList as unknown[]).length}${ads ? ` (${ads} ads left out)` : ''}, ${s.pending.length} pending, ${r.ms} ms`);
+        if (!fresh) break; // TikTok is repeating itself: asking again at once would not help
+      }
+      saveAccountCookies(id, visitCookies(visit));
+    } catch (e) {
+      if (e instanceof GuestError) {
+        noteDirect(id, false, e.message);
+        if (e.kind === 'session') directVisit = undefined;
+      }
+      throw e;
+    }
+    return added;
+  })().finally(() => {
+    directFill = undefined;
+  });
+  return directFill;
+}
+
+/** Switches the test on or off for an account. Refused for the main account (tiktokAccounts.ts setAccountDirect). */
+export function setTikTokDirect(id: string, on: boolean, log: (m: string) => void): void {
+  setAccountDirect(id, on);
+  directVisit = undefined;
+  directRound = 0;
+  directCheckFailedAt = 0;
+  log(`TikTok account "${id}": For You without the browser switched ${on ? 'ON (a test: this account may be restricted by TikTok)' : 'off'}`);
+}
 
 /** Scroll + ArrowDown: TikTok's feed loads the next batch when the reader approaches the end of the loaded list. */
 async function nudgeFeedPage(page: Page): Promise<void> {
@@ -2391,6 +2517,10 @@ export function forYouWarm(log: (m: string) => void): boolean {
   if (!forYouWantsWarm()) return false;
   feedLog = wrapLog(log);
   forYouAskedAt = Date.now();
+  if (directOn()) {
+    void directFillNow(FORYOU_TARGET, feedLog).catch((e) => log(`For You: warm-up without the browser failed (${(e as Error).message})`));
+    return true;
+  }
   void feedPage()
     .then(() => startForYouPump())
     .catch((e) => log(`For You: warm-up could not open the page (${(e as Error).message})`));
@@ -2433,6 +2563,11 @@ export function forYouQuick(count: number, log: (m: string) => void): ForYouResu
   if (!maySignIn) return undefined;
   feedLog = wrapLog(log);
   forYouAskedAt = Date.now();
+  if (directOn()) {
+    void directFillNow(FORYOU_TARGET, feedLog).catch(() => undefined);
+    const earlier = staleBatch(forYouBatchKey(), count) || [];
+    return { items: earlier, warnings: [], stale: true };
+  }
   void (async () => {
     if (s.state !== 'logged_in' && !guestAllowed()) await sessionProbe(true);
     if ((s.state as SessionStatus['state']) === 'logged_in' || guestAllowed()) {
@@ -2462,6 +2597,34 @@ async function fetchForYouNow(count: number, log: (m: string) => void, quick = f
   feedLog = wrapLog(log);
   const warnings: string[] = [];
   if (!sessionSupported().ok) throw new Error(sessionSupported().reason);
+  // An account in the test "For You without the browser" (never the main account): TikTok is asked
+  // directly and the browser is not started. Anything that goes wrong there falls through to the
+  // browser path below, unchanged.
+  if (directOn()) {
+    try {
+      const enough = Math.min(count, 4);
+      // The stock is filled in the background (up to three requests of about 2 s each); the viewer
+      // waits only until a handful of videos are there, not for the whole fill.
+      if (s.pending.length < 12) {
+        let failure: unknown;
+        let done = false;
+        void directFillNow(FORYOU_TARGET, feedLog)
+          .catch((e) => (failure = e))
+          .finally(() => (done = true));
+        const until = Date.now() + 15_000;
+        while (s.pending.length < enough && !done && Date.now() < until) await new Promise((r) => setTimeout(r, 120));
+        if (!s.pending.length && failure) throw failure;
+      }
+      if (s.pending.length) {
+        const items = s.pending.splice(0, count);
+        rememberBatch(forYouBatchKey(), items);
+        return { items, warnings };
+      }
+      log('For You without the browser brought nothing new; asking through the browser');
+    } catch (e) {
+      log(`For You without the browser failed (${(e as Error).message.split(/\r?\n/)[0]}); asking through the browser`);
+    }
+  }
   // From here on the browser is wanted: the sign-in check below runs on it (see parkHeadlessBrowser).
   forYouAskedAt = Date.now();
   // A viewer with nothing on screen, nothing ready here (a cold page, a restart, the sign-in not

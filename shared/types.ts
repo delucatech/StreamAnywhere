@@ -746,6 +746,14 @@ export interface TikTokAccount {
   /** A browser profile exists for it on the server (a sign-in that was saved; checked when it becomes active) */
   saved: boolean;
   via?: 'browser' | 'cookies';
+  /**
+   * "For You without the browser" (a test): whether this account may be switched to it (never the
+   * main account - the server refuses), whether it is, and how its requests went since it was
+   * first switched on (ms epochs).
+   */
+  directAllowed: boolean;
+  direct: boolean;
+  directStats?: { since: number; calls: number; ok: number; lastOk?: number; lastFailure?: { at: number; reason: string } };
 }
 
 /** GET /api/session/accounts, and the answer of POST /api/session/accounts */
@@ -758,9 +766,11 @@ export interface TikTokAccountsResponse {
 
 /** POST /api/session/accounts: add an empty account and make it active, switch to one, or remove one that is not active (never the main one) */
 export interface TikTokAccountRequest {
-  action: 'add' | 'switch' | 'remove';
+  /** `direct`: switch the test "For You without the browser" on or off for `id` (`on`); refused for the main account */
+  action: 'add' | 'switch' | 'remove' | 'direct';
   id?: string;
   label?: string;
+  on?: boolean;
 }
 
 export interface SessionStatus {

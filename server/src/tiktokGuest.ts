@@ -357,7 +357,7 @@ export function commentAnswerUsable(json: any): boolean {
  * What is being read. Each kind has its own failure count and pause: TikTok refusing one path
  * (say, search) must not send the comments back to the browser.
  */
-export type GuestKind = 'comments' | 'replies' | 'explore' | 'profile' | 'posts' | 'video';
+export type GuestKind = 'comments' | 'replies' | 'explore' | 'profile' | 'posts' | 'video' | 'foryou';
 
 interface KindState {
   calls: number;
@@ -539,6 +539,102 @@ export async function guestCommentList(id: string, cursor: number, log: (m: stri
 export function guestReplyList(videoId: string, commentId: string, cursor: number, log: (m: string) => void, signal?: AbortSignal): Promise<GuestAnswer> {
   return guestGet({ kind: 'replies', path: '/api/comment/list/reply/', query: { item_id: videoId, comment_id: commentId, count: 20, cursor }, what: 'the replies', usable: commentAnswerUsable, log, signal });
 }
+
+// ---------------------------------------------------------------- as an ACCOUNT (a test, never the main account)
+
+/**
+ * Reads made with an account's own session cookies instead of a guest visit's - the personalised
+ * For You without the browser. This puts the account behind an IMITATED signature, so it is only
+ * ever called for an account that opted in (session.ts: never the main one; see tiktokAccounts.ts).
+ * A guest visit and an account visit never share cookies.
+ */
+export interface AccountVisit {
+  jar: Jar;
+  webId: string;
+  region: string;
+  odinId?: string;
+  csrf?: string;
+  ab?: string;
+  /** Who TikTok's page says these cookies are */
+  user: { username: string; nickname?: string; avatar?: string };
+  createdAt: number;
+  calls: number;
+}
+
+/**
+ * Opens the account's /foryou page over the Chrome-like connection: TikTok says who the cookies
+ * belong to and which device id it gives this visitor. GuestError `session` when the page shows a
+ * guest (the cookies are no sign-in any more).
+ */
+export async function openAccountVisit(cookies: Map<string, string>, log: (m: string) => void, signal?: AbortSignal): Promise<AccountVisit> {
+  const t0 = Date.now();
+  stats.calls += 1;
+  kindState('foryou').calls += 1;
+  const jar: Jar = new Map(cookies);
+  try {
+    say('asking TikTok who is signed in (without the browser)', 'checking the TikTok sign-in');
+    const wait = lastCallAt + GAP_MS - Date.now();
+    if (wait > 0) await abortable(new Promise<void>((r) => setTimeout(r, wait)), signal);
+    lastCallAt = Date.now();
+    const page = await send(jar, 'GET', `${ORIGIN}/foryou`, PAGE_HEADERS, undefined, signal);
+    if (page.status !== 200) throw new GuestError(`TikTok's For You page answered HTTP ${page.status}`, 'empty');
+    const html = page.body.toString('utf8');
+    const id = pageIdentity(html);
+    if (id.script) scriptSeen = id.script;
+    const ctx = pageScope(html)?.['webapp.app-context'] ?? {};
+    const u = ctx.user;
+    if (!u?.uniqueId) throw new GuestError('TikTok shows these cookies as signed out (the page is a guest page)', 'session');
+    if (!id.wid) throw new GuestError('the For You page carried no device id', 'empty');
+    succeeded('foryou', Date.now() - t0);
+    log(`account visit ready in ${Date.now() - t0} ms: @${u.uniqueId} (region ${id.region || 'US'})`);
+    return {
+      jar,
+      webId: id.wid,
+      region: id.region || 'US',
+      odinId: typeof ctx.odinId === 'string' ? ctx.odinId : undefined,
+      csrf: id.csrf || jar.get('tt_csrf_token'),
+      ab: id.ab,
+      user: { username: String(u.uniqueId), nickname: typeof u.nickName === 'string' ? u.nickName : typeof u.nickname === 'string' ? u.nickname : undefined, avatar: typeof u.avatarUri?.[0] === 'string' ? u.avatarUri[0] : typeof u.avatarThumb === 'string' ? u.avatarThumb : undefined },
+      createdAt: Date.now(),
+      calls: 0,
+    };
+  } catch (e) {
+    // "signed out" is TikTok's answer about the cookies, not a failure of the path
+    if (e instanceof GuestError) failed('foryou', e.message, e.kind !== 'session', log);
+    throw e;
+  }
+}
+
+/** One page of the account's For You list (TikTok's own JSON), signed, with the account's cookies. One try: a new visit would not help an account. */
+export async function accountForYou(visit: AccountVisit, round: number, count: number, log: (m: string) => void, signal?: AbortSignal): Promise<GuestAnswer> {
+  const t0 = Date.now();
+  stats.calls += 1;
+  kindState('foryou').calls += 1;
+  const referer = `${ORIGIN}/foryou`;
+  try {
+    say('asking TikTok for your For You videos (without the browser)', 'asking TikTok for For You videos');
+    const r = await call(
+      visit,
+      '/api/recommend/item_list/',
+      { odinId: visit.odinId ?? '', user_is_login: 'true', from_page: 'fyp', count, coverFormat: 2, itemID: '', pullType: round <= 1 ? 1 : 2, isNonPersonalized: 'false', vv_count_fyp: Math.max(0, round - 1), showAds: 'true', showAboutThisAd: 'true' },
+      { referer, signal },
+    );
+    const code = Number(r.json?.status_code ?? r.json?.statusCode ?? 0);
+    if (code !== 0) throw new GuestError(`TikTok status ${code}: ${r.json.status_msg || r.json.statusMsg || 'unavailable'}`, 'status', code);
+    if (!Array.isArray(r.json?.itemList) || !r.json.itemList.length) throw new GuestError('TikTok answered "ok" without any For You videos (its soft refusal)', 'empty');
+    succeeded('foryou', Date.now() - t0);
+    return { json: r.json, ms: Date.now() - t0, attempts: 1, upstream: { cookieHeader: jarHeader(visit.jar), referer } };
+  } catch (e) {
+    if (e instanceof GuestError) {
+      failed('foryou', e.message, true, log);
+      log(`account For You: ${e.message}`);
+    }
+    throw e;
+  }
+}
+
+/** The visit's cookies as they are now (TikTok rotates msToken and others with its answers): kept for the next start. */
+export const visitCookies = (visit: AccountVisit): Map<string, string> => new Map(visit.jar);
 
 export interface TikTokGuestStatus {
   mode: 'on' | 'off';

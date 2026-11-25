@@ -139,6 +139,7 @@ const el = {
   sessionUserCode: $('sessionUserCode'),
   sessionCookiesToggle: $<HTMLButtonElement>('sessionCookiesToggle'),
   sessionAccounts: $<HTMLDivElement>('sessionAccounts'),
+  accountMenu: $<HTMLDivElement>('accountMenu'),
   sessionCode: $<HTMLFormElement>('sessionCode'),
   sessionCodeText: $<HTMLInputElement>('sessionCodeText'),
   sessionCodeSend: $<HTMLButtonElement>('sessionCodeSend'),
@@ -598,7 +599,7 @@ for (const p of PLATFORMS) {
   el.railApps.appendChild(b);
 }
 onHomeTap(el.railLauncher);
-el.railProfile.addEventListener('click', () => el.navProfile.click());
+el.railProfile.addEventListener('click', () => onProfileIcon(el.railProfile));
 el.upnextAuto.addEventListener('click', () => toggleAutoscroll());
 initSocial({
   play: playList,
@@ -632,7 +633,7 @@ initSocial({
     syncFollow(activeEntry());
   },
 });
-el.navProfile.addEventListener('click', () => pressed(el.navProfile, () => openSessionPanel()));
+el.navProfile.addEventListener('click', () => onProfileIcon(el.navProfile));
 el.sessionClose.addEventListener('click', () => closeSessionPanel());
 el.sessionRefresh.addEventListener('click', () =>
   pressed(
@@ -1077,6 +1078,8 @@ document.addEventListener('keydown', onUserGesture, true);
 let accounts: TikTokAccount[] | undefined;
 /** The account whose "Remove" was tapped once: the second tap removes it (no browser dialog: the car's browser has none) */
 let removeArmed: string | undefined;
+/** The same for switching the test on: the first tap arms it */
+let directArmed: string | undefined;
 let accountsBusy = false;
 
 async function refreshAccounts(): Promise<void> {
@@ -1105,7 +1108,18 @@ function renderAccounts(): void {
       const buttons = a.active
         ? `<span class="acct-state">${esc(state2)}</span>`
         : `<button class="btn small" type="button" data-acct-switch="${esc(a.id)}"${accountsBusy ? ' disabled' : ''}>Switch</button>${a.main ? '' : `<button class="btn small ghost" type="button" data-acct-remove="${esc(a.id)}"${accountsBusy ? ' disabled' : ''}>${removeArmed === a.id ? 'Tap again to remove' : 'Remove'}</button>`}`;
-      return `<div class="acct-row${a.active ? ' active' : ''}">${a.avatar ? `<img src="${esc(a.avatar)}" alt="" draggable="false" />` : '<span class="acct-noimg"></span>'}<div class="acct-name"><b>${esc(name(a))}</b><span>${esc(a.label)}</span></div>${buttons}</div>`;
+      // "For You without the browser": a test an account other than the main one can be switched to.
+      const st = a.directStats;
+      const day = (ms: number): string => new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+      const record = st ? `Since ${day(st.since)}: ${st.ok} of ${st.calls} requests answered${st.lastFailure ? `; last refusal ${day(st.lastFailure.at)} (${st.lastFailure.reason.slice(0, 70)})` : ''}.` : '';
+      const test = a.main
+        ? accounts!.length > 1
+          ? '<div class="acct-test"><span>For You: through the browser only. The test below cannot be switched on for the main account.</span></div>'
+          : ''
+        : a.directAllowed
+          ? `<div class="acct-test${a.direct ? ' on' : ''}"><span><b>Test: For You without the browser is ${a.direct ? 'ON' : 'off'}.</b> ${a.direct ? 'TikTok is asked directly for this account; it may restrict the account for it.' : 'Asks TikTok directly, without starting the browser. TikTok may restrict an account for it: only for an account you can lose.'} ${esc(record)}</span><button class="btn small${a.direct ? '' : ' ghost'}" type="button" data-acct-direct="${esc(a.id)}" data-on="${a.direct ? '0' : '1'}"${accountsBusy ? ' disabled' : ''}>${a.direct ? 'Turn off' : directArmed === a.id ? 'Tap again to turn on' : 'Turn on'}</button></div>`
+          : '';
+      return `<div class="acct-row${a.active ? ' active' : ''}">${a.avatar ? `<img src="${esc(a.avatar)}" alt="" draggable="false" />` : '<span class="acct-noimg"></span>'}<div class="acct-name"><b>${esc(name(a))}</b><span>${esc(a.label)}</span></div>${buttons}</div>${test}`;
     })
     .join('');
   el.sessionAccounts.innerHTML = `<div class="session-label">Accounts on this server</div>${rows}<div class="acct-add"><input id="acctLabel" type="text" maxlength="40" placeholder="Name for a new account (optional)" autocomplete="off" /><button class="btn" type="button" data-acct-add="1"${accountsBusy ? ' disabled' : ''}>Add another account</button></div><div class="acct-note">One account is active at a time. Switching closes the server's ${esc(P.name)} browser and opens the other account's; nothing is deleted. A new account starts signed out: sign it in below.</div>`;
@@ -1114,15 +1128,19 @@ function renderAccounts(): void {
 async function accountAction(req: TikTokAccountRequest, doing: string): Promise<void> {
   if (accountsBusy) return;
   accountsBusy = true;
-  removeArmed = undefined;
+  removeArmed = directArmed = undefined;
   renderAccounts();
-  el.sessionText.innerHTML = `<b>${esc(doing)}</b>\nThe server closes its ${esc(P.name)} browser first; this takes a few seconds.`;
+  if (req.action !== 'direct') el.sessionText.innerHTML = `<b>${esc(doing)}</b>\nThe server closes its ${esc(P.name)} browser first; this takes a few seconds.`;
   try {
     const r = await api.sessionAccount(req);
     accounts = r.accounts;
-    state.session = r.session;
-    rememberSignedIn(state.session);
-    if (req.action !== 'remove') {
+    // (switching the test changes nothing about who is signed in: the status on screen stays)
+    if (req.action !== 'direct') {
+      state.session = r.session;
+      rememberSignedIn(state.session);
+    }
+    if (req.action === 'direct') toast(req.on ? 'Test on: For You is asked without the browser for this account' : 'Test off: this account uses the browser again');
+    else if (req.action !== 'remove') {
       // The videos on screen are the previous account's feed: the new account's comes once it is signed in.
       cookiesOpen = false;
       toast(req.action === 'add' ? 'Account added: sign it in below' : 'Account switched');
@@ -1152,11 +1170,107 @@ el.sessionAccounts.addEventListener('click', (ev) => {
       return;
     }
     void accountAction({ action: 'remove', id: rm }, 'Removing the account…');
+  } else if (t.hasAttribute('data-acct-direct')) {
+    const id = t.getAttribute('data-acct-direct')!;
+    const on = t.getAttribute('data-on') === '1';
+    if (on && directArmed !== id) {
+      directArmed = id;
+      renderAccounts();
+      return;
+    }
+    void accountAction({ action: 'direct', id, on }, on ? 'Switching the test on…' : 'Switching the test off…');
   } else if (t.hasAttribute('data-acct-add')) {
     const label = (document.getElementById('acctLabel') as HTMLInputElement | null)?.value.trim() || undefined;
     void accountAction({ action: 'add', label }, 'Adding an account…');
   }
 });
+
+// ---------- the account picker on the profile icon ----------
+// With more than one account on the server, the profile icon opens a short list to pick from
+// (the accounts live on the server, so every browser that opens the site sees the same list and
+// needs no sign-in of its own); "Accounts and sign-in…" at its end opens the full panel.
+let menuAnchor: HTMLElement | undefined;
+
+function accountMenuOpen(): boolean {
+  return !el.accountMenu.classList.contains('hidden');
+}
+function closeAccountMenu(): void {
+  el.accountMenu.classList.add('hidden');
+}
+function renderAccountMenu(): void {
+  if (!accounts) return;
+  const s = state.session;
+  const rows = accounts
+    .map((a) => {
+      const who = a.active && s?.state === 'logged_in' && s.username ? s.username : a.username;
+      const title = who ? `@${who}` : a.saved ? a.label : `${a.label} (not signed in)`;
+      const sub = who ? a.label : a.saved ? 'saved sign-in' : 'tap to sign it in';
+      return `<button class="am-row${a.active ? ' active' : ''}" type="button" role="menuitemradio" aria-checked="${a.active}" data-menu-switch="${esc(a.id)}"${accountsBusy ? ' disabled' : ''}>${a.avatar ? `<img src="${esc(a.avatar)}" alt="" draggable="false" />` : '<span class="acct-noimg"></span>'}<span class="am-name"><b>${esc(title)}</b><span>${esc(sub)}${a.direct ? ' · test: no browser' : ''}</span></span><span class="am-check">${a.active ? '✓' : ''}</span></button>`;
+    })
+    .join('');
+  el.accountMenu.innerHTML = `<div class="am-title">Use ${esc(P.name)} as</div>${rows}<button class="am-manage" type="button" data-menu-manage="1">Accounts and sign-in…</button>`;
+}
+function openAccountMenu(anchor: HTMLElement): void {
+  menuAnchor = anchor;
+  renderAccountMenu();
+  const m = el.accountMenu;
+  m.classList.remove('hidden');
+  // Beside the icon in the left rail, above it in the bottom bar; always inside the screen.
+  const r = anchor.getBoundingClientRect();
+  const w = m.offsetWidth;
+  const h = m.offsetHeight;
+  const beside = r.left < 140 && r.right + 8 + w < window.innerWidth && window.innerWidth > 700;
+  const left = beside ? r.right + 8 : Math.max(8, Math.min(window.innerWidth - w - 8, r.left + r.width / 2 - w / 2));
+  const top = beside ? Math.max(8, Math.min(window.innerHeight - h - 8, r.bottom - h)) : Math.max(8, r.top - h - 8);
+  m.style.left = `${Math.round(left)}px`;
+  m.style.top = `${Math.round(top)}px`;
+  void refreshAccounts().then(() => {
+    if (accountMenuOpen()) renderAccountMenu();
+  });
+}
+/** The profile icon: the picker when there is something to pick, the sign-in panel otherwise. */
+function onProfileIcon(anchor: HTMLElement): void {
+  if (accountMenuOpen()) {
+    closeAccountMenu();
+    return;
+  }
+  if (P.accounts && accounts && accounts.length > 1 && state.session?.state !== 'login_pending') openAccountMenu(anchor);
+  else void openSessionPanel();
+}
+el.accountMenu.addEventListener('click', (ev) => {
+  const t = (ev.target as HTMLElement).closest('button');
+  if (!t) return;
+  const id = t.getAttribute('data-menu-switch');
+  closeAccountMenu();
+  if (t.hasAttribute('data-menu-manage')) {
+    void openSessionPanel();
+    return;
+  }
+  const a = accounts?.find((x) => x.id === id);
+  if (!a || a.active) return;
+  toast(`Switching to ${a.username ? '@' + a.username : a.label}…`, false, 4000);
+  void accountAction({ action: 'switch', id: a.id }, 'Switching accounts…').then(() => {
+    // Once the server has checked the account's saved sign-in: one that turns out to be signed out
+    // needs the panel (to sign it in); a signed-in one just loads its feed.
+    let tries = 0;
+    const settled = window.setInterval(() => {
+      const now = state.session;
+      if (++tries < 90 && (!now || now.probing)) return;
+      window.clearInterval(settled);
+      if (now && now.supported && now.state !== 'logged_in' && now.state !== 'login_pending') void openSessionPanel();
+    }, 1000);
+  });
+});
+document.addEventListener(
+  'pointerdown',
+  (ev) => {
+    if (!accountMenuOpen()) return;
+    const t = ev.target as Node;
+    if (el.accountMenu.contains(t) || menuAnchor?.contains(t)) return;
+    closeAccountMenu();
+  },
+  true,
+);
 
 // ---------- session ----------
 function renderSession(): void {
@@ -3581,6 +3695,8 @@ void (async () => {
     el.sessionText.innerHTML = `<b>Resuming your ${esc(P.name)} sign-in…</b>\nChecking where it stands on the server.`;
   }
   const s = await refreshSession();
+  // The server's accounts (TikTok): the profile icon becomes a picker when there is more than one.
+  void refreshAccounts();
   if (s?.state === 'login_pending') {
     hideLoading();
     el.session.classList.remove('hidden');
