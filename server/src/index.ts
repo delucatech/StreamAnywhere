@@ -5,7 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { EXPLORE_CATEGORIES, YOUTUBE_CATEGORIES, platformOf } from '../../shared/types';
-import type { TikTokAccountRequest, TikTokAccountsResponse, AvatarRequest, AvatarResponse, CommentRepliesRequest, CommentsRequest, Platform as PlatformId, ConversationRequest, DownloadProbeRequest, InboxCancelResponse, LibraryCategoryRequest, LibraryEntryPatch, LibrarySaveRequest, DownloadStartRequest, FeedItem, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ServerStatus, ProbeRequest, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SessionActionRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
+import type { LikeRequest, TikTokAccountRequest, TikTokAccountsResponse, AvatarRequest, AvatarResponse, CommentRepliesRequest, CommentsRequest, Platform as PlatformId, ConversationRequest, DownloadProbeRequest, InboxCancelResponse, LibraryCategoryRequest, LibraryEntryPatch, LibrarySaveRequest, DownloadStartRequest, FeedItem, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ServerStatus, ProbeRequest, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SessionActionRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
 import { registerAuth } from './auth';
 import { mirrorStats, registerMirror, shutdownMirror } from './mirror';
 import { config, findUp } from './config';
@@ -30,7 +30,7 @@ import { invalidateJobs, jobStats, sharedJob } from './jobs';
 import { getProgress } from './progress';
 import { registerActivity } from './activityRoutes';
 import { say } from './activity';
-import { cancelInboxReads, cancelReads, commentsDebug, conversation, fetchCommentReplies, fetchComments, fetchCommentsAsGuest, fetchProfile, followUser, inbox, inboxDebug, isCancelled, searchTikTok, sendMessage, SocialError } from './social';
+import { cancelInboxReads, cancelReads, commentsDebug, conversation, fetchCommentReplies, fetchComments, fetchCommentsAsGuest, fetchProfile, followUser, inbox, inboxDebug, isCancelled, likeVideo, searchTikTok, sendMessage, SocialError } from './social';
 import { channelVideos, exploreYouTube, isYouTubeUrl, recommendedYouTube, recommendedYouTubeTv, resolveYouTube, searchYouTube, setYouTubeRoomMaker, withYouTubeAvatars, youTubeCategory, YouTubeError, youtubeSlowLookups } from './youtube';
 import { avatarRefreshing, channelAvatar, loadAvatarStore, saveAvatarStore, youtubeAvatarStatus } from './youtubeAvatar';
 import { youtubePlayerStatus } from './youtubePlayer';
@@ -835,6 +835,20 @@ export async function buildServer() {
       if (platform !== 'tiktok') throw new SocialError(`Following accounts is not available for ${platform} here`, 400);
       invalidateJobs(`profile|tiktok|${user.toLowerCase()}|`);
       return await followUser(user, follow, socialLog('follow'));
+    } catch (e) {
+      return socialFail(reply, e, t0);
+    }
+  });
+  // The heart: like a video as the signed-in account, or take the like back. Pressed on the video's page in
+  // the server's browser - for every account (TikTok discards a like made without it; see social.ts likeVideo).
+  app.post<{ Body: LikeRequest }>('/api/like', resolveLimit, async (req, reply) => {
+    const t0 = Date.now();
+    try {
+      const platform = platformOf(req.body?.platform);
+      if (platform !== 'tiktok') throw new SocialError(`Liking videos is not available for ${platform} here`, 400);
+      const id = String(req.body?.id || '');
+      if (!/^\d{5,25}$/.test(id)) throw new SocialError('That is not a video id', 400);
+      return await likeVideo(id, handle(req.body?.author), req.body?.like !== false, socialLog('like'));
     } catch (e) {
       return socialFail(reply, e, t0);
     }

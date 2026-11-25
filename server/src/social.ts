@@ -40,7 +40,7 @@
  *              shows what the page contains, for tuning on the deployed server.
  */
 import type { Page } from 'puppeteer-core';
-import type { ChatMessage, CommentRepliesResponse, CommentsResponse, Conversation, ConversationResponse, FeedItem, FollowResponse, FollowState, InboxResponse, ProfileResponse, SearchResponse, SendMessageResponse, UserSummary, VideoComment } from '../../shared/types';
+import type { ChatMessage, CommentRepliesResponse, CommentsResponse, Conversation, ConversationResponse, FeedItem, FollowResponse, FollowState, InboxResponse, LikeResponse, ProfileResponse, SearchResponse, SendMessageResponse, UserSummary, VideoComment } from '../../shared/types';
 import { itemToFeedItem, relationToState } from './feed';
 import { directGet, directPage, isLoggedIn, onTikTokAccountChange, pageCookieHeader, resetWorkPage, tiktokDirectOn, withWorkPage } from './session';
 import { ytdlpInfo } from './ytdlp';
@@ -861,6 +861,118 @@ export async function followUser(user: string, follow: boolean, log: (m: string)
     log(`@${user}: follow state now "${after}"`);
     return { user, followState: after, warnings, via: 'browser' };
   }, `follow @${user}`);
+}
+
+// ---------------------------------------------------------------- like
+
+/**
+ * The like button of the video page, wherever TikTok's layout of the day puts it (data-e2e hooks),
+ * and whether it shows the video as liked. `found` is the selector that matched; without one,
+ * `hooks` lists what the page does have with "like" in its name (for the log).
+ */
+const LIKE_SELECTORS = ['[data-e2e="like-icon"]', '[data-e2e="browse-like-icon"]', '[data-e2e="video-like-icon"]'];
+const READ_LIKE_BUTTON = `(() => {
+  for (const s of ${JSON.stringify(LIKE_SELECTORS)}) {
+    const ico = document.querySelector(s);
+    if (!ico) continue;
+    const b = ico.closest('button') || ico;
+    const r = b.getBoundingClientRect();
+    return { found: s, pressed: b.getAttribute('aria-pressed'), label: b.getAttribute('aria-label'), visible: r.width > 0 && r.height > 0 };
+  }
+  return { found: null, hooks: [...new Set([...document.querySelectorAll('[data-e2e]')].map((e) => e.getAttribute('data-e2e')))].filter((k) => /like|digg|heart/i.test(k || '')).slice(0, 20) };
+})()`;
+
+/** Whether the signed-in account has liked the video, and its like count: asked from inside the page (its scripts sign the request). */
+async function likedNow(page: Page, id: string, log: (m: string) => void): Promise<{ liked?: boolean; likes?: number }> {
+  const params = new URLSearchParams({ ...COMMON, itemId: id });
+  const text = await fetchInPage(page, `${TT}/api/item/detail/?${params}`, 2, log);
+  if (!text.trim()) return {};
+  try {
+    const s = JSON.parse(text)?.itemInfo?.itemStruct;
+    return { liked: typeof s?.digged === 'boolean' ? s.digged : undefined, likes: num(s?.statsV2?.diggCount ?? s?.stats?.diggCount) };
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Likes a video, or takes the like back, by pressing the like button of the video's page in the
+ * signed-in browser on the server. It has to be the browser: TikTok discards a like that is not
+ * signed by the key its page keeps there ("ticket guard": a request made without the browser is
+ * answered "ok" with `tt-ticket-guard-result: 1101` and changes nothing - tried 2026-11-25, see
+ * research/tiktok_like_direct_probe.ts). So this works the same way for every account, the main one
+ * included, and an account that otherwise asks TikTok without the browser starts its browser for it.
+ * What TikTok says afterwards (the video's `digged`) is what is reported, not the press.
+ */
+export async function likeVideo(id: string, author: string, like: boolean, log: (m: string) => void): Promise<LikeResponse> {
+  requireLogin(like ? 'like videos' : 'take a like back');
+  const t0 = Date.now();
+  say(`opening the video in the signed-in browser on the server (Chromium) to press its like button`, "pressing Like in the server's browser");
+  return withWorkPage(
+    log,
+    async (page) => {
+      const warnings: string[] = [];
+      const url = videoPageUrl(author, id);
+      if (page.url().split('?')[0] !== url) {
+        say('opening the video on TikTok (step 1 of 3)', "step 1 of 3 · opening the video in the server's browser");
+        log(`like ${id}: opening the video page`);
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+        profile = undefined; // the page left the profile (if it was on one)
+        commentAnswers = [];
+        if (/\/login/.test(page.url())) throw new SocialError('TikTok sent the video page to its login: the session is no longer valid. Sign in again (Profile).', 401);
+      }
+      // What TikTok says now: a video that is already as asked is left alone.
+      const before = await likedNow(page, id, log).catch(() => ({}) as { liked?: boolean; likes?: number });
+      if (before.liked === like) {
+        log(`like ${id}: already ${like ? 'liked' : 'not liked'}`);
+        return { id, liked: like, likes: before.likes, warnings: [`the video was already ${like ? 'liked' : 'not liked'}`], via: 'browser' as const, elapsedMs: Date.now() - t0 };
+      }
+      say('looking for the like button on the page (step 2 of 3)', 'step 2 of 3 · finding the like button');
+      let btn: { found: string | null; pressed?: string | null; label?: string | null; visible?: boolean; hooks?: string[] } = { found: null };
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) {
+        btn = (await page.evaluate(READ_LIKE_BUTTON).catch(() => ({ found: null }))) as typeof btn;
+        if (btn.found && btn.visible) break;
+        await sleep(400);
+      }
+      if (!btn.found || !btn.visible) {
+        const title = String(await page.title().catch(() => ''));
+        log(`like ${id}: no like button on the page (title "${title.slice(0, 60)}", hooks: ${(btn.hooks || []).join(', ') || 'none'})`);
+        throw new SocialError(/log in/i.test(title) ? 'TikTok shows its login dialog on the video page: the session may be signed out (Profile → sign in again)' : "The video's page shows no like button (TikTok changed the page, or the video is not available)");
+      }
+      say(like ? 'pressing Like (step 3 of 3)' : 'taking the like back (step 3 of 3)', `step 3 of 3 · ${like ? 'pressing Like' : 'taking the like back'}`);
+      // the page's own request, so its answer can be read as well as the button
+      const answered = page.waitForResponse((r) => /\/api\/commit\/item\/digg\//.test(r.url()), { timeout: 9000 }).then(
+        async (r) => ({ status: r.status(), guard: r.headers()['tt-ticket-guard-result'], json: await r.json().catch(() => undefined) }),
+        () => undefined,
+      );
+      await page.click(btn.found);
+      const answer = await answered;
+      log(`like ${id}: ${like ? 'like' : 'unlike'} pressed (${btn.found}, was pressed=${btn.pressed}); the page's request: ${answer ? `HTTP ${answer.status}, status_code ${answer.json?.status_code}, is_digg ${answer.json?.is_digg}, guard ${answer.guard ?? '-'}` : 'not seen'}`);
+      const loginWall = (await page.evaluate(`!!document.querySelector('[data-e2e="login-modal"], #login-modal, [class*="LoginModal" i]')`).catch(() => false)) as boolean;
+      if (loginWall) {
+        await page.keyboard.press('Escape').catch(() => undefined);
+        throw new SocialError('TikTok asked for a sign-in instead of liking: the session is no longer valid. Sign in again (Profile).', 401);
+      }
+      // What TikTok says afterwards is the result (its answer can lag a moment behind the press).
+      let after: { liked?: boolean; likes?: number } = {};
+      for (let i = 0; i < 3; i++) {
+        await sleep(i ? 1500 : 700);
+        after = await likedNow(page, id, log).catch(() => ({}));
+        if (after.liked === like) break;
+      }
+      let liked = after.liked;
+      if (liked === undefined) {
+        // TikTok did not say: the button's own state is the next best thing
+        const now = (await page.evaluate(READ_LIKE_BUTTON).catch(() => ({ found: null }))) as typeof btn;
+        liked = now.pressed === 'true' ? true : now.pressed === 'false' ? false : like;
+        warnings.push('TikTok did not confirm the change; going by the button');
+      } else if (liked !== like) warnings.push(`TikTok did not take the ${like ? 'like' : 'unlike'}: the video still reads as ${liked ? 'liked' : 'not liked'}`);
+      log(`like ${id}: now ${liked ? 'liked' : 'not liked'}${after.likes !== undefined ? `, ${after.likes} likes` : ''}, ${Date.now() - t0} ms`);
+      return { id, liked, likes: after.likes ?? before.likes, warnings, via: 'browser' as const, elapsedMs: Date.now() - t0 };
+    },
+    `${like ? 'like' : 'unlike'} ${id}`,
+  );
 }
 
 // ---------------------------------------------------------------- comments

@@ -92,7 +92,7 @@ const el = {
   actAuthorImg: $<HTMLImageElement>('actAuthorImg'),
   actAuthorLabel: $('actAuthorLabel'),
   actFollow: $<HTMLButtonElement>('actFollow'),
-  actLikes: $('actLikes'),
+  actLikes: $<HTMLButtonElement>('actLikes'),
   actLikesLabel: $('actLikesLabel'),
   actComments: $('actComments'),
   actCommentsLabel: $('actCommentsLabel'),
@@ -217,6 +217,8 @@ interface Entry {
   retrying: boolean;
   /** Came from the saved feed (see resume): its play URLs may have expired, so a failure re-resolves once */
   restored?: boolean;
+  /** A like (or its taking back) of this video is on its way to the server */
+  liking?: boolean;
   reresolved?: boolean;
   /** Where the viewer was in this video when the page closed; applied once it plays */
   resumeAt?: number;
@@ -561,6 +563,55 @@ el.actComments.addEventListener('click', () => {
   const cur = activeEntry();
   if (cur) openComments(cur.item);
 });
+// The heart: like the video in view as the signed-in account, or take the like back. The heart
+// answers the tap at once (red, the count one up) and beats while the server presses the button on
+// TikTok's page in its browser (several seconds: TikTok takes a like from a browser only); what
+// TikTok says afterwards stays - a like that did not take turns the heart back and says so.
+function toggleLike(): void {
+  const entry = activeEntry();
+  if (!entry || entry.liking) return;
+  if (P.id !== 'tiktok') return void toast(`Liking is not available for ${P.name} here`);
+  const item = entry.item;
+  if (!item.author.uniqueId) return void toast('This video has no account to open its page with');
+  if (state.session?.state !== 'logged_in') {
+    toast(`Sign in to ${P.name} first (Profile) to like videos`, true, 4000);
+    void openSessionPanel();
+    return;
+  }
+  const want = !item.liked;
+  const before = { liked: item.liked, likes: item.stats.likes };
+  entry.liking = true;
+  item.liked = want;
+  if (item.stats.likes !== undefined) item.stats.likes = Math.max(0, item.stats.likes + (want ? 1 : -1));
+  const show = (): void => {
+    if (activeEntry() === entry) syncStats(entry);
+  };
+  show();
+  el.actLikes.classList.remove('popped');
+  void el.actLikes.offsetWidth;
+  el.actLikes.classList.add('popped');
+  void api
+    .like({ platform: P.id, id: item.id, author: item.author.uniqueId, like: want })
+    .then((r) => {
+      item.liked = r.liked;
+      if (r.likes !== undefined) item.stats.likes = r.likes;
+      else if (r.liked !== want) item.stats.likes = before.likes;
+      for (const w of r.warnings) console.warn('[like]', w);
+      if (r.liked !== want) toast(want ? `${P.name} did not take the like` : `${P.name} did not take the like back`, true, 5000);
+      else console.info(`[like] ${item.id}: ${r.liked ? 'liked' : 'like taken back'} · pressed in the server's browser, ${r.elapsedMs ?? '?'} ms`);
+    })
+    .catch((e) => {
+      item.liked = before.liked;
+      item.stats.likes = before.likes;
+      toast(`${want ? 'Like' : 'Taking the like back'} failed: ${errMsg(e)}`, true, 6000);
+    })
+    .finally(() => {
+      entry.liking = false;
+      show();
+      saveResume();
+    });
+}
+el.actLikes.addEventListener('click', toggleLike);
 // The "+" on the avatar: follow the account of the video in view; the badge goes once the account is followed.
 el.actFollow.addEventListener('click', () => {
   const author = activeEntry()?.item.author;
@@ -3049,9 +3100,13 @@ function syncFollow(entry: Entry | undefined): void {
 /** The video's likes and comments beside it (an item without the count shows no row). */
 function syncStats(entry: Entry): void {
   const { likes, comments } = entry.item.stats;
-  el.actLikes.classList.toggle('hidden', likes === undefined);
-  el.actLikesLabel.textContent = likes === undefined ? '' : fmtCount(likes);
-  el.actLikes.title = likes === undefined ? 'Likes' : `${likes.toLocaleString()} likes`;
+  const canLike = P.id === 'tiktok';
+  el.actLikes.classList.toggle('hidden', likes === undefined && !canLike);
+  el.actLikesLabel.textContent = likes === undefined ? (canLike ? 'Like' : '') : fmtCount(likes);
+  el.actLikes.classList.toggle('liked', Boolean(entry.item.liked));
+  el.actLikes.classList.toggle('liking', Boolean(entry.liking));
+  el.actLikes.setAttribute('aria-pressed', String(Boolean(entry.item.liked)));
+  el.actLikes.title = `${likes === undefined ? 'Likes' : `${likes.toLocaleString()} likes`}${canLike ? (entry.item.liked ? ' · tap to take your like back (L)' : ' · tap to like (L)') : ''}`;
   el.actComments.classList.toggle('hidden', comments === undefined);
   el.actCommentsLabel.textContent = comments === undefined ? '' : fmtCount(comments);
   el.actComments.title = comments === undefined ? 'Comments' : `${comments.toLocaleString()} comments`;
@@ -3573,6 +3628,10 @@ document.addEventListener('keydown', (e) => {
     case 'p':
     case 'P':
       if (cur?.item.author.uniqueId && !openAuthorBeside(cur.item)) void openProfile(cur.item.author.uniqueId);
+      break;
+    case 'l':
+    case 'L':
+      toggleLike();
       break;
     case 'ArrowDown':
     case 'j':

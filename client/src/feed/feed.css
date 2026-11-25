@@ -1405,7 +1405,45 @@ button {
 }
 /* the counts: nothing to press */
 .act.stat {
-  cursor: default;
+  cursor: pointer;
+}
+/* the heart: red once the signed-in account has liked the video; it beats while the like is on its way */
+#actLikes .ico svg {
+  transition:
+    color 0.15s,
+    transform 0.15s;
+}
+#actLikes.liked .ico svg {
+  color: #fe2c55;
+}
+#actLikes:active .ico svg {
+  transform: scale(0.86);
+}
+#actLikes.liking .ico svg {
+  animation: like-beat 0.8s ease-in-out infinite;
+}
+#actLikes.popped .ico svg {
+  animation: like-pop 0.34s cubic-bezier(0.32, 0.72, 0, 1);
+}
+@keyframes like-beat {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.16);
+  }
+}
+@keyframes like-pop {
+  0% {
+    transform: scale(0.7);
+  }
+  60% {
+    transform: scale(1.25);
+  }
+  100% {
+    transform: scale(1);
+  }
 }
 .act.stat .ico svg {
   width: 26px;

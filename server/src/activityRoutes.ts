@@ -65,6 +65,8 @@ export function describeRequest(method: string, path: string, body: any, query: 
         return { what: `Loading the videos of @${String(b.user || '').slice(0, 40)} from ${nameOf(b.platform)}`, platform: P(b.platform) };
       case '/api/follow':
         return { what: `${b.follow === false ? 'Unfollowing' : 'Following'} @${String(b.user || '').slice(0, 40)} on ${nameOf(b.platform)}`, platform: P(b.platform) };
+      case '/api/like':
+        return { what: `${b.like === false ? 'Taking a like back' : 'Liking a video'} on ${nameOf(b.platform)}`, platform: P(b.platform) };
       case '/api/comments':
         return { what: `Reading the comments of a ${nameOf(b.platform)} video`, platform: P(b.platform) };
       case '/api/comments/replies':

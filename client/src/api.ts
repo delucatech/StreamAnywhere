@@ -1,4 +1,4 @@
-import type { TikTokAccountRequest, TikTokAccountsResponse, AvatarRequest, AvatarResponse, LiveTvChannelGuideResponse, LiveTvChannelsResponse, LiveTvCodec, LiveTvGuideNowResponse, LiveTvHealthReport, LiveTvPrefs, LiveTvPrefsPatch, LiveTvPreset, LiveTvWindow, LiveTvProvider, LiveTvProviderInput, LiveTvState, LiveTvTestRequest, LiveTvTestResponse, LiveTvTuneResponse, LiveTvTuneStatus, ConversationResponse, DownloadJob, DownloadProbeResponse, DownloadSource, FeedProgress, LibraryCategory, LibraryEntry, LibraryEntryPatch, LibraryOptionsResponse, LibrarySaveHint, LibrarySaveResponse, LibraryState, FeedRequest, FeedResponse, FollowRequest, FollowResponse, HealthResponse, InboxCancelResponse, InboxResponse, CommentRepliesRequest, CommentRepliesResponse, CommentsRequest, CommentsResponse, LoginMode, Platform, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SendMessageResponse, ServerProbe, SessionInputRequest, SessionStatus } from '../../shared/types';
+import type { LikeRequest, LikeResponse, TikTokAccountRequest, TikTokAccountsResponse, AvatarRequest, AvatarResponse, LiveTvChannelGuideResponse, LiveTvChannelsResponse, LiveTvCodec, LiveTvGuideNowResponse, LiveTvHealthReport, LiveTvPrefs, LiveTvPrefsPatch, LiveTvPreset, LiveTvWindow, LiveTvProvider, LiveTvProviderInput, LiveTvState, LiveTvTestRequest, LiveTvTestResponse, LiveTvTuneResponse, LiveTvTuneStatus, ConversationResponse, DownloadJob, DownloadProbeResponse, DownloadSource, FeedProgress, LibraryCategory, LibraryEntry, LibraryEntryPatch, LibraryOptionsResponse, LibrarySaveHint, LibrarySaveResponse, LibraryState, FeedRequest, FeedResponse, FollowRequest, FollowResponse, HealthResponse, InboxCancelResponse, InboxResponse, CommentRepliesRequest, CommentRepliesResponse, CommentsRequest, CommentsResponse, LoginMode, Platform, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SendMessageResponse, ServerProbe, SessionInputRequest, SessionStatus } from '../../shared/types';
 import { beginWait, type WaitName } from './pending';
 
 /**
@@ -74,6 +74,8 @@ function waitLabel(method: 'GET' | 'POST', path: string, body?: unknown): string
         return `Loading the videos of @${short(b.user)}`;
       case '/api/follow':
         return `${b.follow === false ? 'Unfollowing' : 'Following'} @${short(b.user)}`;
+      case '/api/like':
+        return b.like === false ? 'Taking the like back' : 'Liking the video';
       case '/api/comments':
         return 'Loading the comments';
       case '/api/inbox/open':
@@ -279,6 +281,8 @@ export const api = {
   search: (req: SearchRequest): Promise<SearchResponse> => post('/api/search', req),
   profile: (req: ProfileRequest, label?: WaitName): Promise<ProfileResponse> => post('/api/profile', req, undefined, undefined, label),
   follow: (req: FollowRequest): Promise<FollowResponse> => post('/api/follow', req),
+  /** Like a video as the signed-in account, or take the like back (pressed in the server's browser: several seconds) */
+  like: (req: LikeRequest): Promise<LikeResponse> => post('/api/like', req, 120_000),
   /** The profile picture of a video's channel (YouTube); answers within a few seconds, without one when there is none */
   avatar: (req: AvatarRequest): Promise<AvatarResponse> => post('/api/avatar', req, 10_000),
   /** The conversation list; `signal` cancels the read (ApiError 499). Pair it with inboxCancel so the server's work stops as well. */

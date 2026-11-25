@@ -172,6 +172,7 @@ export function itemToFeedItem(item: any, upstream?: UpstreamSession, opts: { al
     cover: video.cover || video.originCover,
     music: item.music?.title,
     stats: { plays: num(stats.playCount), likes: num(stats.diggCount), comments: num(stats.commentCount), shares: num(stats.shareCount) },
+    liked: typeof item.digged === 'boolean' ? item.digged : undefined,
     formats,
   };
 }

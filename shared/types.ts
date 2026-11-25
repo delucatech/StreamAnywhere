@@ -274,6 +274,12 @@ export interface FeedItem {
   cover?: string;
   music?: string;
   stats: FeedStats;
+  /**
+   * TikTok: whether the signed-in account has liked this video, as the list it came from said
+   * (an answer read as a guest - Explore, a search - says false for every video; a tap on the
+   * heart then finds the real state).
+   */
+  liked?: boolean;
   /** Same shape as the resolver output: direct (cookie-free) URL + proxy relay per quality. H.264 first. */
   formats: MediaFormat[];
 }
@@ -468,6 +474,27 @@ export interface FollowResponse {
   warnings: string[];
   /** TikTok: how the follow was made (see FeedResponse.via) */
   via?: ReadVia;
+}
+
+/** POST /api/like: like a video as the signed-in account, or take the like back (TikTok) */
+export interface LikeRequest {
+  platform?: Platform;
+  /** The video's id and its author's handle (the server opens the video's page) */
+  id: string;
+  author: string;
+  like: boolean;
+}
+
+export interface LikeResponse {
+  id: string;
+  /** What the platform says after the press (not what was asked for) */
+  liked: boolean;
+  /** The video's like count afterwards, where known */
+  likes?: number;
+  warnings: string[];
+  /** How it was done: a like is always pressed in the server's browser (TikTok discards one made without it) */
+  via?: ReadVia;
+  elapsedMs?: number;
 }
 
 export interface Conversation {
