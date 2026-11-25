@@ -89,7 +89,7 @@ through the server's `/api/media/:id` (`server/src/proxy.ts`).
 
 | App | The list of videos | The playable file | To the viewer |
 |---|---|---|---|
-| **TikTok** | **Explore**: TikTok's unsigned `api/explore/item_list` over a Chrome-like connection (`tlsBridge.ts`); when that fails, the same request over plain HTTPS, then from inside the server's headless browser, which then stays preferred for 15 min. **For You**: a signed-in headless Chrome on `tiktok.com/foryou`; the server reads the `api/recommend/item_list` answers that page receives and keeps 20 videos ready while someone watches. **Profiles, comments, replies**: no browser - requests as a signed-out visitor, carrying the signature TikTok's page script would add (`tiktokSign.ts`) over the Chrome-like connection (`tiktokGuest.ts`); the headless browser when TikTok does not answer those. **Search, follow, messages**: the headless browser | Each variant's cookie-free `/aweme/v1/play` address (direct) and its cookie-bound `playAddr` (relay only). Items come with their formats; a pasted link or a search result without them goes through `POST /api/resolve` (TikTok's `item/detail` call as a guest first, the video's page behind it) | Direct, relay as fallback |
+| **TikTok** | **Explore**: TikTok's unsigned `api/explore/item_list` over a Chrome-like connection (`tlsBridge.ts`); when that fails, the same request over plain HTTPS, then from inside the server's headless browser, which then stays preferred for 15 min. **For You**: a signed-in headless Chrome on `tiktok.com/foryou`; the server reads the `api/recommend/item_list` answers that page receives and keeps 20 videos ready while someone watches (an account other than the main one can be switched to asking TikTok directly instead, without the browser: a test, see "For You and search without the browser"). **Profiles, comments, replies**: no browser - requests as a signed-out visitor, carrying the signature TikTok's page script would add (`tiktokSign.ts`) over the Chrome-like connection (`tiktokGuest.ts`); the headless browser when TikTok does not answer those. **Search**: the headless browser; for an account in that test, asked directly with the account's cookies (a guest gets no search answer). **Follow, messages**: the headless browser | Each variant's cookie-free `/aweme/v1/play` address (direct) and its cookie-bound `playAddr` (relay only). Items come with their formats; a pasted link or a search result without them goes through `POST /api/resolve` (TikTok's `item/detail` call as a guest first, the video's page behind it) | Direct, relay as fallback |
 | **YouTube** | **Shorts**: a hashtag's Shorts tab, listed by yt-dlp. **Search**: `youtubei/v1/search` (yt-dlp as fallback). **For You**: the TV API's home feed after the code sign-in; with cookies only, yt-dlp's `feed/recommended`. Channels: yt-dlp | `youtubei/v1/player` asked by the server (about 0.2 s); yt-dlp when that fails, with Deno for "made for kids" videos (one at a time, the video in view first). The answer is an H.264 picture-only file (up to 720p) and an AAC sound file, kept 1 h | Always the relay (the addresses are bound to the server's IP), in 4 MB pieces; two demuxers in step |
 | **Instagram** | Sign-in required. **Reels**: a rotation of public accounts whose profile pages are listed into a catalog. **For You**: the post codes of the account's `/reels/` page. All in one headless Chrome page | The post's embed page, fetched from inside that page: one MP4 with picture and sound | Direct, relay as fallback |
 | **Facebook** | **Reels**: public Pages' `/reels/` tabs over plain HTTPS, kept in a catalog. **For You**: the `FBUnifiedVideoContainerQuery` GraphQL query with the saved cookies. No browser | Progressive MP4s named in the same data: HD (720p) and SD (360p) | Direct, relay as fallback |
@@ -130,6 +130,7 @@ client/   Vite 4 + TypeScript front end (no framework)
   feed.html + src/feed/feed.ts    the feed page (feed.html?platform=tiktok|youtube|instagram|facebook): stream that follows the finger / mouse and snaps one video at a time (TikTok-like drag), tap-to-pause, auto-scroll, playback speed, save; which videos hold a player, direct-vs-relay, the saved feed
   src/feed/player.ts              FeedPlayer: the canvas player of the feeds, the Library and Live TV (WebCodecs, or the hidden-<video> fallback)
   src/feed/mediaCache.ts          the feed's media cache (IndexedDB): downloaded bytes of recent videos, budget and sweeps
+  src/accountVideos.ts            what a device keeps of an app's videos belongs to one server account: dropped when another becomes the active one
   src/feed/social.ts              the feed's panels: search, account pages with follow, messages
   library.html + src/library/     the Video Library: the page (library.ts), the IndexedDB store (db.ts), downloads (downloads.ts), what this browser can save (capabilities.ts), the player (player.ts: FeedPlayer fed from a Blob); download.html redirects here
   livetv.html + src/livetv/       Live TV: the channel browser + Settings (livetv.ts), the canvas player (player.ts: FeedPlayer on the server's endless MP4; no <video>, no hls.js), which codecs this browser decodes (codecs.ts)
@@ -509,7 +510,28 @@ computer) shows the same list and needs no TikTok sign-in of its own; the one ac
 active is active for all of them. A picked account that turns out to be signed out opens the
 panel to sign it in.
 
-#### For You without the browser (a test, per account, never the main one)
+**What a switch does on the screen (2026-11-25).** The page answers the tap before the server
+does: the tapped row spins and says "Switching…" (the other rows wait, a second tap does
+nothing), the profile icon says "Switching…", the playing video stops and the previous account's
+videos leave the screen, and the middle of the screen says who is being switched to with a
+running clock. The status line under it carries the server's step ("step 2 of 3 · closing the
+previous account's browser"). When the server has answered (0.1-0.3 s when no browser has to be
+closed, a few seconds when one does) the picker closes and that account's For You loads; its
+first videos come with a line saying whose they are and which way they were read.
+
+**Nothing of the previous account is kept on the device.** Its videos on screen, the saved feed
+(the one that plays on when the page reopens) and its position, the kept search results and the
+app's files in the media cache are dropped at the switch ([`accountVideos.ts`](client/src/accountVideos.ts),
+`dropAccountVideos` in `feed.ts`); the phrases searched stay. The server forgets its side too:
+the account's stock of captured videos, the search answers and account pages kept for every
+device (`invalidateJobs`), and a For You answer that never reached the viewer is not put back
+into another account's stock. A device that did not make the switch (the phone, while the car
+switched) notices by itself: the session status, the accounts list and every For You answer name
+the server's active account, each page remembers which account its videos were loaded as
+(`localStorage`), and on a difference it drops them and loads the new account's. The home screen
+does the same for the feed it keeps ready.
+
+#### For You and search without the browser (a test, per account, never the main one)
 
 Built 2026-11-25. The personalised For You is the last thing that needs the headless browser, and
 the browser is the heaviest thing on the small server. It can be asked from TikTok directly - the
@@ -529,9 +551,27 @@ signature, which TikTok could hold against it. So it is a switch per account, of
   request; the stock is filled behind the viewer's answer. The account's cookies are kept in
   `tiktok-accounts/<id>/cookies.json` (written when it signs in with cookies, or when the browser
   opens its feed) and updated as TikTok rotates them.
+- **Search too (2026-11-25).** With the account's cookies TikTok answers the search without a
+  browser, which it does for no guest: `api/search/general/full` (videos, 10-12 a page with their
+  files, the next pages by `offset` + `search_id`) and `api/search/user/full` (accounts), signed
+  (`searchTikTokDirect` in [`social.ts`](server/src/social.ts), `directGet` in `session.ts`). The
+  JSON parameter the page adds (`web_search_code`) must be left out: with it the answer is an
+  empty 200 within 80 ms. Measured on the PC: a search 1.9 s (6.5 s when it queued behind a For
+  You fill: the helper sends one request at a time), the next page 0.4-0.5 s, no browser started.
+- **Which way a read went is shown.** While waiting, the status line says "asking TikTok directly
+  (no browser)" or "opening For You in the server's browser" / "searching in the server's
+  browser", and the loading notice says the same; a batch that arrives while watching adds "asked
+  directly, no browser" or "read in the server's browser" to its "+N new videos" line, and the
+  search panel's result line ends the same way. `FeedResponse.via` / `SearchResponse.via` carry it
+  (`direct` | `browser`), and the picker marks such an account "asks TikTok directly, no browser".
+- **Still through the browser for every account**: following and unfollowing, messages (the
+  inbox, a conversation, sending), the QR-code and window sign-ins, and the fallbacks behind the
+  guest reads (comments on the signed-in work page, the profile page). Profiles, comments,
+  replies, Explore and video lookups are asked as a guest without a browser for every account,
+  the main one included (next section).
 - **Fallback**: a refusal, an empty answer or "signed out" sends that request through the browser
-  as before; three failures in a row pause the direct path for 10 minutes (`tiktokGuest.paths.foryou`
-  in `/api/health`).
+  as before; three failures in a row pause the direct path for 10 minutes, For You and search each
+  on its own (`tiktokGuest.paths.foryou` / `.search` in `/api/health`).
 - **The record**: every direct request is counted in the account's entry (`directCalls`,
   `directOk`, the last refusal and when), across restarts, and shown in its row ("Since Nov 25: 20
   of 20 requests answered"). That, and whether the account still signs in, is the evidence for
@@ -624,9 +664,10 @@ How it works:
   checks of its four files, as before).
 - **Also answered, not used**: the signed-out For You list (11-12 generic videos, not anyone's
   feed), related videos, hashtag details and search suggestions.
-- **With an account's own session** (a For You without the browser): tried on 2026-11-25 with a
-  spare account and built as a per-account test that the main account cannot be switched to - see
-  "For You without the browser" under "Several TikTok accounts" above.
+- **With an account's own session** (a For You and a search without the browser): tried on
+  2026-11-25 with a spare account and built as a per-account test that the main account cannot be
+  switched to - see "For You and search without the browser" under "Several TikTok accounts"
+  above. Search is refused for a guest and answered for an account.
 - **Looking before trying** ([`server/src/tiktokWire.ts`](server/src/tiktokWire.ts), built
   2026-11-25): whether that is possible at all can be read off the signed-in browser without
   sending TikTok anything. The server listens to what its own For You page sends by itself and

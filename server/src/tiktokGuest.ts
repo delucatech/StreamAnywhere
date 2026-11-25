@@ -357,7 +357,7 @@ export function commentAnswerUsable(json: any): boolean {
  * What is being read. Each kind has its own failure count and pause: TikTok refusing one path
  * (say, search) must not send the comments back to the browser.
  */
-export type GuestKind = 'comments' | 'replies' | 'explore' | 'profile' | 'posts' | 'video' | 'foryou';
+export type GuestKind = 'comments' | 'replies' | 'explore' | 'profile' | 'posts' | 'video' | 'foryou' | 'search';
 
 interface KindState {
   calls: number;
@@ -572,7 +572,7 @@ export async function openAccountVisit(cookies: Map<string, string>, log: (m: st
   kindState('foryou').calls += 1;
   const jar: Jar = new Map(cookies);
   try {
-    say('asking TikTok who is signed in (without the browser)', 'checking the TikTok sign-in');
+    say('asking TikTok directly who is signed in (no browser)', 'checking the sign-in directly (no browser)');
     const wait = lastCallAt + GAP_MS - Date.now();
     if (wait > 0) await abortable(new Promise<void>((r) => setTimeout(r, wait)), signal);
     lastCallAt = Date.now();
@@ -605,32 +605,57 @@ export async function openAccountVisit(cookies: Map<string, string>, log: (m: st
   }
 }
 
-/** One page of the account's For You list (TikTok's own JSON), signed, with the account's cookies. One try: a new visit would not help an account. */
-export async function accountForYou(visit: AccountVisit, round: number, count: number, log: (m: string) => void, signal?: AbortSignal): Promise<GuestAnswer> {
+export interface AccountGet {
+  kind: GuestKind;
+  path: string;
+  query: Record<string, string | number>;
+  /** For the status line: "your For You videos", "videos matching ..." */
+  what: string;
+  referer?: string;
+  /** Is this JSON an answer? Default: anything beyond TikTok's bare "ok" envelope */
+  usable?: (json: any) => boolean;
+  log: (m: string) => void;
+  signal?: AbortSignal;
+}
+
+/**
+ * One signed read with the account's cookies (TikTok's own JSON). One try: a new visit would not
+ * help an account. The status line says that TikTok is asked directly - no browser is involved.
+ */
+export async function accountGet(visit: AccountVisit, g: AccountGet): Promise<GuestAnswer> {
   const t0 = Date.now();
   stats.calls += 1;
-  kindState('foryou').calls += 1;
-  const referer = `${ORIGIN}/foryou`;
+  kindState(g.kind).calls += 1;
+  const referer = g.referer ?? `${ORIGIN}/foryou`;
   try {
-    say('asking TikTok for your For You videos (without the browser)', 'asking TikTok for For You videos');
-    const r = await call(
-      visit,
-      '/api/recommend/item_list/',
-      { odinId: visit.odinId ?? '', user_is_login: 'true', from_page: 'fyp', count, coverFormat: 2, itemID: '', pullType: round <= 1 ? 1 : 2, isNonPersonalized: 'false', vv_count_fyp: Math.max(0, round - 1), showAds: 'true', showAboutThisAd: 'true' },
-      { referer, signal },
-    );
+    say(`asking TikTok directly for ${g.what} (no browser: the account's sign-in, a signed request)`, 'asking TikTok directly (no browser)');
+    const r = await call(visit, g.path, { odinId: visit.odinId ?? '', user_is_login: 'true', ...g.query }, { referer, signal: g.signal });
     const code = Number(r.json?.status_code ?? r.json?.statusCode ?? 0);
     if (code !== 0) throw new GuestError(`TikTok status ${code}: ${r.json.status_msg || r.json.statusMsg || 'unavailable'}`, 'status', code);
-    if (!Array.isArray(r.json?.itemList) || !r.json.itemList.length) throw new GuestError('TikTok answered "ok" without any For You videos (its soft refusal)', 'empty');
-    succeeded('foryou', Date.now() - t0);
+    if (!(g.usable ?? beyondEnvelope)(r.json)) throw new GuestError(`TikTok answered "ok" without ${g.what} (its soft refusal)`, 'empty');
+    succeeded(g.kind, Date.now() - t0);
     return { json: r.json, ms: Date.now() - t0, attempts: 1, upstream: { cookieHeader: jarHeader(visit.jar), referer } };
   } catch (e) {
     if (e instanceof GuestError) {
-      failed('foryou', e.message, true, log);
-      log(`account For You: ${e.message}`);
+      // a status code is TikTok's answer to this one request, not the path failing
+      failed(g.kind, e.message, e.kind !== 'status', g.log);
+      g.log(`account ${g.kind}: ${e.message}`);
     }
     throw e;
   }
+}
+
+/** One page of the account's For You list (TikTok's own JSON), signed, with the account's cookies. */
+export function accountForYou(visit: AccountVisit, round: number, count: number, log: (m: string) => void, signal?: AbortSignal): Promise<GuestAnswer> {
+  return accountGet(visit, {
+    kind: 'foryou',
+    path: '/api/recommend/item_list/',
+    query: { from_page: 'fyp', count, coverFormat: 2, itemID: '', pullType: round <= 1 ? 1 : 2, isNonPersonalized: 'false', vv_count_fyp: Math.max(0, round - 1), showAds: 'true', showAboutThisAd: 'true' },
+    what: 'your For You videos',
+    usable: (j) => Array.isArray(j?.itemList) && j.itemList.length > 0,
+    log,
+    signal,
+  });
 }
 
 /** The visit's cookies as they are now (TikTok rotates msToken and others with its answers): kept for the next start. */

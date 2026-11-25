@@ -34,7 +34,7 @@ import { rememberBatch, staleBatch } from './lastBatch';
 import { getProgress } from './progress';
 import { say } from './activity';
 import { accountDirect, accountProfileDir, accountRecord, accountRecords, activeAccountId, activeProfileDir, cookieMap, createAccount, directAllowed, forgetAccountIdentity, loadAccountCookies, MAIN_ACCOUNT, noteDirect, parseTikTokCookies, rememberAccount, removeAccount, saveAccountCookies, setAccountDirect, setActiveAccount, TikTokAccountError, toBrowserCookies } from './tiktokAccounts';
-import { accountForYou, GuestError, guestUnusable, openAccountVisit, visitCookies, type AccountVisit } from './tiktokGuest';
+import { accountForYou, accountGet, GuestError, guestUnusable, openAccountVisit, visitCookies, type AccountGet, type AccountVisit, type GuestAnswer, type GuestKind } from './tiktokGuest';
 import { READ_STORAGE_SHAPES, READ_STORAGE_SHAPES_SO_FAR, summarizeKeys, watchWire, wireRecords, type WireRecord } from './tiktokWire';
 
 type Browser = import('puppeteer-core').Browser;
@@ -658,12 +658,17 @@ export function tiktokAccountList(): TikTokAccount[] {
 /** Stops everything that runs as the active account and forgets what was read as it. Deletes nothing. */
 async function standDown(): Promise<void> {
   qrAttempt++; // a QR launch still in flight stops instead of opening an orphan page
-  if (probe) await probe.catch(() => undefined);
+  if (probe) {
+    say('waiting for the sign-in check of the previous account to end', 'step 1 of 3 · finishing a sign-in check');
+    await probe.catch(() => undefined);
+  }
   // (a browser that is still starting would come up on the old profile after the switch)
+  if (headlessLaunch || feedPageOpening) say("waiting for the previous account's browser, which is still starting (it is closed next)", 'step 1 of 3 · waiting for a browser that is still starting');
   if (headlessLaunch) await headlessLaunch.catch(() => undefined);
   if (feedPageOpening) await feedPageOpening.catch(() => undefined);
   const lb = s.loginBrowser;
   s.loginBrowser = undefined;
+  if (lb || s.headless) say("closing the previous account's browser on the server", "step 2 of 3 · closing the previous account's browser");
   if (lb) await lb.close().catch(() => undefined);
   await closeHeadless();
   s.state = 'none';
@@ -705,6 +710,7 @@ export async function switchTikTokAccount(id: string, log: (m: string) => void):
   } finally {
     switching = false;
   }
+  say(directOn() ? "asking TikTok directly who the new account is (no browser)" : "starting the check of the new account's saved sign-in", 'step 3 of 3 · checking the new account');
   return sessionProbe();
 }
 let switching = false;
@@ -2350,6 +2356,8 @@ export interface ForYouResult {
   warnings: string[];
   /** Videos served on an earlier visit (nothing was ready); the page is loading fresh ones */
   stale?: boolean;
+  /** How these were read: TikTok asked directly (an account in the test), or the signed-in browser on the server */
+  via?: 'direct' | 'browser';
 }
 
 /** How many captured For You items the pump keeps ready while someone is watching */
@@ -2381,10 +2389,37 @@ let directCheckFailedAt = 0;
 const DIRECT_VISIT_MS = 20 * 60 * 1000;
 
 /** The active account is in the test, is not the main one, and its cookies are at hand. */
-function directOn(): boolean {
+function directOn(kind: GuestKind = 'foryou'): boolean {
   const id = activeAccountId();
   if (id === MAIN_ACCOUNT) return false;
-  return accountDirect(id) && !guestUnusable('foryou') && Boolean(loadAccountCookies(id));
+  return accountDirect(id) && !guestUnusable(kind) && Boolean(loadAccountCookies(id));
+}
+
+/** Whether the active account's reads of this kind go to TikTok without the browser right now (the test; never the main account). */
+export const tiktokDirectOn = (kind: GuestKind = 'foryou'): boolean => directOn(kind);
+
+/**
+ * One signed read as the active account without the browser (a search: social.ts searchTikTok),
+ * counted in the account's record like a For You request. Throws GuestError when
+ * TikTok does not answer it: the caller then asks through the browser, as before.
+ */
+export async function directGet(g: AccountGet): Promise<GuestAnswer> {
+  const id = activeAccountId();
+  if (!directOn(g.kind)) throw new GuestError('this account does not ask TikTok without the browser', 'session');
+  try {
+    const visit = await directVisitNow(g.log);
+    const r = await accountGet(visit, g);
+    if (activeAccountId() !== id) throw new GuestError('the active account changed meanwhile', 'session');
+    noteDirect(id, true);
+    saveAccountCookies(id, visitCookies(visit));
+    return r;
+  } catch (e) {
+    if (e instanceof GuestError && activeAccountId() === id) {
+      noteDirect(id, false, e.message);
+      if (e.kind === 'session') directVisit = undefined;
+    }
+    throw e;
+  }
 }
 
 async function directVisitNow(log: (m: string) => void): Promise<AccountVisit> {
@@ -2608,6 +2643,7 @@ async function fetchForYouNow(count: number, log: (m: string) => void, quick = f
       if (s.pending.length < 12) {
         let failure: unknown;
         let done = false;
+        if (!s.pending.length) say('asking TikTok directly for your For You videos (no browser)', 'asking TikTok directly (no browser)');
         void directFillNow(FORYOU_TARGET, feedLog)
           .catch((e) => (failure = e))
           .finally(() => (done = true));
@@ -2618,7 +2654,7 @@ async function fetchForYouNow(count: number, log: (m: string) => void, quick = f
       if (s.pending.length) {
         const items = s.pending.splice(0, count);
         rememberBatch(forYouBatchKey(), items);
-        return { items, warnings };
+        return { items, warnings, via: 'direct' };
       }
       log('For You without the browser brought nothing new; asking through the browser');
     } catch (e) {
@@ -2638,7 +2674,7 @@ async function fetchForYouNow(count: number, log: (m: string) => void, quick = f
   // FORYOU_ALLOW_GUEST=1 lets the headless page run signed-out (TikTok's guest feed: a few videos,
   // then a login wall) – for testing the capture mechanism only.
   if (s.state !== 'logged_in' && !guestAllowed()) {
-    say('checking the saved TikTok sign-in (the browser on the server asks TikTok who is signed in)');
+    say('checking the saved TikTok sign-in (the browser on the server asks TikTok who is signed in)', "checking the sign-in in the server's browser");
     await sessionProbe(true);
     if ((s.state as SessionStatus['state']) !== 'logged_in') {
       // An inconclusive check (the browser still starting, an empty answer from TikTok) is not a
@@ -2649,7 +2685,7 @@ async function fetchForYouNow(count: number, log: (m: string) => void, quick = f
     }
   }
   forYouAskedAt = Date.now();
-  say('opening your For You page in the signed-in TikTok browser');
+  say('opening your For You page in the signed-in TikTok browser on the server', "opening For You in the server's browser");
   const page = await feedPage();
   startForYouPump();
   const deadline = Date.now() + 12_000;
@@ -2662,7 +2698,7 @@ async function fetchForYouNow(count: number, log: (m: string) => void, quick = f
       await nudgeFeedPage(page);
     }
     polls++;
-    if (polls % 3 === 1) say(`waiting for TikTok to hand For You videos to the server's browser (${s.pending.length} of ${enough} so far, up to 12 s)`);
+    if (polls % 3 === 1) say(`waiting for TikTok to hand For You videos to the server's browser (${s.pending.length} of ${enough} so far, up to 12 s)`, "reading For You in the server's browser");
     await new Promise((r) => setTimeout(r, 300));
     if (s.lastFeedError && polls > 12 && !s.pending.length) break;
   }
@@ -2686,7 +2722,7 @@ async function fetchForYouNow(count: number, log: (m: string) => void, quick = f
   }
   const items = s.pending.splice(0, count);
   if (items.length) rememberBatch(forYouBatchKey(), items);
-  return { items, warnings };
+  return { items, warnings, via: 'browser' };
 }
 
 export function profileDir(): string {

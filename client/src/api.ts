@@ -80,6 +80,9 @@ function waitLabel(method: 'GET' | 'POST', path: string, body?: unknown): string
         return 'Opening the conversation';
       case '/api/inbox/send':
         return 'Sending your message';
+      case '/api/session/accounts':
+        // (switching the test on or off answers at once)
+        return b.action === 'switch' ? 'Switching accounts' : b.action === 'add' ? 'Adding an account' : b.action === 'remove' ? 'Removing the account' : undefined;
       case '/api/session/login':
         return 'Starting the sign-in';
       case '/api/session/logout':

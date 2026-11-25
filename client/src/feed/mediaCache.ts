@@ -220,6 +220,27 @@ export async function sweep(protect: Set<string>): Promise<SweepResult | undefin
   }
 }
 
+/**
+ * Deletes every cached file of one app (its keys start with "<platform>:"): the videos of an
+ * account that is no longer the active one. How many files went; never throws.
+ */
+export async function dropCached(platform: string): Promise<number> {
+  if (unavailable) return 0;
+  try {
+    const db = await open();
+    const tx = db.transaction(STORE, 'readwrite');
+    const s = tx.objectStore(STORE);
+    const range = IDBKeyRange.bound(`${platform}:`, `${platform}:￿`);
+    const n = await reqAsync(s.count(range));
+    if (n) s.delete(range);
+    await txDone(tx);
+    usedBytes = -1; // unknown until the next sweep counts again
+    return n;
+  } catch {
+    return 0;
+  }
+}
+
 /** Deletes every cached file (the Library's "clear" and tests). */
 export async function wipeMediaCache(): Promise<void> {
   const db = await open();

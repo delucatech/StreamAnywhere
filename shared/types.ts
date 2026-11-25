@@ -324,7 +324,17 @@ export interface FeedResponse {
   stale?: boolean;
   /** A line for the viewer about a stale answer: what was served instead of the feed asked for (e.g. Explore videos while For You loads) */
   note?: string;
+  /**
+   * TikTok For You: how these videos were read - `direct`: TikTok was asked without a browser (an
+   * account in the test), `browser`: by the signed-in browser on the server. Absent for stock answers.
+   */
+  via?: ReadVia;
+  /** TikTok For You: the server's account these are for ("main" or an id); a page holding another account's videos drops them */
+  account?: string;
 }
+
+/** How the server read something from TikTok: asked directly (no browser), or through its signed-in browser */
+export type ReadVia = 'direct' | 'browser';
 
 /** GET /api/feed/progress?platform=: the step a slow fill is on (no text when nothing is running). */
 export interface FeedProgress {
@@ -419,6 +429,8 @@ export interface SearchResponse {
   elapsedMs: number;
   /** Set when this is an earlier answer (this many seconds old) and the server is fetching a fresh one: ask again in a little while */
   cachedAgeSec?: number;
+  /** TikTok: how the search was made (see FeedResponse.via) */
+  via?: ReadVia;
 }
 
 export interface ProfileRequest {

@@ -76,6 +76,9 @@ export function describeRequest(method: string, path: string, body: any, query: 
       case '/api/inbox/cancel':
       case '/api/comments/cancel':
         return { what: 'Stopping a read that is no longer wanted' };
+      case '/api/session/accounts':
+        // (switching the test on or off answers at once)
+        return b.action === 'switch' ? { what: 'Switching the TikTok account', platform: 'tiktok' } : b.action === 'add' ? { what: 'Adding a TikTok account', platform: 'tiktok' } : b.action === 'remove' ? { what: 'Removing a TikTok account', platform: 'tiktok' } : undefined;
       case '/api/session/login':
         return { what: `Starting the ${nameOf(b.platform)} sign-in`, platform: P(b.platform) };
       case '/api/session/logout':

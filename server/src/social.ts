@@ -42,7 +42,7 @@
 import type { Page } from 'puppeteer-core';
 import type { ChatMessage, CommentRepliesResponse, CommentsResponse, Conversation, ConversationResponse, FeedItem, FollowResponse, FollowState, InboxResponse, ProfileResponse, SearchResponse, SendMessageResponse, UserSummary, VideoComment } from '../../shared/types';
 import { itemToFeedItem, relationToState } from './feed';
-import { isLoggedIn, onTikTokAccountChange, pageCookieHeader, resetWorkPage, withWorkPage } from './session';
+import { directGet, isLoggedIn, onTikTokAccountChange, pageCookieHeader, resetWorkPage, tiktokDirectOn, withWorkPage } from './session';
 import { ytdlpInfo } from './ytdlp';
 import { GuestError, guestCommentList, guestGet, guestPage, guestReplyList, guestUnusable, pageScope } from './tiktokGuest';
 import { say } from './activity';
@@ -288,13 +288,79 @@ async function fetchInPage(page: Page, url: string, attempts = 3, log?: (m: stri
   return text;
 }
 
+/** What a search answer (general/full) holds: its videos, and the accounts listed among them (handed to `addUser`). */
+function readSearchAnswer(json: any, upstream: { cookieHeader: string; referer: string }, addUser: (ui: any) => void): FeedItem[] {
+  const items: FeedItem[] = [];
+  for (const d of Array.isArray(json.data) ? json.data : []) {
+    if (d?.item && !d.item.imagePost) {
+      // Photo posts (slideshows) are not videos; a video whose play URLs the guest answer stripped
+      // is kept without formats and resolved by the viewer when it comes up.
+      const it = itemToFeedItem(d.item, upstream, { allowUnplayable: true });
+      if (it) items.push(it);
+    }
+    if (Array.isArray(d?.user_list)) for (const ul of d.user_list) addUser(ul?.user_info || ul);
+    if (d?.user_info) addUser(d.user_info);
+  }
+  return items;
+}
+
+/**
+ * The search without the browser, for an account in the test "without the browser" (never the main
+ * one; session.ts directGet): the same two requests the page makes, signed, with the account's
+ * cookies. TikTok answers them for an account (2026-11-25: 12 videos with files in 1.2 s, 10
+ * accounts in 0.8 s) and for no guest. `web_search_code` - the JSON the page adds to the first
+ * request - must be left out: with it the answer is an empty 200 within 80 ms.
+ */
+async function searchTikTokDirect(q: string, offset: number, log: (m: string) => void): Promise<SearchResponse> {
+  const t0 = Date.now();
+  const warnings: string[] = [];
+  const referer = `${TT}/search?q=${encodeURIComponent(q)}`;
+  const query: Record<string, string | number> = { from_page: 'search', keyword: q, offset, search_source: 'normal_search' };
+  if (offset && lastSearch?.q === q && lastSearch.id) query.search_id = lastSearch.id;
+  const r = await directGet({ kind: 'search', path: '/api/search/general/full/', query, what: `videos matching "${q.slice(0, 40)}"`, referer, usable: (j) => Array.isArray(j?.data) || j?.has_more !== undefined, log });
+  const json = r.json;
+  const users: UserSummary[] = [];
+  const seenUsers = new Set<string>();
+  const addUser = (ui: any): void => {
+    const u = userFromSearch(ui);
+    if (u && !seenUsers.has(u.uniqueId)) {
+      seenUsers.add(u.uniqueId);
+      users.push(u);
+    }
+  };
+  const items = readSearchAnswer(json, r.upstream, addUser);
+  lastSearch = { q, id: json.extra?.logid || json.log_pb?.impr_id || lastSearch?.id };
+  if (offset === 0) {
+    // Accounts matching the words: a separate request; best effort.
+    try {
+      const ur = await directGet({ kind: 'search', path: '/api/search/user/full/', query: { from_page: 'search', keyword: q, cursor: 0, count: 12, search_source: 'normal_search' }, what: `accounts matching "${q.slice(0, 40)}"`, referer, usable: (j) => Array.isArray(j?.user_list) || j?.has_more !== undefined, log });
+      for (const ul of Array.isArray(ur.json?.user_list) ? ur.json.user_list : []) addUser(ul?.user_info || ul);
+    } catch (e) {
+      warnings.push(`account search unavailable (${(e as Error).message})`);
+    }
+  }
+  log(`search "${q}" offset ${offset} without the browser: ${items.length} videos, ${users.length} accounts, ${Date.now() - t0} ms`);
+  const next = num(json.cursor);
+  return { q, items, users, hasMore: json.has_more === 1 || json.has_more === true, offset: next !== undefined && next > offset ? next : offset + Math.max(items.length, 1), warnings, elapsedMs: Date.now() - t0, via: 'direct' };
+}
+
 export async function searchTikTok(q: string, offset: number, log: (m: string) => void): Promise<SearchResponse> {
+  // An account in the test "without the browser": TikTok is asked directly, and the browser is not
+  // started. Whatever goes wrong there, the search goes on through the browser as before.
+  if (tiktokDirectOn('search')) {
+    try {
+      return await searchTikTokDirect(q, offset, log);
+    } catch (e) {
+      log(`search "${q}" without the browser failed (${(e as Error).message.split(/\r?\n/)[0]}); asking through the browser`);
+    }
+  }
   const t0 = Date.now();
   const warnings: string[] = [];
   const params = new URLSearchParams({ ...COMMON, from_page: 'search', keyword: q, offset: String(offset), search_source: 'normal_search', web_search_code: '{"tiktok":{"client_params_x":{"search_engine":{"ies_mt_user_live_video_card_use_libra":1,"mt_search_general_user_live_card":1}},"search_server":{}}}' });
   if (offset && lastSearch?.q === q && lastSearch.id) params.set('search_id', lastSearch.id);
   const url = `${TT}/api/search/general/full/?${params}`;
   let text = '';
+  say('searching TikTok in the signed-in browser on the server (Chromium)', "searching in the server's browser");
   try {
     text = await withWorkPage(log, (page) => fetchInPage(page, url, 2, log), 'search');
   } catch (e) {
@@ -315,7 +381,6 @@ export async function searchTikTok(q: string, offset: number, log: (m: string) =
     if (code !== 0) throw new SocialError(`TikTok search status ${code}: ${json.status_msg || json.statusMsg || 'unavailable'}`);
     const cookieHeader = await pageCookieHeader(page);
     const upstream = { cookieHeader, referer: `${TT}/search?q=${encodeURIComponent(q)}` };
-    const items: FeedItem[] = [];
     const users: UserSummary[] = [];
     const seenUsers = new Set<string>();
     const addUser = (ui: any) => {
@@ -325,16 +390,7 @@ export async function searchTikTok(q: string, offset: number, log: (m: string) =
         users.push(u);
       }
     };
-    for (const d of Array.isArray(json.data) ? json.data : []) {
-      if (d?.item && !d.item.imagePost) {
-        // Photo posts (slideshows) are not videos; a video whose play URLs the guest answer stripped
-        // is kept without formats and resolved by the viewer when it comes up.
-        const it = itemToFeedItem(d.item, upstream, { allowUnplayable: true });
-        if (it) items.push(it);
-      }
-      if (Array.isArray(d?.user_list)) for (const ul of d.user_list) addUser(ul?.user_info || ul);
-      if (d?.user_info) addUser(d.user_info);
-    }
+    const items = readSearchAnswer(json, upstream, addUser);
     lastSearch = { q, id: json.extra?.logid || json.log_pb?.impr_id || lastSearch?.id };
     if (offset === 0) {
       // Accounts matching the words: a separate endpoint; best effort (it may be refused).
@@ -349,7 +405,7 @@ export async function searchTikTok(q: string, offset: number, log: (m: string) =
     }
     log(`search "${q}" offset ${offset}: ${items.length} videos, ${users.length} accounts, ${Date.now() - t0} ms`);
     const next = num(json.cursor);
-    return { q, items, users, hasMore: json.has_more === 1 || json.has_more === true, offset: next !== undefined && next > offset ? next : offset + Math.max(items.length, 1), warnings, elapsedMs: Date.now() - t0 };
+    return { q, items, users, hasMore: json.has_more === 1 || json.has_more === true, offset: next !== undefined && next > offset ? next : offset + Math.max(items.length, 1), warnings, elapsedMs: Date.now() - t0, via: 'browser' };
   }, 'search');
 }
 

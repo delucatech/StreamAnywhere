@@ -43,7 +43,7 @@
  * back to this app from another, the saved feed after the page was closed) is fed from disk first,
  * the rest from the network. A sweep between videos makes room (see mediaCache.ts).
  */
-import type { FeedAuthor, FeedItem, FeedSource, FollowState, LibraryEntry, LoginMode, MediaFormat, ResolveResponse, SessionInputRequest, SessionStatus, TikTokAccount, TikTokAccountRequest, TikTokAccountsResponse } from '../../../shared/types';
+import type { FeedAuthor, FeedItem, FeedSource, FollowState, LibraryEntry, LoginMode, MediaFormat, ReadVia, ResolveResponse, SessionInputRequest, SessionStatus, TikTokAccount, TikTokAccountRequest, TikTokAccountsResponse } from '../../../shared/types';
 import '../activity';
 import { api, ApiError, apiUrl, waitRef } from '../api';
 import { startAppUpdates } from '../appUpdate';
@@ -55,8 +55,9 @@ import * as libdb from '../library/db';
 import * as libdl from '../library/downloads';
 import { currentPlatform, PLATFORMS, rememberApp, type PlatformDef } from '../platforms';
 import { fileKey, getCached, itemKey, MAX_AGE as CACHE_MAX_AGE, overBudget, putCached, sweep, type CacheRole } from './mediaCache';
+import { accountIs, dropStoredVideos } from '../accountVideos';
 import { FeedPlayer, feedPlayerMode } from './player';
-import { closeComments, closeTopPanel, commentsOpen, initSocial, openComments, openInbox, openProfile, openSearch, panelOpen, reopenPlayList, type PlayList } from './social';
+import { closeComments, closeTopPanel, commentsOpen, forgetAccountResults, initSocial, openComments, openInbox, openProfile, openSearch, panelOpen, reopenPlayList, type PlayList } from './social';
 
 // feed.html's failsafe reports whether this script ran at all
 (window as unknown as { streamAnywhereStarted: boolean }).streamAnywhereStarted = true;
@@ -1081,15 +1082,137 @@ let removeArmed: string | undefined;
 /** The same for switching the test on: the first tap arms it */
 let directArmed: string | undefined;
 let accountsBusy = false;
+/** The request that is running, so the button or row that started it can say so */
+let busyAction: { action: TikTokAccountRequest['action']; id?: string } | undefined;
+/** The account being switched to, from the tap until its feed is asked for */
+let switchingTo: { id: string; name: string; since: number } | undefined;
+/** The first videos after a switch say how they were read (directly, or by the server's browser) */
+let announceSwitched: string | undefined;
+
+const accountName = (a: TikTokAccount): string => (a.username ? `@${a.username}` : a.label);
+/** The active account asks TikTok directly, without the server's browser (the test; never the main account). */
+const activeDirect = (): boolean => Boolean(accounts?.find((a) => a.active)?.direct);
+/** A read's method in the viewer's words, where the server names it. */
+const viaText = (via: ReadVia | undefined): string => (via === 'direct' ? 'asked directly, no browser' : via === 'browser' ? "read in the server's browser" : '');
 
 async function refreshAccounts(): Promise<void> {
   if (!P.accounts) return;
   try {
-    accounts = (await api.sessionAccounts()).accounts;
+    const r = await api.sessionAccounts();
+    accounts = r.accounts;
+    if (!accountsBusy) noteAccount(r.active);
   } catch (e) {
     console.warn('[accounts] the list did not come:', errMsg(e));
   }
   renderAccounts();
+  if (accountMenuOpen()) renderAccountMenu();
+}
+
+// ---------- the videos on this device belong to one account ----------
+/**
+ * Forgets what this device keeps of the account that was active: the saved feed and its position,
+ * the kept search results, the follow states and the app's files in the media cache
+ * (accountVideos.ts). The videos on screen are the caller's to remove (emptyFeed).
+ */
+function dropAccountVideos(): void {
+  clearResume();
+  sourceKeep = undefined;
+  followKnown.clear();
+  // a player released from here on must not hand its bytes to the cache: they are the previous account's
+  for (const e of state.entries) e.stored = { video: Infinity, audio: Infinity };
+  forgetAccountResults();
+  void dropStoredVideos(P.id).then((n) => console.info(`[accounts] another account is active: the saved feed, the kept search results and ${n} cached file(s) of the previous one were dropped`));
+}
+/**
+ * The server names its active account (session status, accounts list, a For You answer). When that
+ * is not the one this page's videos were loaded as - it was switched on another device, or while
+ * this page was closed - they go and the new account's feed is asked for.
+ */
+function noteAccount(id: string | undefined): boolean {
+  if (!P.accounts || !accountIs(P.id, id) || switchingTo) return false;
+  toast(`Another ${P.name} account is in use now – loading its videos`, false, 4000);
+  announceSwitched = undefined;
+  dropAccountVideos();
+  // who that is and how it reads (the profile icon's name, the picker's rows); neither comes back here: the account is noted
+  window.setTimeout(() => void refreshSession().then(() => refreshAccounts()), 0);
+  if (state.mode.kind !== 'source') {
+    state.mode = { kind: 'source' };
+    renderSourceUi();
+  }
+  emptyFeed();
+  scheduleMoreIfNeeded(); // (a batch still on its way is for the old feed: loadMore asks again when it lands)
+  return true;
+}
+
+/**
+ * Switches to another of the server's accounts. The page answers the tap before the server does:
+ * the tapped row (or button) spins, the playing video stops and the previous account's videos
+ * leave the screen and this device; the middle of the screen says who is being switched to until
+ * the server is through (closing a browser there can take seconds), then that account's feed loads.
+ */
+async function switchAccount(a: TikTokAccount): Promise<void> {
+  if (accountsBusy || a.active) return;
+  const name = accountName(a);
+  switchingTo = { id: a.id, name, since: Date.now() };
+  announceSwitched = undefined;
+  dropAccountVideos();
+  if (state.mode.kind !== 'source') {
+    state.mode = { kind: 'source' };
+    renderSourceUi();
+  }
+  emptyFeed();
+  state.exhausted = true; // nothing is asked for until the server has switched
+  showSwitching();
+  const ok = await accountAction({ action: 'switch', id: a.id }, 'Switching accounts…');
+  switchingTo = undefined;
+  closeAccountMenu();
+  // whichever account the server has now is the one this page's videos will be loaded as
+  accountIs(P.id, accounts?.find((x) => x.active)?.id);
+  const s = state.session;
+  const signedIn = Boolean(ok && s && (s.state === 'logged_in' || s.probing));
+  if (ok) {
+    announceSwitched = name;
+    toast(signedIn ? `Now using ${name} – loading its ${P.tabs.foryou} feed` : `Now using ${name} – it is not signed in yet`, false, 4000);
+    prefs.source = signedIn ? 'foryou' : 'explore';
+    if (signedIn) {
+      prefs.pick = 'auto';
+      savePrefs();
+    }
+    renderSourceUi();
+  }
+  void reload();
+  if (!ok) return;
+  if (s && s.supported && !signedIn && s.state !== 'login_pending') {
+    void openSessionPanel();
+    return;
+  }
+  // Once the server has checked the account's saved sign-in: one that turns out to be signed out
+  // needs the panel (to sign it in); a signed-in one just goes on loading its feed.
+  let tries = 0;
+  const settled = window.setInterval(() => {
+    const now = state.session;
+    if (++tries < 90 && (!now || now.probing)) return;
+    window.clearInterval(settled);
+    if (now && now.supported && now.state !== 'logged_in' && now.state !== 'login_pending') void openSessionPanel();
+  }, 1000);
+}
+/** The middle of the (empty) screen while the server switches accounts: who to, and that it is moving. */
+function showSwitching(): void {
+  clearInterval(loadingTicker);
+  const render = (): void => {
+    if (!switchingTo) return;
+    const sec = Math.round((Date.now() - switchingTo.since) / 1000);
+    showLoading(`Switching to ${switchingTo.name}…`, `The previous account's videos were cleared from this device\n${sec < 2 ? 'Asking the server to switch' : `The server is closing the previous account · ${sec} s`}`);
+  };
+  render();
+  loadingTicker = window.setInterval(render, 1000);
+}
+/** The profile icons while an account request runs: a pulse, and what is going on instead of the name. */
+function syncProfileBusy(): void {
+  const busy = accountsBusy && busyAction?.action !== 'direct';
+  el.navProfile.classList.toggle('busy', busy);
+  el.railProfile.classList.toggle('busy', busy);
+  if (busy && switchingTo) el.navProfileLabel.textContent = el.railProfileLabel.textContent = 'Switching…';
 }
 
 function renderAccounts(): void {
@@ -1100,6 +1223,7 @@ function renderAccounts(): void {
   // Who it is when known; else what is known: the active one's state, or that a sign-in was saved for it.
   // The active account's state is the session's own (fresher than the list, which is fetched when the panel opens).
   const activeIn = s?.state === 'logged_in';
+  const doing = (action: TikTokAccountRequest['action'], id?: string): boolean => accountsBusy && busyAction?.action === action && busyAction.id === id;
   const handle = (a: TikTokAccount): string | undefined => (a.active && activeIn && s?.username ? s.username : a.username);
   const name = (a: TikTokAccount): string => (handle(a) && (!a.active || activeIn || s?.probing) ? `@${handle(a)}` : a.active ? (s?.probing ? 'checking the sign-in…' : 'not signed in') : a.saved ? 'saved sign-in' : 'not signed in');
   const rows = accounts
@@ -1107,7 +1231,7 @@ function renderAccounts(): void {
       const state2 = a.active ? (activeIn ? 'Active' : s?.probing ? 'Active · checking…' : 'Active · not signed in') : '';
       const buttons = a.active
         ? `<span class="acct-state">${esc(state2)}</span>`
-        : `<button class="btn small" type="button" data-acct-switch="${esc(a.id)}"${accountsBusy ? ' disabled' : ''}>Switch</button>${a.main ? '' : `<button class="btn small ghost" type="button" data-acct-remove="${esc(a.id)}"${accountsBusy ? ' disabled' : ''}>${removeArmed === a.id ? 'Tap again to remove' : 'Remove'}</button>`}`;
+        : `<button class="btn small${doing('switch', a.id) ? ' busy' : ''}" type="button" data-acct-switch="${esc(a.id)}"${accountsBusy ? ' disabled' : ''}>${doing('switch', a.id) ? 'Switching…' : 'Switch'}</button>${a.main ? '' : `<button class="btn small ghost${doing('remove', a.id) ? ' busy' : ''}" type="button" data-acct-remove="${esc(a.id)}"${accountsBusy ? ' disabled' : ''}>${doing('remove', a.id) ? 'Removing…' : removeArmed === a.id ? 'Tap again to remove' : 'Remove'}</button>`}`;
       // "For You without the browser": a test an account other than the main one can be switched to.
       const st = a.directStats;
       const day = (ms: number): string => new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
@@ -1122,15 +1246,20 @@ function renderAccounts(): void {
       return `<div class="acct-row${a.active ? ' active' : ''}">${a.avatar ? `<img src="${esc(a.avatar)}" alt="" draggable="false" />` : '<span class="acct-noimg"></span>'}<div class="acct-name"><b>${esc(name(a))}</b><span>${esc(a.label)}</span></div>${buttons}</div>${test}`;
     })
     .join('');
-  el.sessionAccounts.innerHTML = `<div class="session-label">Accounts on this server</div>${rows}<div class="acct-add"><input id="acctLabel" type="text" maxlength="40" placeholder="Name for a new account (optional)" autocomplete="off" /><button class="btn" type="button" data-acct-add="1"${accountsBusy ? ' disabled' : ''}>Add another account</button></div><div class="acct-note">One account is active at a time. Switching closes the server's ${esc(P.name)} browser and opens the other account's; nothing is deleted. A new account starts signed out: sign it in below.</div>`;
+  el.sessionAccounts.innerHTML = `<div class="session-label">Accounts on this server</div>${rows}<div class="acct-add"><input id="acctLabel" type="text" maxlength="40" placeholder="Name for a new account (optional)" autocomplete="off" /><button class="btn${doing('add') ? ' busy' : ''}" type="button" data-acct-add="1"${accountsBusy ? ' disabled' : ''}>${doing('add') ? 'Adding…' : 'Add another account'}</button></div><div class="acct-note">One account is active at a time. Switching closes the server's ${esc(P.name)} browser and opens the other account's; nothing is deleted. A new account starts signed out: sign it in below.</div>`;
 }
 
-async function accountAction(req: TikTokAccountRequest, doing: string): Promise<void> {
-  if (accountsBusy) return;
+/** One account request at a time; true when the server did it. What was pressed says so at once (busyAction). */
+async function accountAction(req: TikTokAccountRequest, doing: string): Promise<boolean> {
+  if (accountsBusy) return false;
   accountsBusy = true;
+  busyAction = { action: req.action, id: req.id };
   removeArmed = directArmed = undefined;
   renderAccounts();
+  if (accountMenuOpen()) renderAccountMenu();
+  syncProfileBusy();
   if (req.action !== 'direct') el.sessionText.innerHTML = `<b>${esc(doing)}</b>\nThe server closes its ${esc(P.name)} browser first; this takes a few seconds.`;
+  let ok = false;
   try {
     const r = await api.sessionAccount(req);
     accounts = r.accounts;
@@ -1139,12 +1268,15 @@ async function accountAction(req: TikTokAccountRequest, doing: string): Promise<
       state.session = r.session;
       rememberSignedIn(state.session);
     }
-    if (req.action === 'direct') toast(req.on ? 'Test on: For You is asked without the browser for this account' : 'Test off: this account uses the browser again');
-    else if (req.action !== 'remove') {
-      // The videos on screen are the previous account's feed: the new account's comes once it is signed in.
+    ok = true;
+    if (req.action === 'direct') toast(req.on ? 'Test on: For You and search are asked without the browser for this account' : 'Test off: this account uses the browser again');
+    else if (req.action === 'add') {
+      // (a new account is the active one from now on, signed out: nothing of the previous one stays here either)
       cookiesOpen = false;
-      toast(req.action === 'add' ? 'Account added: sign it in below' : 'Account switched');
-    } else toast('Account removed');
+      noteAccount(r.active);
+      toast('Account added: sign it in below');
+    } else if (req.action === 'switch') cookiesOpen = false;
+    else toast('Account removed');
   } catch (e) {
     const body = (e as ApiError)?.body as Partial<TikTokAccountsResponse> | undefined;
     if (body?.accounts) accounts = body.accounts;
@@ -1152,9 +1284,13 @@ async function accountAction(req: TikTokAccountRequest, doing: string): Promise<
     toast(errMsg(e), true, 6000);
   } finally {
     accountsBusy = false;
+    busyAction = undefined;
     renderSession();
+    if (accountMenuOpen()) renderAccountMenu();
+    syncProfileBusy();
     pollSession();
   }
+  return ok;
 }
 
 el.sessionAccounts.addEventListener('click', (ev) => {
@@ -1162,8 +1298,10 @@ el.sessionAccounts.addEventListener('click', (ev) => {
   if (!t) return;
   const sw = t.getAttribute('data-acct-switch');
   const rm = t.getAttribute('data-acct-remove');
-  if (sw) void accountAction({ action: 'switch', id: sw }, 'Switching accounts…');
-  else if (rm) {
+  if (sw) {
+    const a = accounts?.find((x) => x.id === sw);
+    if (a) void switchAccount(a);
+  } else if (rm) {
     if (removeArmed !== rm) {
       removeArmed = rm;
       renderAccounts();
@@ -1204,8 +1342,9 @@ function renderAccountMenu(): void {
     .map((a) => {
       const who = a.active && s?.state === 'logged_in' && s.username ? s.username : a.username;
       const title = who ? `@${who}` : a.saved ? a.label : `${a.label} (not signed in)`;
-      const sub = who ? a.label : a.saved ? 'saved sign-in' : 'tap to sign it in';
-      return `<button class="am-row${a.active ? ' active' : ''}" type="button" role="menuitemradio" aria-checked="${a.active}" data-menu-switch="${esc(a.id)}"${accountsBusy ? ' disabled' : ''}>${a.avatar ? `<img src="${esc(a.avatar)}" alt="" draggable="false" />` : '<span class="acct-noimg"></span>'}<span class="am-name"><b>${esc(title)}</b><span>${esc(sub)}${a.direct ? ' · test: no browser' : ''}</span></span><span class="am-check">${a.active ? '✓' : ''}</span></button>`;
+      const going = switchingTo?.id === a.id;
+      const sub = going ? 'Switching…' : `${who ? a.label : a.saved ? 'saved sign-in' : 'tap to sign it in'}${a.direct ? ' · asks TikTok directly, no browser' : ''}`;
+      return `<button class="am-row${a.active ? ' active' : ''}${going ? ' busy' : ''}" type="button" role="menuitemradio" aria-checked="${a.active}"${going ? ' aria-busy="true"' : ''} data-menu-switch="${esc(a.id)}"${accountsBusy ? ' disabled' : ''}>${a.avatar ? `<img src="${esc(a.avatar)}" alt="" draggable="false" />` : '<span class="acct-noimg"></span>'}<span class="am-name"><b>${esc(title)}</b><span>${esc(sub)}</span></span><span class="am-check">${going ? '<span class="am-spin"></span>' : a.active && !switchingTo ? '✓' : ''}</span></button>`;
     })
     .join('');
   el.accountMenu.innerHTML = `<div class="am-title">Use ${esc(P.name)} as</div>${rows}<button class="am-manage" type="button" data-menu-manage="1">Accounts and sign-in…</button>`;
@@ -1241,25 +1380,16 @@ el.accountMenu.addEventListener('click', (ev) => {
   const t = (ev.target as HTMLElement).closest('button');
   if (!t) return;
   const id = t.getAttribute('data-menu-switch');
-  closeAccountMenu();
   if (t.hasAttribute('data-menu-manage')) {
+    closeAccountMenu();
     void openSessionPanel();
     return;
   }
   const a = accounts?.find((x) => x.id === id);
-  if (!a || a.active) return;
-  toast(`Switching to ${a.username ? '@' + a.username : a.label}…`, false, 4000);
-  void accountAction({ action: 'switch', id: a.id }, 'Switching accounts…').then(() => {
-    // Once the server has checked the account's saved sign-in: one that turns out to be signed out
-    // needs the panel (to sign it in); a signed-in one just loads its feed.
-    let tries = 0;
-    const settled = window.setInterval(() => {
-      const now = state.session;
-      if (++tries < 90 && (!now || now.probing)) return;
-      window.clearInterval(settled);
-      if (now && now.supported && now.state !== 'logged_in' && now.state !== 'login_pending') void openSessionPanel();
-    }, 1000);
-  });
+  if (!a || a.active) return closeAccountMenu();
+  // The menu stays for the moment the server needs: the tapped row spins and says "Switching…"
+  // (switchAccount draws it at once and closes the menu when the server has answered).
+  void switchAccount(a);
 });
 document.addEventListener(
   'pointerdown',
@@ -1394,6 +1524,7 @@ function renderSession(): void {
   }
   el.navProfileLabel.textContent = s.state === 'logged_in' ? `@${(s.username || 'me').slice(0, 12)}` : s.state === 'login_pending' ? 'Signing in…' : 'Profile';
   el.railProfileLabel.textContent = el.navProfileLabel.textContent;
+  syncProfileBusy();
   el.navProfile.classList.toggle('active', s.state === 'logged_in');
   // the follow "+" exists for a signed-in account only
   syncFollow(activeEntry());
@@ -1507,6 +1638,7 @@ async function refreshSession(announce = false, recheck = false): Promise<Sessio
     const prev = state.session?.state;
     const prevProbing = Boolean(state.session?.probing);
     state.session = answer;
+    noteAccount(answer.account);
     sessionPollFailures = 0;
     rememberSignedIn(state.session);
     if (state.session.state === 'logged_in') {
@@ -1723,6 +1855,7 @@ function showLoading(title: string, detail: string, done = false): void {
   el.loading.classList.toggle('below-start', centered && !el.start.classList.contains('hidden'));
   el.loadingTitle.textContent = title;
   el.loadingDetail.textContent = detail;
+  if (centered) placeStatusStrip(); // (under the notice, now that its size is known)
 }
 /**
  * Where the status line (activity.ts) sits on this page: at the bottom of the video in view, on
@@ -1734,11 +1867,20 @@ function placeStatusStrip(): void {
   const card = root?.getBoundingClientRect();
   const f = card && card.width > 0 ? card : el.feed.getBoundingClientRect();
   if (f.width <= 0) return;
+  const s = document.documentElement.style;
+  // No video on screen, the notice in the middle says what is loading: the line goes right under it
+  // (at the bottom-left of an empty wide screen it sat under the account picker).
+  const notice = !root && !el.loading.classList.contains('hidden') && !el.loading.classList.contains('compact') ? el.loading.getBoundingClientRect() : undefined;
+  if (notice && notice.width > 0) {
+    s.setProperty('--sa-activity-left', `${Math.round(Math.max(0, notice.left))}px`);
+    s.setProperty('--sa-activity-bottom', `${Math.round(Math.max(8, window.innerHeight - notice.bottom - 40))}px`);
+    s.setProperty('--sa-activity-width', `${Math.round(Math.max(200, notice.width))}px`);
+    return;
+  }
   // above the caption where the video has one, else above the seek bar
   const info = root?.querySelector<HTMLElement>('.info')?.getBoundingClientRect();
   // (the comments sheet covers both: then right above the sheet, over the small picture)
   const floor = commentsHold && fitView && fitView.bottom < f.bottom ? fitView.bottom : info && info.height > 0 && info.top > f.top ? info.top : f.bottom - 22;
-  const s = document.documentElement.style;
   s.setProperty('--sa-activity-left', `${Math.round(Math.max(0, f.left) + 12)}px`);
   s.setProperty('--sa-activity-bottom', `${Math.round(Math.max(8, window.innerHeight - floor + 8))}px`);
   s.setProperty('--sa-activity-width', `${Math.round(Math.max(200, Math.min(f.width, window.innerWidth) - 24))}px`);
@@ -1751,10 +1893,10 @@ const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' 
 /** Unplayed videos after the one in view. */
 const aheadCount = (): number => Math.max(0, state.entries.length - 1 - Math.max(state.active, 0));
 /** A batch arrived while watching: say what it brought for a moment. */
-function flashAdded(added: number): void {
+function flashAdded(added: number, via?: ReadVia): void {
   clearInterval(loadingTicker);
   const ahead = aheadCount();
-  showLoading(`+${plural(added, 'new video')}`, `${state.entries.length} loaded · ${ahead} still to watch`, true);
+  showLoading(`+${plural(added, 'new video')}`, `${state.entries.length} loaded · ${ahead} still to watch${via ? `\n${viaText(via)}` : ''}`, true);
   const t = window.setTimeout(() => {
     if (loadingTicker === t) hideLoading();
   }, 2500);
@@ -1765,6 +1907,8 @@ function hideLoading(): void {
   loadingTicker = 0; // a late progress answer must not show the indicator again
   el.loading.classList.add('hidden');
   el.upnextStatus.classList.add('hidden');
+  // (an account switch is still running: a batch of the old feed that just ended must not blank its notice)
+  if (switchingTo) showSwitching();
 }
 /** Shows what the page is waiting for, updating the detail line as the wait grows. */
 function startLoadingStatus(): void {
@@ -1787,6 +1931,7 @@ function startLoadingStatus(): void {
   function render(): void {
     const sec = Math.round((Date.now() - t0) / 1000);
     const first = state.entries.length === 0;
+    const direct = state.mode.kind === 'source' && prefs.source === 'foryou' && activeDirect();
     if (sec >= 2 && sec % 2 === 0) void askServer();
     if (!first) {
       // Watching while the next batch comes: how much is loaded, how much is left, what the server is on.
@@ -1795,6 +1940,7 @@ function startLoadingStatus(): void {
       let step = 'Asking the server for the next batch';
       if (sec >= 4) step = `The server is fetching new videos from ${P.name}`;
       if (sec >= 12) step = `${P.name} is slow to answer, still trying`;
+      if (direct) step = `Asking ${P.name} directly (no browser)`;
       if (serverStep) step = serverStep.split('\n')[0];
       const left = ahead ? `${ahead} still to watch` : 'none left to watch yet';
       showLoading(title, `${step}${sec >= 3 ? ` · ${sec} s` : ''}\n${left}`);
@@ -1803,8 +1949,10 @@ function startLoadingStatus(): void {
     let title = `Loading ${sourceLabel()}…`;
     let detail = 'Asking the server for the next videos';
     if (sec >= 5) detail = `The server is fetching from ${P.name}…`;
-    if (sec >= 12) detail = prefs.source === 'foryou' ? `Reading your feed from the signed-in ${P.name} session
+    if (sec >= 12) detail = prefs.source === 'foryou' ? `Reading your feed ${P.accounts ? `in the signed-in ${P.name} browser on the server` : `from the signed-in ${P.name} session`}
 (a fresh browser start can take up to a minute)` : `${P.name} is slow to answer; the server is retrying…`;
+    // An account that asks without the browser: said from the start, so it is plain which way the videos come
+    if (direct) detail = `Asking ${P.name} directly for your feed\n(no browser on the server: the account's sign-in and a signed request)`;
     if (serverStep) detail = serverStep;
     if (sec >= 40 || serverStep) detail += `
 ${sec} s so far – still working`;
@@ -1953,8 +2101,23 @@ window.addEventListener('pagehide', () => saveResume(true));
 async function reload(preloaded?: FeedItem[], startIndex = 0): Promise<void> {
   // a new feed (another tab / category, a sign-in, a play list): the saved one no longer applies
   if (!preloaded) clearResume();
+  emptyFeed();
+  if (preloaded?.length) {
+    // A play list (search results / an account's videos): show it at once, from the tapped video.
+    addItems(preloaded);
+    const idx = Math.max(0, Math.min(state.entries.length - 1, startIndex));
+    if (!state.started) start();
+    jumpTo(idx);
+    setActive(idx);
+    return;
+  }
+  await loadMore();
+}
+/** Stops every player and takes the videos off the screen; whoever asked decides what loads next. */
+function emptyFeed(): void {
   restoredSource = undefined;
   closeComments(true); // the video they belong to goes with the old feed
+  el.app.classList.add('no-video'); // the action column describes a video: none is in view until the next one is
   state.generation++;
   clearTimeout(state.retryTimer);
   for (const e of state.entries) releasePlayer(e);
@@ -1969,16 +2132,6 @@ async function reload(preloaded?: FeedItem[], startIndex = 0): Promise<void> {
   jumpTo(0);
   renderQueue();
   syncWait();
-  if (preloaded?.length) {
-    // A play list (search results / an account's videos): show it at once, from the tapped video.
-    addItems(preloaded);
-    const idx = Math.max(0, Math.min(state.entries.length - 1, startIndex));
-    if (!state.started) start();
-    jumpTo(idx);
-    setActive(idx);
-    return;
-  }
-  await loadMore();
 }
 
 /**
@@ -2117,7 +2270,7 @@ function renderQueue(): void {
 }
 
 /** The next batch for the current mode: the source, or the continuation of a play list. */
-async function fetchBatch(): Promise<{ items: FeedItem[]; warnings: string[]; hasMore: boolean; stale?: boolean; note?: string }> {
+async function fetchBatch(): Promise<{ items: FeedItem[]; warnings: string[]; hasMore: boolean; stale?: boolean; note?: string; via?: ReadVia; account?: string }> {
   const mode = state.mode;
   if (mode.kind === 'search') {
     if (!mode.hasMore) return { items: [], warnings: [], hasMore: false };
@@ -2140,7 +2293,7 @@ async function fetchBatch(): Promise<{ items: FeedItem[]; warnings: string[]; ha
     // on the status strip once the viewer is out of videos; until then the list beside the video says it
     { label: `Loading ${P.name} videos`, quiet: () => !viewerWaiting() },
   );
-  return { items: r.items, warnings: r.warnings, hasMore: r.hasMore, stale: r.stale, note: r.note };
+  return { items: r.items, warnings: r.warnings, hasMore: r.hasMore, stale: r.stale, note: r.note, via: r.via, account: prefs.source === 'foryou' ? r.account : undefined };
 }
 
 /** The sign-in panel was opened because the For You feed reported a missing session (once per sign-out) */
@@ -2166,23 +2319,33 @@ async function loadMore(): Promise<number> {
   startLoadingStatus();
   let added = 0;
   let before = 0;
+  let via: ReadVia | undefined;
   // The feed was restarted (another tab, a sign-in) while this batch was on its way: the batch is
   // for the old feed and is dropped, and the new feed - whose own request was refused while this one
   // was running - is asked for now. Without that nothing would ever ask, and the page stays empty.
   let superseded = false;
   try {
     const r = await fetchBatch();
-    if (gen !== state.generation) {
+    // These videos are another account's than the ones on this device (it was switched elsewhere):
+    // noteAccount drops those and empties the screen, and the batch is asked for again.
+    if (gen !== state.generation || noteAccount(r.account)) {
       superseded = true;
       return 0;
     }
     before = state.entries.length;
+    via = r.stale ? undefined : r.via;
     // Fresh videos behind stale ones (the server's earlier videos, a saved feed): right after the
     // video in view, so the viewer sees them next instead of after every stale one.
     const next = !r.stale && onlyStaleAhead();
     added = addItems(r.items, r.stale, next);
     for (const w of r.warnings) console.warn('[feed]', w);
     if (r.stale && added && !before) toast(r.note || 'Recent videos first – fresh ones are on their way', false, 4000);
+    // The first videos of the account just switched to: whose they are and which way they came.
+    if (added && !r.stale && announceSwitched) {
+      toast(`${plural(added, 'video')} for ${announceSwitched}${via ? ` · ${viaText(via)}` : ''}`, false, 5000);
+      announceSwitched = undefined;
+    }
+    if (via) console.info(`[feed] ${plural(added, 'video')} of ${r.items.length} added · ${viaText(via)}`);
     if (next && added) toast(`${plural(added, 'fresh video')} – up next`, false, 3000);
     if (!added) {
       state.emptyBatches++;
@@ -2234,7 +2397,7 @@ async function loadMore(): Promise<number> {
     state.wantNext = false;
     if (!commentsHold) goTo(state.active + 1); // (the comments are open: the viewer stays on this video)
   }
-  if (added && before) flashAdded(added);
+  if (added && before) flashAdded(added, via);
   if (added) saveResume();
   scheduleMoreIfNeeded();
   return added;
@@ -2865,6 +3028,7 @@ function setActive(idx: number): void {
     window.setTimeout(() => activeEntry() !== prev && prev.player?.seek(0), SNAP_MS + 40);
   }
   state.active = idx;
+  el.app.classList.remove('no-video');
   state.userPaused = false;
   const cur = state.entries[idx];
   cur.root.classList.add('active');

@@ -23,7 +23,7 @@ import { logStream, recentLog } from './logbuf';
 import { defaultExpiry, mediaCount, registerMedia } from './mediaStore';
 import { hostAllowed } from './ssrf';
 import { EXPLORE_DEFAULT_CATEGORY, FeedError, fetchExploreFeed, normalizeExploreOptions, type ExploreResult } from './feed';
-import { addTikTokAccount, removeTikTokAccount, setTikTokDirect, switchTikTokAccount, tiktokAccountList, wireReport, cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouCheap, forYouPutBack, forYouQuick, forYouStock, forYouWantsWarm, forYouWarm, headlessRunning, logout, parkHeadlessBrowser, rememberLog, workState, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
+import { addTikTokAccount, onTikTokAccountChange, removeTikTokAccount, setTikTokDirect, switchTikTokAccount, tiktokAccountList, tiktokDirectOn, wireReport, cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouCheap, forYouPutBack, forYouQuick, forYouStock, forYouWantsWarm, forYouWarm, headlessRunning, logout, parkHeadlessBrowser, rememberLog, workState, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
 import { Reservoir, type ReservoirStats } from './reservoir';
 import { hasBatch, reviveItems, slimItems } from './lastBatch';
 import { invalidateJobs, jobStats, sharedJob } from './jobs';
@@ -674,7 +674,8 @@ export async function buildServer() {
         }
         return served(r, 'foryou');
       }
-      if (quick) {
+      // (an account that asks TikTok without the browser has its own videos in a few seconds: it waits for those)
+      if (quick && !tiktokDirectOn()) {
         // Nothing on screen and nothing captured yet: the last visit's For You videos go out at once,
         // topped up with Explore videos from the stock (kept fresh) when few of them are left, so the
         // viewer has a batch to watch while the browser starts and the page loads (about a minute on
@@ -693,16 +694,18 @@ export async function buildServer() {
             if (!explore.warmIfKnown()) explore.warm();
           } else if (want > 0) explore.warm();
           if (q.items.length) {
-            const resp: FeedResponse = { source, items: slimItems(pictured(platform, q.items)), hasMore: true, warnings: q.warnings, elapsedMs: Date.now() - t0, stale: true };
+            const resp: FeedResponse = { source, items: slimItems(pictured(platform, q.items)), hasMore: true, warnings: q.warnings, elapsedMs: Date.now() - t0, stale: true, account: activeAccountId() };
             if (filler?.items.length) resp.note = q.items.length === filler.items.length ? `Explore videos first – your For You feed is loading` : `Recent videos and Explore first – your For You feed is loading`;
             log(`foryou: ${q.items.length} served from the last good batch, ${resp.elapsedMs} ms`);
             return resp;
           }
         }
       }
+      const account = activeAccountId();
       const r = await fetchForYou(count, log, quick);
-      const resp: FeedResponse = { source, items: slimItems(pictured(platform, r.items)), hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale };
-      if (r.items.length && !r.stale) undelivered(r.items, 'foryou', forYouPutBack);
+      const resp: FeedResponse = { source, items: slimItems(pictured(platform, r.items)), hasMore: true, warnings: r.warnings, elapsedMs: Date.now() - t0, stale: r.stale, via: r.stale ? undefined : r.via, account: activeAccountId() };
+      // (videos that never reached the viewer go back to the stock - unless another account is the active one by then)
+      if (r.items.length && !r.stale) undelivered(r.items, 'foryou', (items) => void (activeAccountId() === account && forYouPutBack(items)));
       return resp;
     } catch (e) {
       const err = e as Error;
@@ -969,6 +972,12 @@ export async function buildServer() {
   // the main account's saved sign-in is never touched by any of these.
   const accountsNow = async (): Promise<TikTokAccountsResponse> => ({ accounts: tiktokAccountList(), active: activeAccountId(), session: await sessionProbe() });
   app.get('/api/session/accounts', async () => accountsNow());
+  // Search answers and account pages kept for every device (cachedSocial) were read as the account that was active:
+  // they carry its follow states and its video addresses, so they go when another account becomes the active one.
+  onTikTokAccountChange(() => {
+    invalidateJobs('search|tiktok|');
+    invalidateJobs('profile|tiktok|');
+  });
   app.post<{ Body: TikTokAccountRequest }>('/api/session/accounts', resolveLimit, async (req, reply) => {
     const log = (m: string): void => req.log.info({ what: 'tiktok-session' }, m);
     try {

@@ -8,6 +8,7 @@
  */
 import type { Platform, SessionStatus } from '../../../shared/types';
 import '../activity';
+import { accountIs, dropStoredVideos } from '../accountVideos';
 import { api } from '../api';
 import { startAppUpdates } from '../appUpdate';
 import { PLATFORMS, rememberApp, type PlatformDef, type ToolApp } from '../platforms';
@@ -266,6 +267,9 @@ async function refreshBadges(): Promise<void> {
       } catch {
         s = undefined;
       }
+      // The server's account for this app is another one than the videos kept here were loaded as
+      // (switched on another device, or in the app before it was left): they are not shown again.
+      if (accountIs(p.id, s?.account)) void dropStoredVideos(p.id);
       for (const b of badges.get(p.id) || []) {
         b.textContent = s?.state === 'logged_in' ? '✓' : s?.state === 'login_pending' ? '…' : '';
         b.classList.toggle('pending', s?.state === 'login_pending');

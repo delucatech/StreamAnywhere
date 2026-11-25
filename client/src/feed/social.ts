@@ -389,6 +389,23 @@ const search = { q: '', items: [] as FeedItem[], users: [] as UserSummary[], off
 /** One tile per video id, reused when the fresh results re-order the earlier ones (no image reload) */
 const tiles = new Map<string, HTMLButtonElement>();
 
+/**
+ * Another account is the active one: the results on show and the kept ones were found as the
+ * previous account (its follow states, its video addresses). The phrases searched stay.
+ */
+export function forgetAccountResults(): void {
+  memory = undefined; // read again from storage, where the results were emptied (accountVideos.ts)
+  window.clearTimeout(searchReaskTimer);
+  Object.assign(search, { q: '', items: [], users: [], offset: 0, hasMore: false, fromCache: false });
+  tiles.clear();
+  el.searchUsers.innerHTML = '';
+  el.searchVideos.innerHTML = '';
+  el.searchMore.classList.add('hidden');
+  fresh('');
+  status(el.searchStatus, '');
+  Object.assign(profile, { user: '', info: undefined, items: [], offset: 0, hasMore: false });
+}
+
 export function openSearch(): void {
   show(el.search);
   el.searchInput.focus();
@@ -464,7 +481,9 @@ function takeOverSearch(q: string, r: SearchResponse, more: boolean): void {
   rememberSearch(q, search.items, search.users, search.offset, search.hasMore);
   const n = search.items.length;
   const age = r.cachedAgeSec !== undefined ? ` · the server's answer from ${Math.max(1, Math.round(r.cachedAgeSec / 60))} min ago; fresh results are on their way` : '';
-  status(el.searchStatus, n || search.users.length ? `${countText(n, more ? 0 : search.users.length)} for “${q}”${age}` : `Nothing found for “${q}”${age}`);
+  // how the server searched, where it says so (TikTok): asked directly, or in its signed-in browser
+  const via = r.cachedAgeSec !== undefined ? '' : r.via === 'direct' ? ' · asked directly, no browser' : r.via === 'browser' ? " · searched in the server's browser" : '';
+  status(el.searchStatus, n || search.users.length ? `${countText(n, more ? 0 : search.users.length)} for “${q}”${age}${via}` : `Nothing found for “${q}”${age}${via}`);
   for (const w of r.warnings) console.warn('[search]', w);
 }
 
