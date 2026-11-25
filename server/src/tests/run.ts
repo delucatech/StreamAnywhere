@@ -17,6 +17,7 @@ import { mirrorChecks } from './mirror';
 import { activityChecks } from './activity';
 import { youtubeAvatarChecks } from './youtubeAvatar';
 import { tiktokGuestChecks, tiktokGuestNetworkChecks } from './tiktokGuest';
+import { tiktokAccountsChecks } from './tiktokAccounts';
 import { setAvatarTransport } from '../youtubeAvatar';
 import { hostAllowed, ipIsPrivate, assertSafeUpstream } from '../ssrf';
 import { parseTikTokUrl } from '../tiktok';
@@ -1893,6 +1894,7 @@ async function homeTopUpChecks(): Promise<void> {
   await activityChecks(check);
   await youtubeAvatarChecks(check);
   await tiktokGuestChecks(check);
+  await tiktokAccountsChecks(check);
   await youtubeTvOfflineChecks();
   await inboxCancelChecks();
   await homeTopUpChecks();

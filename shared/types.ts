@@ -729,9 +729,46 @@ export type SessionInputRequest =
   | { type: 'shot' };
 
 /** State of the server-side TikTok browser session (Node server only). */
+/** One of the TikTok sign-ins kept on the server (several can be kept; one is active at a time). */
+export interface TikTokAccount {
+  /** "main" (the first one, in TIKTOK_PROFILE_DIR) or a generated id */
+  id: string;
+  main: boolean;
+  active: boolean;
+  /** What to call it: the user's label, else "Main account" / "Another account" */
+  label: string;
+  /** Who it was the last time it was seen signed in */
+  username?: string;
+  nickname?: string;
+  avatar?: string;
+  /** The active account only: whether it is signed in right now */
+  signedIn?: boolean;
+  /** A browser profile exists for it on the server (a sign-in that was saved; checked when it becomes active) */
+  saved: boolean;
+  via?: 'browser' | 'cookies';
+}
+
+/** GET /api/session/accounts, and the answer of POST /api/session/accounts */
+export interface TikTokAccountsResponse {
+  accounts: TikTokAccount[];
+  active: string;
+  session: SessionStatus;
+  error?: string;
+}
+
+/** POST /api/session/accounts: add an empty account and make it active, switch to one, or remove one that is not active (never the main one) */
+export interface TikTokAccountRequest {
+  action: 'add' | 'switch' | 'remove';
+  id?: string;
+  label?: string;
+}
+
 export interface SessionStatus {
   /** Which platform's sign-in this describes (absent = tiktok) */
   platform?: Platform;
+  /** TikTok: which of the server's accounts this is ("main" or an id), and how many there are (GET /api/session/accounts lists them) */
+  account?: string;
+  accounts?: number;
   /** false on servers that cannot run a browser (IIS handler, hosted containers without Chrome) */
   supported: boolean;
   state: SessionState;

@@ -40,7 +40,7 @@
  * back to this app from another, the saved feed after the page was closed) is fed from disk first,
  * the rest from the network. A sweep between videos makes room (see mediaCache.ts).
  */
-import type { FeedAuthor, FeedItem, FeedSource, FollowState, LibraryEntry, LoginMode, MediaFormat, ResolveResponse, SessionInputRequest, SessionStatus } from '../../../shared/types';
+import type { FeedAuthor, FeedItem, FeedSource, FollowState, LibraryEntry, LoginMode, MediaFormat, ResolveResponse, SessionInputRequest, SessionStatus, TikTokAccount, TikTokAccountRequest, TikTokAccountsResponse } from '../../../shared/types';
 import '../activity';
 import { api, ApiError, apiUrl, waitRef } from '../api';
 import { startAppUpdates } from '../appUpdate';
@@ -135,6 +135,7 @@ const el = {
   sessionQrHint: $('sessionQrHint'),
   sessionUserCode: $('sessionUserCode'),
   sessionCookiesToggle: $<HTMLButtonElement>('sessionCookiesToggle'),
+  sessionAccounts: $<HTMLDivElement>('sessionAccounts'),
   sessionCode: $<HTMLFormElement>('sessionCode'),
   sessionCodeText: $<HTMLInputElement>('sessionCodeText'),
   sessionCodeSend: $<HTMLButtonElement>('sessionCodeSend'),
@@ -958,6 +959,91 @@ function onUserGesture(): void {
 document.addEventListener('pointerdown', onUserGesture, true);
 document.addEventListener('keydown', onUserGesture, true);
 
+// ---------- accounts (TikTok: several sign-ins kept on the server, one active) ----------
+let accounts: TikTokAccount[] | undefined;
+/** The account whose "Remove" was tapped once: the second tap removes it (no browser dialog: the car's browser has none) */
+let removeArmed: string | undefined;
+let accountsBusy = false;
+
+async function refreshAccounts(): Promise<void> {
+  if (!P.accounts) return;
+  try {
+    accounts = (await api.sessionAccounts()).accounts;
+  } catch (e) {
+    console.warn('[accounts] the list did not come:', errMsg(e));
+  }
+  renderAccounts();
+}
+
+function renderAccounts(): void {
+  const s = state.session;
+  const show = Boolean(P.accounts && s?.supported && accounts && s.state !== 'login_pending');
+  el.sessionAccounts.classList.toggle('hidden', !show);
+  if (!show || !accounts) return;
+  // Who it is when known; else what is known: the active one's state, or that a sign-in was saved for it.
+  // The active account's state is the session's own (fresher than the list, which is fetched when the panel opens).
+  const activeIn = s?.state === 'logged_in';
+  const handle = (a: TikTokAccount): string | undefined => (a.active && activeIn && s?.username ? s.username : a.username);
+  const name = (a: TikTokAccount): string => (handle(a) && (!a.active || activeIn || s?.probing) ? `@${handle(a)}` : a.active ? (s?.probing ? 'checking the sign-in…' : 'not signed in') : a.saved ? 'saved sign-in' : 'not signed in');
+  const rows = accounts
+    .map((a) => {
+      const state2 = a.active ? (activeIn ? 'Active' : s?.probing ? 'Active · checking…' : 'Active · not signed in') : '';
+      const buttons = a.active
+        ? `<span class="acct-state">${esc(state2)}</span>`
+        : `<button class="btn small" type="button" data-acct-switch="${esc(a.id)}"${accountsBusy ? ' disabled' : ''}>Switch</button>${a.main ? '' : `<button class="btn small ghost" type="button" data-acct-remove="${esc(a.id)}"${accountsBusy ? ' disabled' : ''}>${removeArmed === a.id ? 'Tap again to remove' : 'Remove'}</button>`}`;
+      return `<div class="acct-row${a.active ? ' active' : ''}">${a.avatar ? `<img src="${esc(a.avatar)}" alt="" draggable="false" />` : '<span class="acct-noimg"></span>'}<div class="acct-name"><b>${esc(name(a))}</b><span>${esc(a.label)}</span></div>${buttons}</div>`;
+    })
+    .join('');
+  el.sessionAccounts.innerHTML = `<div class="session-label">Accounts on this server</div>${rows}<div class="acct-add"><input id="acctLabel" type="text" maxlength="40" placeholder="Name for a new account (optional)" autocomplete="off" /><button class="btn" type="button" data-acct-add="1"${accountsBusy ? ' disabled' : ''}>Add another account</button></div><div class="acct-note">One account is active at a time. Switching closes the server's ${esc(P.name)} browser and opens the other account's; nothing is deleted. A new account starts signed out: sign it in below.</div>`;
+}
+
+async function accountAction(req: TikTokAccountRequest, doing: string): Promise<void> {
+  if (accountsBusy) return;
+  accountsBusy = true;
+  removeArmed = undefined;
+  renderAccounts();
+  el.sessionText.innerHTML = `<b>${esc(doing)}</b>\nThe server closes its ${esc(P.name)} browser first; this takes a few seconds.`;
+  try {
+    const r = await api.sessionAccount(req);
+    accounts = r.accounts;
+    state.session = r.session;
+    rememberSignedIn(state.session);
+    if (req.action !== 'remove') {
+      // The videos on screen are the previous account's feed: the new account's comes once it is signed in.
+      cookiesOpen = false;
+      toast(req.action === 'add' ? 'Account added: sign it in below' : 'Account switched');
+    } else toast('Account removed');
+  } catch (e) {
+    const body = (e as ApiError)?.body as Partial<TikTokAccountsResponse> | undefined;
+    if (body?.accounts) accounts = body.accounts;
+    if (body?.session) state.session = body.session;
+    toast(errMsg(e), true, 6000);
+  } finally {
+    accountsBusy = false;
+    renderSession();
+    pollSession();
+  }
+}
+
+el.sessionAccounts.addEventListener('click', (ev) => {
+  const t = (ev.target as HTMLElement).closest('button');
+  if (!t) return;
+  const sw = t.getAttribute('data-acct-switch');
+  const rm = t.getAttribute('data-acct-remove');
+  if (sw) void accountAction({ action: 'switch', id: sw }, 'Switching accounts…');
+  else if (rm) {
+    if (removeArmed !== rm) {
+      removeArmed = rm;
+      renderAccounts();
+      return;
+    }
+    void accountAction({ action: 'remove', id: rm }, 'Removing the account…');
+  } else if (t.hasAttribute('data-acct-add')) {
+    const label = (document.getElementById('acctLabel') as HTMLInputElement | null)?.value.trim() || undefined;
+    void accountAction({ action: 'add', label }, 'Adding an account…');
+  }
+});
+
 // ---------- session ----------
 function renderSession(): void {
   const s = state.session;
@@ -983,7 +1069,11 @@ function renderSession(): void {
     if (s.notice) lines.push(`<span style="color:var(--muted)">${esc(s.notice)}</span>`);
   } else if (s.state === 'logged_in') {
     lines.push(`<b>Signed in as @${esc(s.username || '?')}</b>${s.nickname && s.nickname !== s.username ? ` (${esc(s.nickname)})` : ''}`);
-    lines.push('The For You feed comes from this account. Sign out closes the browser session and deletes the saved profile on the server.');
+    lines.push(
+      s.account && s.account !== 'main'
+        ? 'The For You feed comes from this account. Sign out removes this account from the server and goes back to the main account, which stays as it is.'
+        : 'The For You feed comes from this account. Sign out closes the browser session and deletes the saved profile on the server.',
+    );
   } else if (s.state === 'login_pending' && s.loginMode === 'qr' && s.qrState === 'verify' && s.verifyStep === 'code') {
     lines.push('<b>Almost there – enter the code TikTok e-mailed you.</b>');
     lines.push(esc(s.message || ''));
@@ -1048,12 +1138,16 @@ function renderSession(): void {
   const idle = s.supported && s.state !== 'logged_in' && s.state !== 'login_pending';
   const locked = showQr && s.qrState === 'verify' && s.verifyStep === 'code';
   const codeFirst = Boolean(P.codeSignIn);
+  // The cookie form is the main way (Instagram, Facebook), or folded behind a button (YouTube's code, TikTok's QR code).
+  const cookiesFolded = codeFirst || Boolean(P.cookieAlso);
+  const cookiesOffered = cookieSignIn || Boolean(P.cookieAlso);
   el.sessionLogin.classList.toggle('hidden', !idle || (cookieSignIn && !codeFirst) || Boolean(s.probing && codeFirst));
   el.sessionLoginWindow.classList.toggle('hidden', !idle);
-  el.sessionCookiesToggle.classList.toggle('hidden', !(idle && codeFirst && !s.probing));
+  el.sessionCookiesToggle.classList.toggle('hidden', !(idle && cookiesFolded && !s.probing));
   el.sessionCookiesToggle.textContent = cookiesOpen ? 'Hide the cookie sign-in' : 'Use browser cookies instead';
-  el.sessionCookies.classList.toggle('hidden', !(idle && cookieSignIn && !s.probing && (!codeFirst || cookiesOpen)));
-  if (!(idle && cookieSignIn)) el.sessionCookiesResult.classList.add('hidden');
+  el.sessionCookies.classList.toggle('hidden', !(idle && cookiesOffered && !s.probing && (!cookiesFolded || cookiesOpen)));
+  if (!(idle && cookiesOffered)) el.sessionCookiesResult.classList.add('hidden');
+  renderAccounts();
   // "Sign out" only when there is a session to end; while a sign-in is pending the button is "Cancel".
   // In the code step only Cancel remains (Cancel forgets the attempt; "Sign in" then starts from zero).
   el.sessionLogout.classList.toggle('hidden', s.state !== 'logged_in');
@@ -1230,6 +1324,7 @@ async function openSessionPanel(): Promise<void> {
   el.session.classList.remove('hidden');
   syncOverlayPause();
   await refreshSession();
+  void refreshAccounts();
   pollSession();
 }
 function closeSessionPanel(): void {
@@ -1256,7 +1351,10 @@ async function startLogin(mode: LoginMode, cookies?: string): Promise<void> {
     if (mode === 'cookies') {
       el.sessionCookiesText.value = '';
       el.sessionCookiesResult.classList.add('hidden');
+      // The server answers a refused paste with the status and its reason: shown where the paste was made.
+      if (state.session.error && state.session.state !== 'logged_in') showCookiesResult('err', state.session.error);
     }
+    void refreshAccounts();
     renderSession();
     // The cookie sign-in finishes in the same request: straight to the account's feed.
     if (state.session.state === 'logged_in' && prev !== 'logged_in') onSignedIn();
@@ -1282,6 +1380,7 @@ async function startLogin(mode: LoginMode, cookies?: string): Promise<void> {
 /** A sign-in just completed: close the panel and switch to the account's feed. */
 function onSignedIn(): void {
   signedOutPanelShown = false;
+  void refreshAccounts();
   closeSessionPanel();
   // The saved feed restored at boot already is the account's feed: keep playing it.
   const keep = restoredSource !== undefined && (restoredSource === 'foryou' || P.loginRequired) && state.mode.kind === 'source' && state.entries.length > 0;

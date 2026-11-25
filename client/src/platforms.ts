@@ -37,6 +37,10 @@ export interface PlatformDef {
   /** The platform also signs in with a code approved on a phone or computer (YouTube: Google's sign-in for TVs);
    *  it is then the panel's main button and the cookie form moves behind "Use browser cookies instead" */
   codeSignIn?: boolean;
+  /** A QR platform that also takes the cookies of a signed-in browser, behind "Use browser cookies instead" (TikTok: for an account that cannot scan) */
+  cookieAlso?: boolean;
+  /** The server keeps several sign-ins for this platform and switches between them (TikTok) */
+  accounts?: boolean;
   /** What the sign-in panel says before a sign-in */
   signInHint: string;
   /** The platform serves nobody who is signed out (Instagram): the feed waits for a sign-in */
@@ -63,7 +67,9 @@ export const PLATFORMS: PlatformDef[] = [
     social: true,
     follow: true,
     signIn: 'qr',
-    signInHint: '"Sign in with QR code" shows TikTok\'s login QR here; scan it with the TikTok app on your phone.',
+    cookieAlso: true,
+    accounts: true,
+    signInHint: '"Sign in with QR code" shows TikTok\'s login QR here; scan it with the TikTok app on your phone. An account that lives in a desktop browser only can be signed in with that browser\'s cookies instead.',
     loginRequired: false,
     cookieSite: 'tiktok.com',
     signInWindowOwner: 'TikTok',

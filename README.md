@@ -144,6 +144,7 @@ server/   Fastify 4 + TypeScript (Node 16 compatible)
   src/tiktokSign.ts               the request signature TikTok's page script adds (X-Dynosaur / X-Gnarly), in plain TypeScript (third-party, MIT)
   src/tlsBridge.ts                HTTPS with Chrome's TLS handshake through a warm Python helper (scripts/tls-bridge.py, curl_cffi)
   src/tiktokWire.ts               what the signed-in For You page's own requests carry, names and sizes only (GET /api/session/wire)
+  src/tiktokAccounts.ts           several TikTok sign-ins: the index, a profile folder per account, the pasted-cookie reader
   src/reservoir.ts / lastBatch.ts a feed's stock, filled in the background; the stock and the last batch kept on disk
   src/jobs.ts                     shared jobs: work that outlives its request, answers kept for the retry
   src/homeTopUps.ts / pressure.ts the home screen's top-ups, one at a time; how starved the machine is (memory, swap, load, late timers)
@@ -433,6 +434,41 @@ the next request starts it
 again with the profile and the videos already captured; a viewer with an empty screen gets the
 last batch meanwhile. `Sign out` closes the browsers and deletes the profile directory.
 
+### Several TikTok accounts, and signing in with a browser's cookies
+
+Built 2026-11-25. The server can keep more than one TikTok sign-in and switch between them
+([`server/src/tiktokAccounts.ts`](server/src/tiktokAccounts.ts), the "Accounts on this server" list
+in the sign-in panel):
+
+- **The first account is the "main" one and stays where it always was** (`TIKTOK_PROFILE_DIR`).
+  Nothing about accounts moves, renames or deletes that folder. Every other account gets a browser
+  profile of its own under `tiktok-accounts/<id>/profile` beside it, and `tiktok-accounts.json`
+  says which one is active and who each was when last seen (up to 8).
+- **One account is active at a time**: the small server cannot run two browsers. **Switch** closes
+  the server's TikTok browser and points it at the other profile; the other account's saved
+  sign-in is checked on first use, exactly as after a restart. Nothing is deleted by a switch. What
+  was read as the previous account (its For You stock, who it follows, its "last batch" for an
+  empty screen) is dropped or kept apart per account.
+- **Add another account** makes an empty account and switches to it; it starts signed out and is
+  signed in like any other (QR code, a window on the server, or cookies).
+- **"Use browser cookies instead"** signs the active account in with the cookies of a browser that
+  is signed in to tiktok.com: for an account that lives in a desktop browser only and cannot scan
+  the QR code. A cookies.txt export, a cookie extension's JSON or a `Cookie:` header is accepted
+  (host names that a chat turned into links are repaired). Only tiktok.com cookies are kept, a
+  `sessionid` is required, and four cookies that describe the exporting browser, not the account,
+  are left out. The cookies are put into the account's browser profile and TikTok is asked who
+  that is. **It is refused while the active account is signed in**, so another account's cookies
+  can never land on top of it: add an account first.
+- **Sign out** of the main account empties its profile, as before. Sign out of another account
+  removes that account and makes the main one active again. **Remove** works on an account that is
+  neither the main nor the active one.
+- `GET /api/session/accounts` lists them; `POST /api/session/accounts` takes
+  `{action: "add" | "switch" | "remove", id?, label?}`; a cookie sign-in is
+  `POST /api/session/login` with `{platform: "tiktok", mode: "cookies", cookies}`.
+- Checked on the PC with a spare account: signed in from pasted cookies in 4 s, its For You
+  loaded, main ↔ spare switched three times (3 s each to the saved sign-in), a third account added
+  and removed; the main profile's folder was never touched.
+
 ### TikTok without a browser (comments, replies, profiles, Explore, video lookups)
 
 Built 2026-11-25. Much of what the server reads from TikTok needed the headless browser: the
@@ -524,6 +560,16 @@ How it works:
   password) shows them, and `?storage=1` adds the names and shapes of what the page keeps in its
   storage - a key object is reported with its type, uses and whether it can be exported. A proof
   made with a key that cannot leave the browser would close the question.
+  **What it showed** (the main account on the VM, 2026-11-25 16:52 UTC): `POST
+  /api/recommend/item_list/` with the same 59 parameters a guest page sends, ending in
+  `X-Dynosaur` (412 characters), `msToken`, `X-Bogus=1`, `X-Gnarly` (332); ordinary browser
+  headers only - no `tt-ticket-guard-*` and no CSRF header, in the request or the answer; the
+  account is in the cookies (`sessionid`, `sid_guard`, `sid_tt`, `uid_tt` and relatives); the body
+  is gzipped JSON with one block, `realTimeClientInfo.consumption_data` (what was watched). So no
+  key proof stands in the way; what remains is that the copied signer writes blanks where the real
+  signatures carry fingerprint values (392 / 324 characters against 412 / 332). A spare account
+  signed in from cookies on the PC got `tt-ticket-guard-result: 0` on every answer and was served
+  all the same.
 
 **Explore** is three paths. Since 2026-11-25 the request goes over the Chrome-like connection
 first (`fetchExploreAsGuest` in `server/src/feed.ts`, see the section above): the same unsigned

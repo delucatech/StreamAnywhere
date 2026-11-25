@@ -42,7 +42,7 @@
 import type { Page } from 'puppeteer-core';
 import type { ChatMessage, CommentRepliesResponse, CommentsResponse, Conversation, ConversationResponse, FeedItem, FollowResponse, FollowState, InboxResponse, ProfileResponse, SearchResponse, SendMessageResponse, UserSummary, VideoComment } from '../../shared/types';
 import { itemToFeedItem, relationToState } from './feed';
-import { isLoggedIn, pageCookieHeader, resetWorkPage, withWorkPage } from './session';
+import { isLoggedIn, onTikTokAccountChange, pageCookieHeader, resetWorkPage, withWorkPage } from './session';
 import { ytdlpInfo } from './ytdlp';
 import { GuestError, guestCommentList, guestGet, guestPage, guestReplyList, guestUnusable, pageScope } from './tiktokGuest';
 import { say } from './activity';
@@ -493,6 +493,17 @@ interface GuestProfile {
   hasMore: boolean;
 }
 let guestProfile: GuestProfile | undefined;
+
+// Another TikTok account became the active one: what was read as the previous one (who it follows,
+// the profile page it had open, its captured answers) is not true of this one.
+onTikTokAccountChange(() => {
+  followKnown.clear();
+  profile = undefined;
+  guestProfile = undefined;
+  captured = [];
+  commentAnswers = [];
+  lastSearch = undefined;
+});
 const GUEST_PROFILE_MS = 10 * 60 * 1000;
 
 /**

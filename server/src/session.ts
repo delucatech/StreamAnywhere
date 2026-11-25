@@ -28,11 +28,12 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { FeedItem, LoginMode, SessionInputRequest, SessionStatus } from '../../shared/types';
+import type { FeedItem, LoginMode, SessionInputRequest, SessionStatus, TikTokAccount } from '../../shared/types';
 import { exploreApiUrl, FeedError, isTikTokAd, itemToFeedItem, parseExploreBody, type ExploreResult } from './feed';
 import { rememberBatch, staleBatch } from './lastBatch';
 import { getProgress } from './progress';
 import { say } from './activity';
+import { accountProfileDir, accountRecord, accountRecords, activeAccountId, activeProfileDir, createAccount, forgetAccountIdentity, MAIN_ACCOUNT, parseTikTokCookies, rememberAccount, removeAccount, setActiveAccount, TikTokAccountError, toBrowserCookies } from './tiktokAccounts';
 import { READ_STORAGE_SHAPES, READ_STORAGE_SHAPES_SO_FAR, summarizeKeys, watchWire, wireRecords, type WireRecord } from './tiktokWire';
 
 type Browser = import('puppeteer-core').Browser;
@@ -45,7 +46,8 @@ type Handle = import('puppeteer-core').ElementHandle<any>;
  * Outside the repository on purpose: Chrome writes to the profile constantly and `tsx watch`
  * (npm run dev) restarts the server on every change inside server/ (observed: the API froze).
  */
-const PROFILE_DIR = process.env.TIKTOK_PROFILE_DIR || path.join(os.homedir(), '.streamanywhere', 'tiktok-profile');
+/** The MAIN account's profile (TIKTOK_PROFILE_DIR); the active account's is activeProfileDir() (tiktokAccounts.ts). */
+const MAIN_PROFILE_DIR = process.env.TIKTOK_PROFILE_DIR || path.join(os.homedir(), '.streamanywhere', 'tiktok-profile');
 const LOGIN_TIMEOUT_MS = 10 * 60 * 1000;
 /** Once TikTok e-mailed a verification code, the attempt (page, dialog, token, ticket) is held this long:
  *  the code stays valid for hours, and the user may come back to enter it much later. */
@@ -170,7 +172,7 @@ const s: SessionInternal = { state: 'none', pending: [], seenIds: new Set() };
  * new e-mail. The e-mailed code itself is never stored or typed by the server on its own - only a code
  * the user types and submits with "Verify" is entered (an old one would burn TikTok's tries).
  */
-const VERIFY_STORE = path.join(path.dirname(PROFILE_DIR), 'tiktok-verify.json');
+const VERIFY_STORE = path.join(path.dirname(MAIN_PROFILE_DIR), 'tiktok-verify.json');
 interface VerifyStore {
   ticket?: { value: string; at: number };
 }
@@ -275,7 +277,7 @@ export async function launchHeadless<T>(exe: string, launch: (executablePath: st
 }
 
 function profileExists(): boolean {
-  return fs.existsSync(path.join(PROFILE_DIR, 'Default')) || fs.existsSync(path.join(PROFILE_DIR, 'Local State'));
+  return fs.existsSync(path.join(activeProfileDir(), 'Default')) || fs.existsSync(path.join(activeProfileDir(), 'Local State'));
 }
 
 /**
@@ -288,7 +290,7 @@ function clearStaleProfileLocks(): void {
   if (s.headless?.isConnected() || s.loginBrowser?.isConnected()) return;
   for (const f of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
     try {
-      fs.rmSync(path.join(PROFILE_DIR, f), { force: true });
+      fs.rmSync(path.join(activeProfileDir(), f), { force: true });
     } catch {
       /* ignore */
     }
@@ -310,7 +312,7 @@ async function launchOnce(headless: boolean): Promise<Browser> {
   const sup = sessionSupported();
   if (!sup.ok) throw new Error(sup.reason);
   const p = await puppeteer();
-  fs.mkdirSync(PROFILE_DIR, { recursive: true });
+  fs.mkdirSync(activeProfileDir(), { recursive: true });
   clearStaleProfileLocks();
   // Verified 2026-10-08: with the UA fix (see preparePage), --disable-blink-features=AutomationControlled
   // and without --enable-automation, the headless page gets real feed batches; plain headless got
@@ -324,7 +326,7 @@ async function launchOnce(headless: boolean): Promise<Browser> {
     p.launch({
       executablePath,
       headless: headless ? 'new' : false,
-      userDataDir: PROFILE_DIR,
+      userDataDir: activeProfileDir(),
       defaultViewport: headless ? { width: 1280, height: 900 } : null,
       args,
       ignoreDefaultArgs: ['--enable-automation'],
@@ -420,7 +422,7 @@ export function sessionStatus(): SessionStatus {
   const sup = sessionSupported();
   const browser = sup.executable ? path.basename(sup.executable) : undefined;
   if (!sup.ok) return { supported: false, state: 'unsupported', error: sup.reason, message: 'Sign-in needs the Node server on a machine with Chrome, Edge or Chromium.' };
-  const base: SessionStatus = { supported: true, state: s.state, username: s.username, nickname: s.nickname, avatar: s.avatar, error: s.error, browser };
+  const base: SessionStatus = { supported: true, state: s.state, username: s.username, nickname: s.nickname, avatar: s.avatar, error: s.error, browser, account: activeAccountId(), accounts: accountRecords().length };
   if (s.state === 'none') {
     base.message = !profileExists()
       ? 'Not signed in.'
@@ -559,6 +561,11 @@ export async function sessionProbe(wait = false): Promise<SessionStatus> {
 function markLoggedIn(acc: { username?: string; nickname?: string; avatar?: string }): void {
   probed = true;
   probeTries = 0;
+  try {
+    rememberAccount(activeAccountId(), { username: acc.username, nickname: acc.nickname, avatar: acc.avatar, via: pendingVia ?? (s.loginMode === 'qr' || s.loginMode === 'window' ? 'browser' : undefined) });
+  } catch {
+    /* the list's memory is a convenience */
+  }
   s.state = 'logged_in';
   s.username = acc.username;
   s.nickname = acc.nickname;
@@ -583,17 +590,168 @@ const wrapLog = (log: (m: string) => void): ((m: string) => void) => (m) => {
   log(m);
 };
 
-export async function startLogin(mode: LoginMode, rawLog: (m: string) => void): Promise<SessionStatus> {
+export async function startLogin(mode: LoginMode, rawLog: (m: string) => void, cookies?: string): Promise<SessionStatus> {
   if (s.state === 'login_pending' && (s.loginBrowser?.isConnected() || (s.qrPage && !s.qrPage.isClosed()))) return sessionStatus();
   if (probe) await probe.catch(() => undefined);
-  probed = true;
   const log = (m: string): void => {
     remember(m);
     rawLog(m);
   };
   feedLog = log;
+  if (mode === 'cookies') return startCookieLogin(cookies, log);
+  probed = true;
   return mode === 'window' ? startWindowLogin(log) : startQrLogin(log);
 }
+
+// ---------------------------------------------------------------- several accounts (tiktokAccounts.ts)
+
+/** The kept "last batch" of For You is per account: the main account keeps the name it always had. */
+const forYouBatchKey = (): string => (activeAccountId() === MAIN_ACCOUNT ? 'tiktok-foryou' : `tiktok-foryou-${activeAccountId()}`);
+
+/** Told when the active account changes: whatever belongs to the account that was active (a feed stock, a profile page) is dropped. */
+const accountListeners: Array<(id: string) => void> = [];
+export const onTikTokAccountChange = (fn: (id: string) => void): void => void accountListeners.push(fn);
+
+/** The accounts on this server and which one is active (GET /api/session/accounts). */
+export function tiktokAccountList(): TikTokAccount[] {
+  const active = activeAccountId();
+  return accountRecords().map((a) => {
+    const isActive = a.id === active;
+    const signedIn = isActive ? s.state === 'logged_in' : undefined;
+    return {
+      id: a.id,
+      main: a.id === MAIN_ACCOUNT,
+      active: isActive,
+      label: a.label || (a.id === MAIN_ACCOUNT ? 'Main account' : 'Another account'),
+      username: isActive && s.username ? s.username : a.username,
+      nickname: isActive && s.nickname ? s.nickname : a.nickname,
+      avatar: isActive && s.avatar ? s.avatar : a.avatar,
+      signedIn,
+      // an account that is not active: a browser profile on disk is a sign-in that was saved
+      saved: isActive ? profileExists() : fs.existsSync(path.join(accountProfileDir(a.id), 'Default')) || fs.existsSync(path.join(accountProfileDir(a.id), 'Local State')),
+      via: a.via,
+    };
+  });
+}
+
+/** Stops everything that runs as the active account and forgets what was read as it. Deletes nothing. */
+async function standDown(): Promise<void> {
+  qrAttempt++; // a QR launch still in flight stops instead of opening an orphan page
+  if (probe) await probe.catch(() => undefined);
+  // (a browser that is still starting would come up on the old profile after the switch)
+  if (headlessLaunch) await headlessLaunch.catch(() => undefined);
+  if (feedPageOpening) await feedPageOpening.catch(() => undefined);
+  const lb = s.loginBrowser;
+  s.loginBrowser = undefined;
+  if (lb) await lb.close().catch(() => undefined);
+  await closeHeadless();
+  s.state = 'none';
+  s.username = s.nickname = s.avatar = s.error = s.qr = s.qrState = s.loginMode = undefined;
+  s.qrPageShot = s.qrPageHint = s.qrRedirect = s.qrRedirectAt = s.qrTokenOurs = s.qrToken = undefined;
+  s.qrVerifyAt = undefined;
+  resetVerifyFields();
+  s.pending = [];
+  s.seenIds = new Set();
+  s.feedCookieHeader = undefined;
+  s.lastFeedError = undefined;
+}
+
+/** Makes `id` the active account: the current one's browser is closed (its sign-in stays on disk), the other's is checked on first use. */
+export async function switchTikTokAccount(id: string, log: (m: string) => void): Promise<SessionStatus> {
+  const from = activeAccountId();
+  if (id === from) return sessionProbe();
+  if (!accountRecord(id)) throw new TikTokAccountError('That account is not on this server', 404);
+  if (switching) throw new TikTokAccountError('Another account switch is still running; try again in a moment', 409);
+  switching = true;
+  try {
+    await standDown();
+    setActiveAccount(id);
+    probed = false;
+    probeTries = 0;
+    probeRetryAt = 0;
+    remember(`switched TikTok account: ${from} -> ${id}`);
+    log(`TikTok account switched from "${from}" to "${id}" (the browser was closed; nothing was deleted)`);
+    for (const fn of accountListeners) {
+      try {
+        fn(id);
+      } catch {
+        /* a listener never stops a switch */
+      }
+    }
+  } finally {
+    switching = false;
+  }
+  return sessionProbe();
+}
+let switching = false;
+
+/** A new, empty account, made the active one: the panel then offers the sign-in (QR code, window, pasted cookies). */
+export async function addTikTokAccount(label: string | undefined, log: (m: string) => void): Promise<SessionStatus> {
+  const rec = createAccount(label);
+  log(`TikTok account "${rec.id}" added${rec.label ? ` ("${rec.label}")` : ''}`);
+  return switchTikTokAccount(rec.id, log);
+}
+
+/** Deletes an account that is not the active one, and not the main one (tiktokAccounts.ts refuses both). */
+export function removeTikTokAccount(id: string, log: (m: string) => void): void {
+  removeAccount(id);
+  log(`TikTok account "${id}" removed (its browser profile was deleted)`);
+}
+
+/**
+ * Sign-in with the cookies of a browser that is signed in to tiktok.com (for when the QR code
+ * cannot be scanned: the account lives in a desktop browser only). The cookies go into the active
+ * account's browser profile, then TikTok is asked who that is, exactly as a saved sign-in is
+ * checked. Refused while the active account is signed in: the cookies of another account must
+ * never land on top of it - add an account first.
+ */
+async function startCookieLogin(text: string | undefined, log: (m: string) => void): Promise<SessionStatus> {
+  if (s.state === 'logged_in') throw new TikTokAccountError('This account is signed in. To sign in a second account, add another account first (Accounts, below); to replace this one, sign out first.', 409);
+  const { cookies, warnings } = parseTikTokCookies(text || '');
+  if (switching) throw new TikTokAccountError('An account switch is still running; try again in a moment', 409);
+  if (probe) await probe.catch(() => undefined);
+  s.state = 'login_pending';
+  s.loginMode = 'cookies';
+  s.error = undefined;
+  const account = activeAccountId();
+  log(`cookie sign-in for account "${account}": ${cookies.length} tiktok.com cookies${warnings.length ? ` (${warnings.join('; ')})` : ''}`);
+  try {
+    say('starting the TikTok browser to take the cookies', 'starting the TikTok browser');
+    const browser = await headlessBrowser();
+    // A feed page opened before the cookies existed would keep showing the signed-out site.
+    await closeSecondaryPages();
+    const page = await browser.newPage();
+    try {
+      await page.setCookie(...toBrowserCookies(cookies));
+    } finally {
+      await page.close().catch(() => undefined);
+    }
+    say('asking TikTok who these cookies belong to', 'checking the sign-in with TikTok');
+    s.state = 'none';
+    probed = false;
+    probeTries = 0;
+    probeRetryAt = 0;
+    pendingVia = 'cookies';
+    await sessionProbe(true);
+    if (activeAccountId() !== account) throw new Error('the active account changed during the sign-in');
+    if ((s.state as string) !== 'logged_in') {
+      s.loginMode = undefined;
+      s.error = s.error || 'TikTok did not accept these cookies: it reports no valid session for them. Sign in at tiktok.com again, export fresh cookies and paste those (and keep that browser tab closed afterwards).';
+      log(`cookie sign-in for account "${account}" failed: ${s.error}`);
+    } else log(`cookie sign-in for account "${account}": signed in as @${s.username}`);
+  } catch (e) {
+    s.state = 'none';
+    s.loginMode = undefined;
+    s.error = `The cookies could not be checked (${(e as Error).message.split(/\r?\n/)[0]}).`;
+    log(`cookie sign-in for account "${account}" failed: ${s.error}`);
+  } finally {
+    pendingVia = undefined;
+  }
+  return sessionStatus();
+}
+/** How the sign-in being checked right now came about (kept with the account once TikTok confirms it) */
+let pendingVia: 'browser' | 'cookies' | undefined;
+
 
 /**
  * Counts QR attempts. startQrLogin takes a number; cancelLogin/logout bump it. A launch that is still
@@ -2125,12 +2283,36 @@ export async function logout(): Promise<SessionStatus> {
   s.pending = [];
   s.seenIds = new Set();
   probed = true;
-  try {
-    fs.rmSync(PROFILE_DIR, { recursive: true, force: true });
-  } catch (e) {
-    s.error = `Profile directory could not be deleted: ${(e as Error).message}`;
+  s.feedCookieHeader = undefined;
+  const account = activeAccountId();
+  if (account === MAIN_ACCOUNT) {
+    try {
+      fs.rmSync(activeProfileDir(), { recursive: true, force: true });
+      forgetAccountIdentity(MAIN_ACCOUNT);
+    } catch (e) {
+      s.error = `Profile directory could not be deleted: ${(e as Error).message}`;
+    }
+    return sessionStatus();
   }
-  return sessionStatus();
+  // Another account: signing it out removes it, and the main account (untouched all along) is the active one again.
+  try {
+    setActiveAccount(MAIN_ACCOUNT);
+    removeAccount(account);
+    remember(`signed out of account ${account}: removed; the main account is active again`);
+  } catch (e) {
+    s.error = `The account could not be removed: ${(e as Error).message}`;
+  }
+  probed = false;
+  probeTries = 0;
+  probeRetryAt = 0;
+  for (const fn of accountListeners) {
+    try {
+      fn(MAIN_ACCOUNT);
+    } catch {
+      /* a listener never stops a sign-out */
+    }
+  }
+  return sessionProbe();
 }
 
 export interface ForYouResult {
@@ -2224,10 +2406,10 @@ export function forYouWantsWarm(): boolean {
 export function forYouCheap(count: number): ForYouResult | undefined {
   if (s.pending.length) {
     const items = s.pending.splice(0, count);
-    rememberBatch('tiktok-foryou', items);
+    rememberBatch(forYouBatchKey(), items);
     return { items, warnings: [] };
   }
-  const stale = staleBatch('tiktok-foryou');
+  const stale = staleBatch(forYouBatchKey());
   return stale?.length ? { items: stale, warnings: [], stale: true } : undefined;
 }
 
@@ -2258,7 +2440,7 @@ export function forYouQuick(count: number, log: (m: string) => void): ForYouResu
       startForYouPump();
     }
   })().catch((e) => log(`For You: page not ready yet (${(e as Error).message})`));
-  const stale = staleBatch('tiktok-foryou', count) || [];
+  const stale = staleBatch(forYouBatchKey(), count) || [];
   log(`For You: nothing ready, ${stale.length} earlier videos served while the page loads`);
   return { items: stale, warnings: [], stale: true };
 }
@@ -2340,12 +2522,12 @@ async function fetchForYouNow(count: number, log: (m: string) => void, quick = f
     if (!s.pending.length) warnings.push(s.lastFeedError || 'TikTok did not deliver feed items; try again in a moment.');
   }
   const items = s.pending.splice(0, count);
-  if (items.length) rememberBatch('tiktok-foryou', items);
+  if (items.length) rememberBatch(forYouBatchKey(), items);
   return { items, warnings };
 }
 
 export function profileDir(): string {
-  return PROFILE_DIR;
+  return activeProfileDir();
 }
 
 /** Closes every browser this process started (process shutdown). The profile stays on disk. */

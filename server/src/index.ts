@@ -5,7 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { EXPLORE_CATEGORIES, YOUTUBE_CATEGORIES, platformOf } from '../../shared/types';
-import type { AvatarRequest, AvatarResponse, CommentRepliesRequest, CommentsRequest, Platform as PlatformId, ConversationRequest, DownloadProbeRequest, InboxCancelResponse, LibraryCategoryRequest, LibraryEntryPatch, LibrarySaveRequest, DownloadStartRequest, FeedItem, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ServerStatus, ProbeRequest, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SessionActionRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
+import type { TikTokAccountRequest, TikTokAccountsResponse, AvatarRequest, AvatarResponse, CommentRepliesRequest, CommentsRequest, Platform as PlatformId, ConversationRequest, DownloadProbeRequest, InboxCancelResponse, LibraryCategoryRequest, LibraryEntryPatch, LibrarySaveRequest, DownloadStartRequest, FeedItem, FeedRequest, FeedResponse, FollowRequest, HealthResponse, ServerStatus, ProbeRequest, ProfileRequest, ProfileResponse, ReportRequest, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse, SendMessageRequest, SessionActionRequest, SessionInputRequest, SessionLoginRequest, SessionStatus } from '../../shared/types';
 import { registerAuth } from './auth';
 import { mirrorStats, registerMirror, shutdownMirror } from './mirror';
 import { config, findUp } from './config';
@@ -18,11 +18,12 @@ import { cancelImport, dismissImport, fileInfo, importLink, importStats, resumeI
 import { daemonStatus, detectYtDlp, resolveWithYtDlp, setYtDlpLogger, shutdownYtDlp, warmYtDlp } from './ytdlp';
 import { guestLastGoodVideo, tiktokGuestStatus } from './tiktokGuest';
 import { closeTlsBridge, setTlsBridgeLogger } from './tlsBridge';
+import { activeAccountId, TikTokAccountError } from './tiktokAccounts';
 import { logStream, recentLog } from './logbuf';
 import { defaultExpiry, mediaCount, registerMedia } from './mediaStore';
 import { hostAllowed } from './ssrf';
 import { EXPLORE_DEFAULT_CATEGORY, FeedError, fetchExploreFeed, normalizeExploreOptions, type ExploreResult } from './feed';
-import { wireReport, cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouCheap, forYouPutBack, forYouQuick, forYouStock, forYouWantsWarm, forYouWarm, headlessRunning, logout, parkHeadlessBrowser, rememberLog, workState, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
+import { addTikTokAccount, removeTikTokAccount, switchTikTokAccount, tiktokAccountList, wireReport, cancelLogin, fetchExploreViaBrowser, fetchForYou, forYouCheap, forYouPutBack, forYouQuick, forYouStock, forYouWantsWarm, forYouWarm, headlessRunning, logout, parkHeadlessBrowser, rememberLog, workState, sessionInput, sessionLog, sessionProbe, sessionStatus, sessionSupported, shutdownBrowsers, startLogin } from './session';
 import { Reservoir, type ReservoirStats } from './reservoir';
 import { hasBatch, reviveItems, slimItems } from './lastBatch';
 import { invalidateJobs, jobStats, sharedJob } from './jobs';
@@ -964,6 +965,24 @@ export async function buildServer() {
     // recheck=1 is the panel's "Check again": a deliberate check of saved Instagram cookies goes past the probe pacing.
     return platform === 'youtube' ? youtubeSessionStatus() : platform === 'instagram' ? instagramSessionStatus(req.query.recheck === '1') : platform === 'facebook' ? facebookSessionStatus(req.query.recheck === '1') : sessionProbe();
   });
+  // TikTok keeps several sign-ins (tiktokAccounts.ts): the list, and add / switch / remove. One is active at a time;
+  // the main account's saved sign-in is never touched by any of these.
+  const accountsNow = async (): Promise<TikTokAccountsResponse> => ({ accounts: tiktokAccountList(), active: activeAccountId(), session: await sessionProbe() });
+  app.get('/api/session/accounts', async () => accountsNow());
+  app.post<{ Body: TikTokAccountRequest }>('/api/session/accounts', resolveLimit, async (req, reply) => {
+    const log = (m: string): void => req.log.info({ what: 'tiktok-session' }, m);
+    try {
+      const action = req.body?.action;
+      const id = String(req.body?.id || '');
+      if (action === 'add') await addTikTokAccount(typeof req.body?.label === 'string' ? req.body.label : undefined, log);
+      else if (action === 'switch') await switchTikTokAccount(id, log);
+      else if (action === 'remove') removeTikTokAccount(id, log);
+      else throw new TikTokAccountError('action must be add, switch or remove');
+      return await accountsNow();
+    } catch (e) {
+      return reply.code(e instanceof TikTokAccountError ? e.status : 500).send({ ...(await accountsNow()), error: (e as Error).message });
+    }
+  });
   // What the signed-in For You page sends by itself (names and sizes, never values) and, with ?storage=1, the shapes of
   // what it keeps: does the page prove a key that cannot leave the browser? Looks only; opens nothing, asks TikTok nothing.
   app.get<{ Querystring: { storage?: string } }>('/api/session/wire', async (req) => wireReport(req.query.storage === '1'));
@@ -993,10 +1012,11 @@ export async function buildServer() {
         const mode = req.body?.mode === 'window' ? 'window' : 'cookies';
         return await facebookStartLogin(mode, typeof req.body?.cookies === 'string' ? req.body.cookies : undefined, (m) => req.log.info({ what: 'facebook-session' }, m), req.headers['user-agent']);
       }
-      const mode = req.body?.mode === 'window' ? 'window' : 'qr';
-      return await startLogin(mode, (m) => req.log.info(m));
+      // TikTok: the QR code, a window on the server, or the cookies of a browser that is signed in (for an account that cannot scan).
+      const mode = req.body?.mode === 'window' ? 'window' : req.body?.mode === 'cookies' ? 'cookies' : 'qr';
+      return await startLogin(mode, (m) => req.log.info({ what: 'tiktok-session' }, m), typeof req.body?.cookies === 'string' ? req.body.cookies : undefined);
     } catch (e) {
-      const status = e instanceof YouTubeSessionError || e instanceof InstagramSessionError || e instanceof FacebookSessionError ? e.status : 500;
+      const status = e instanceof YouTubeSessionError || e instanceof InstagramSessionError || e instanceof FacebookSessionError || e instanceof TikTokAccountError ? e.status : 500;
       const base = platform === 'youtube' ? await youtubeSessionStatus() : platform === 'instagram' ? await instagramSessionStatus() : platform === 'facebook' ? await facebookSessionStatus() : sessionStatus();
       return reply.code(status).send({ ...base, error: (e as Error).message });
     }
