@@ -479,12 +479,27 @@ in the sign-in panel):
 - **Sign out** of the main account empties its profile, as before. Sign out of another account
   removes that account and makes the main one active again. **Remove** works on an account that is
   neither the main nor the active one.
+- **Adding an account to a screen that cannot paste** (the car): run
+  [`deploy/add-tiktok-account.ps1`](deploy/add-tiktok-account.ps1) once from a Windows computer
+  that has the cookies file. It sends the cookies from that computer to the server over HTTPS, adds
+  an account, signs it in and (with `-Test`) switches on "For You without the browser"; then every
+  device picks the account from the profile icon. It prompts for the site password and keeps
+  nothing. Example:
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File deploy\add-tiktok-account.ps1 `
+    -Server https://your-site -Cookies "$env:USERPROFILE\.streamanywhere\tiktok-cookies.txt" `
+    -Label Spare -Test -BackToMain
+  ```
+  (It builds the JSON body by hand and talks to the server with .NET's `HttpClient`, because
+  Windows PowerShell 5.1's `ConvertTo-Json` inflates a tab-heavy cookies file to tens of MB and its
+  web cmdlet drops the slow sign-in request.)
 - `GET /api/session/accounts` lists them; `POST /api/session/accounts` takes
-  `{action: "add" | "switch" | "remove", id?, label?}`; a cookie sign-in is
+  `{action: "add" | "switch" | "remove" | "direct", id?, label?, on?}`; a cookie sign-in is
   `POST /api/session/login` with `{platform: "tiktok", mode: "cookies", cookies}`.
 - Checked on the PC with a spare account: signed in from pasted cookies in 4 s, its For You
   loaded, main ↔ spare switched three times (3 s each to the saved sign-in), a third account added
-  and removed; the main profile's folder was never touched.
+  and removed, and the helper script above added and signed in an account end to end; the main
+  profile's folder was never touched.
 
 **Picking an account from the profile icon.** With more than one account on the server, the
 profile icon (left rail, or the bottom bar on a phone) opens a short list, "Use TikTok as": tap an
