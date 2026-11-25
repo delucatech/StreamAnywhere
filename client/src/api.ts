@@ -277,7 +277,7 @@ export const api = {
   sessionCancel: (platform: Platform = 'tiktok'): Promise<SessionStatus> => post('/api/session/cancel', { platform }),
   sessionInput: (req: SessionInputRequest): Promise<SessionStatus> => post('/api/session/input', req),
   search: (req: SearchRequest): Promise<SearchResponse> => post('/api/search', req),
-  profile: (req: ProfileRequest): Promise<ProfileResponse> => post('/api/profile', req),
+  profile: (req: ProfileRequest, label?: WaitName): Promise<ProfileResponse> => post('/api/profile', req, undefined, undefined, label),
   follow: (req: FollowRequest): Promise<FollowResponse> => post('/api/follow', req),
   /** The profile picture of a video's channel (YouTube); answers within a few seconds, without one when there is none */
   avatar: (req: AvatarRequest): Promise<AvatarResponse> => post('/api/avatar', req, 10_000),
@@ -304,7 +304,7 @@ export const api = {
   downloadCancel: (jobId: string): Promise<DownloadJob> => post(`/api/download/jobs/${jobId}/cancel`, {}),
   inboxOpen: (id: string, signal?: AbortSignal): Promise<ConversationResponse> => post('/api/inbox/open', { id }, undefined, signal),
   /** A video's comments (the bubble beside it); `signal` cancels the read (ApiError 499). Pair it with commentsCancel so the server's work stops as well. */
-  comments: (req: CommentsRequest, signal?: AbortSignal): Promise<CommentsResponse> => post('/api/comments', req, undefined, signal),
+  comments: (req: CommentsRequest, signal?: AbortSignal, label?: WaitName): Promise<CommentsResponse> => post('/api/comments', req, undefined, signal, label),
   /** The replies under one comment, a few per call (pass the answer's cursor back for the next ones) */
   commentReplies: (req: CommentRepliesRequest): Promise<CommentRepliesResponse> => post('/api/comments/replies', req),
   commentsCancel: (): Promise<InboxCancelResponse> => post('/api/comments/cancel', {}, 10_000),

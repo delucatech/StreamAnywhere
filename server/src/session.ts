@@ -34,7 +34,7 @@ import { rememberBatch, staleBatch } from './lastBatch';
 import { getProgress } from './progress';
 import { say } from './activity';
 import { accountDirect, accountProfileDir, accountRecord, accountRecords, activeAccountId, activeProfileDir, cookieMap, createAccount, directAllowed, forgetAccountIdentity, loadAccountCookies, MAIN_ACCOUNT, noteDirect, parseTikTokCookies, rememberAccount, removeAccount, saveAccountCookies, setAccountDirect, setActiveAccount, TikTokAccountError, toBrowserCookies } from './tiktokAccounts';
-import { accountForYou, accountGet, GuestError, guestUnusable, openAccountVisit, visitCookies, type AccountGet, type AccountVisit, type GuestAnswer, type GuestKind } from './tiktokGuest';
+import { accountForYou, accountGet, accountPage, GuestError, guestUnusable, openAccountVisit, visitCookies, type AccountGet, type AccountVisit, type GuestAnswer, type GuestKind } from './tiktokGuest';
 import { READ_STORAGE_SHAPES, READ_STORAGE_SHAPES_SO_FAR, summarizeKeys, watchWire, wireRecords, type WireRecord } from './tiktokWire';
 
 type Browser = import('puppeteer-core').Browser;
@@ -2399,16 +2399,26 @@ function directOn(kind: GuestKind = 'foryou'): boolean {
 export const tiktokDirectOn = (kind: GuestKind = 'foryou'): boolean => directOn(kind);
 
 /**
- * One signed read as the active account without the browser (a search: social.ts searchTikTok),
+ * One signed request as the active account without the browser (a search, a follow: social.ts),
  * counted in the account's record like a For You request. Throws GuestError when
  * TikTok does not answer it: the caller then asks through the browser, as before.
  */
-export async function directGet(g: AccountGet): Promise<GuestAnswer> {
+export function directGet(g: AccountGet): Promise<GuestAnswer> {
+  return asActiveAccount(g.kind, g.log, (visit) => accountGet(visit, g));
+}
+
+/** A tiktok.com page as the active account sees it, without the browser (an account page: whether the account follows it). */
+export function directPage(kind: GuestKind, url: string, what: string, log: (m: string) => void, signal?: AbortSignal): Promise<{ html: string; status: number; ms: number }> {
+  return asActiveAccount(kind, log, (visit) => accountPage(visit, kind, url, what, log, signal));
+}
+
+/** One request as the active account without the browser, counted in its record; never the main account (directOn). */
+async function asActiveAccount<T>(kind: GuestKind, log: (m: string) => void, work: (visit: AccountVisit) => Promise<T>): Promise<T> {
   const id = activeAccountId();
-  if (!directOn(g.kind)) throw new GuestError('this account does not ask TikTok without the browser', 'session');
+  if (!directOn(kind)) throw new GuestError('this account does not ask TikTok without the browser', 'session');
   try {
-    const visit = await directVisitNow(g.log);
-    const r = await accountGet(visit, g);
+    const visit = await directVisitNow(log);
+    const r = await work(visit);
     if (activeAccountId() !== id) throw new GuestError('the active account changed meanwhile', 'session');
     noteDirect(id, true);
     saveAccountCookies(id, visitCookies(visit));

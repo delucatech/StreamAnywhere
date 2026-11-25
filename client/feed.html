@@ -347,10 +347,53 @@
                 </div>
               </div>
             </div>
+            <!-- Beside the video (wide screens, feed.css .sheet-frame.side): who posted it, then two tabs -
+                 the video's comments and the account's videos. Not shown in the sheet on a phone. -->
+            <div id="sideHead" class="side-head">
+              <div class="side-author">
+                <button id="sideAuthor" class="side-author-btn" type="button" title="Open this account's page">
+                  <img id="sideAvatar" class="side-avatar" alt="" draggable="false" />
+                  <span class="side-names"><b id="sideHandle"></b><span id="sideNick"></span></span>
+                </button>
+                <button id="sideClose" class="sheet-close" type="button" aria-label="Close" title="Close (Esc)">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+                </button>
+              </div>
+              <div class="side-meta">
+                <div id="sideStats" class="side-stats"></div>
+                <button id="sideFollow" class="btn side-follow" type="button">Follow</button>
+              </div>
+              <div id="sideDesc" class="side-desc hidden"></div>
+              <div class="side-tabrow">
+                <div id="sideTabs" class="side-tabs" role="tablist">
+                  <button id="sideTabComments" class="side-tab active" type="button" role="tab" aria-selected="true">Comments</button>
+                  <button id="sideTabVideos" class="side-tab" type="button" role="tab" aria-selected="false">Videos</button>
+                  <span class="side-tab-line" aria-hidden="true"></span>
+                </div>
+                <button id="sideRefresh" class="sheet-text-btn" type="button">Refresh</button>
+                <button id="sideCancel" class="sheet-text-btn hidden" type="button">Cancel</button>
+              </div>
+            </div>
             <div id="commentsBody" class="sheet-body">
               <div id="commentsStatus" class="panel-status hidden"></div>
               <div id="commentsList" class="comment-list"></div>
+              <!-- while the comments are read: in the list, where they are about to be (under the ones already there for "More comments") -->
+              <div id="commentsLoading" class="sheet-loading hidden" role="status" aria-live="polite">
+                <span class="spinner"></span>
+                <div id="commentsLoadingTitle" class="sheet-loading-title"></div>
+                <div id="commentsLoadingDetail" class="sheet-loading-detail"></div>
+              </div>
               <button id="commentsMore" class="btn sheet-more hidden" type="button">More comments</button>
+            </div>
+            <!-- the Videos tab: the account's videos, three a row; a tap plays them from there -->
+            <div id="sideVideos" class="sheet-body side-videos hidden">
+              <div id="sideVideosStatus" class="panel-status hidden"></div>
+              <div id="sideVideosGrid" class="video-grid side-grid"></div>
+              <div id="sideVideosLoading" class="sheet-loading hidden" role="status" aria-live="polite">
+                <span class="spinner"></span>
+                <div id="sideVideosLoadingTitle" class="sheet-loading-title"></div>
+              </div>
+              <button id="sideVideosMore" class="btn sheet-more hidden" type="button">More videos</button>
             </div>
           </section>
         </div>

@@ -42,7 +42,7 @@
 import type { Page } from 'puppeteer-core';
 import type { ChatMessage, CommentRepliesResponse, CommentsResponse, Conversation, ConversationResponse, FeedItem, FollowResponse, FollowState, InboxResponse, ProfileResponse, SearchResponse, SendMessageResponse, UserSummary, VideoComment } from '../../shared/types';
 import { itemToFeedItem, relationToState } from './feed';
-import { directGet, isLoggedIn, onTikTokAccountChange, pageCookieHeader, resetWorkPage, tiktokDirectOn, withWorkPage } from './session';
+import { directGet, directPage, isLoggedIn, onTikTokAccountChange, pageCookieHeader, resetWorkPage, tiktokDirectOn, withWorkPage } from './session';
 import { ytdlpInfo } from './ytdlp';
 import { GuestError, guestCommentList, guestGet, guestPage, guestReplyList, guestUnusable, pageScope } from './tiktokGuest';
 import { say } from './activity';
@@ -577,8 +577,22 @@ export async function fetchProfileAsGuest(user: string, offset: number, count: n
   const referer = `${TT}/@${encodeURIComponent(user)}`;
   let p = guestProfile && sameUser(guestProfile.user, user) ? guestProfile : undefined;
   if (!p || Date.now() - p.infoAt > GUEST_PROFILE_MS) {
-    const page = await guestPage('profile', referer, 'the account page', log, signal);
+    // An account in the test "without the browser" reads the page as itself: the page then says
+    // whether it follows this account (a guest's page says "not followed" for everyone).
+    let page: { html: string } | undefined;
+    let asAccount = false;
+    if (tiktokDirectOn('profile')) {
+      try {
+        page = await directPage('profile', referer, 'the account page', log, signal);
+        asAccount = true;
+      } catch (e) {
+        if (isCancelled(e)) throw e;
+        log(`profile @${user}: the page as the account did not come (${(e as Error).message.split(/\r?\n/)[0]}); reading it as a guest`);
+      }
+    }
+    if (!page) page = await guestPage('profile', referer, 'the account page', log, signal);
     const read = userFromAccountPage(page.html);
+    if (asAccount && read.info) rememberFollow(user, read.info.followState);
     if (read.readable && read.statusCode === 10221) throw new SocialError(`@${user}: TikTok could not find this account`, 404);
     if (!read.info?.secUid) throw new GuestError(read.readable ? `the account page carried no account (status ${read.statusCode})` : 'the account page carried no data block (TikTok served a challenge or changed the page)', 'empty');
     p = { user, info: read.info, privateAccount: Boolean(read.privateAccount), infoAt: Date.now(), items: [], ids: new Set(), cursor: '0', hasMore: true };
@@ -742,8 +756,63 @@ export async function fetchProfileInBrowser(user: string, offset: number, count:
 
 // ---------------------------------------------------------------- follow
 
+/**
+ * Follow / unfollow without the browser, for an account in the test "without the browser" (never
+ * the main one; session.ts directGet): the account page as the account sees it names the account
+ * (id, secUid) and says whether it is followed; then the page's own request, `POST
+ * /api/commit/follow/user/`, signed, with an empty body. Accepted on 2026-11-25 (follow and
+ * unfollow, 0.3 s each, `follow_status` 1 then 0, the account page agreeing afterwards).
+ */
+async function followDirect(user: string, follow: boolean, log: (m: string) => void): Promise<FollowResponse> {
+  const t0 = Date.now();
+  const referer = `${TT}/@${encodeURIComponent(user)}`;
+  const page = await directPage('follow', referer, `the account page of @${user}`, log);
+  const read = userFromAccountPage(page.html);
+  if (read.readable && read.statusCode === 10221) throw new SocialError(`@${user}: TikTok could not find this account`, 404);
+  const info = read.info;
+  if (!info?.id || !info.secUid) throw new GuestError(read.readable ? `the account page carried no account (status ${read.statusCode})` : 'the account page carried no data block', 'empty');
+  const before = info.followState ?? 'unknown';
+  if (before !== 'unknown' && (before !== 'none') === follow) {
+    rememberFollow(user, before);
+    return { user, followState: before, warnings: [`already ${follow ? 'following' : 'not following'} @${user}`], via: 'direct' };
+  }
+  const r = await directGet({
+    kind: 'follow',
+    method: 'POST',
+    path: '/api/commit/follow/user/',
+    query: { action_type: follow ? 1 : 0, channel_id: 0, from: 18, from_pre: 0, fromWeb: 1, sec_user_id: info.secUid, type: follow ? 1 : 0, user_id: info.id },
+    what: 'the follow',
+    doing: `${follow ? 'following' : 'unfollowing'} @${user} at TikTok directly (no browser: the account's sign-in, a signed request)`,
+    referer,
+    usable: (j) => j?.follow_status !== undefined,
+    log,
+  });
+  const warnings: string[] = [];
+  let after = relationToState(r.json.follow_status);
+  if (after === 'unknown') {
+    warnings.push(`TikTok answered follow_status ${r.json.follow_status}`);
+    after = follow ? 'following' : 'none';
+  }
+  if ((after !== 'none') !== follow) warnings.push('TikTok answered, but the follow state is not the one asked for');
+  rememberFollow(user, after);
+  log(`@${user}: ${follow ? 'follow' : 'unfollow'} without the browser, state now "${after}" (was "${before}"), ${Date.now() - t0} ms`);
+  return { user, followState: after, warnings, via: 'direct' };
+}
+
 export async function followUser(user: string, follow: boolean, log: (m: string) => void): Promise<FollowResponse> {
   requireLogin(follow ? 'follow accounts' : 'unfollow accounts');
+  // An account in the test "without the browser": TikTok is asked directly. When TikTok does not
+  // answer that, the browser presses the button as before; when it answers "no", that is the answer.
+  if (tiktokDirectOn('follow')) {
+    try {
+      return await followDirect(user, follow, log);
+    } catch (e) {
+      if (e instanceof SocialError) throw e;
+      if (e instanceof GuestError && e.kind === 'status') throw new SocialError(`TikTok did not ${follow ? 'follow' : 'unfollow'} @${user} (${e.message})`);
+      log(`@${user}: ${follow ? 'follow' : 'unfollow'} without the browser failed (${(e as Error).message.split(/\r?\n/)[0]}); pressing the button in the browser`);
+    }
+  }
+  say(`opening @${user} in the signed-in browser on the server (Chromium) to press its follow button`, "pressing Follow in the server's browser");
   const warnings: string[] = [];
   return withWorkPage(log, async (page) => {
     installCapture(page);
@@ -790,7 +859,7 @@ export async function followUser(user: string, follow: boolean, log: (m: string)
     if (p.info) p.info.followState = after;
     rememberFollow(user, after);
     log(`@${user}: follow state now "${after}"`);
-    return { user, followState: after, warnings };
+    return { user, followState: after, warnings, via: 'browser' };
   }, `follow @${user}`);
 }
 

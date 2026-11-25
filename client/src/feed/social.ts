@@ -13,6 +13,7 @@
  * search runs behind them (a status at the end of the list says so); fresh results then take over.
  */
 import type { ChatMessage, Conversation, FeedItem, FollowState, SearchResponse, UserSummary, VideoComment } from '../../../shared/types';
+import { serverStep } from '../activity';
 import { api, ApiError } from '../api';
 import { pressed } from '../busy';
 import type { PlatformDef } from '../platforms';
@@ -39,6 +40,12 @@ export interface SocialHost {
    */
   videoCard?(): { left: number; top: number; width: number; height: number } | undefined;
   /**
+   * The place beside the video where the comments go instead of over it (wide screens: the column
+   * of the Up next list, which they cover while they are open); undefined when there is none (a
+   * phone, a window too narrow for that column). The video then stays whole and usable beside them.
+   */
+  commentsSide?(): { left: number; top: number; width: number; height: number } | undefined;
+  /**
    * What the comments sheet leaves of the page for the video, from `top` to `bottom` (px from the
    * top of the window), each time the sheet moves: the host fits the picture into it, so the video
    * is still watched above the comments. `animate`: the sheet is sliding there (SHEET_MS, the same
@@ -49,6 +56,8 @@ export interface SocialHost {
   platform: PlatformDef;
   /** The signed-in account's follow state of an account became known (a profile opened, a follow pressed) */
   onFollowState?(user: string, state: FollowState): void;
+  /** What the page knows of the signed-in account's follow state of a video's author (its "+" badge) */
+  followState?(author: FeedItem['author']): FollowState | undefined;
   /** The search or account panel closed (its list may be playing behind it) */
   onPanelClosed?(kind: 'search' | 'profile'): void;
 }
@@ -104,7 +113,29 @@ const el = {
   commentsCancel: $<HTMLButtonElement>('commentsCancel'),
   commentsStatus: $('commentsStatus'),
   commentsList: $('commentsList'),
+  commentsLoading: $('commentsLoading'),
+  commentsLoadingTitle: $('commentsLoadingTitle'),
+  commentsLoadingDetail: $('commentsLoadingDetail'),
   commentsMore: $<HTMLButtonElement>('commentsMore'),
+  sideTabs: $('sideTabs'),
+  sideAuthor: $<HTMLButtonElement>('sideAuthor'),
+  sideAvatar: $<HTMLImageElement>('sideAvatar'),
+  sideHandle: $('sideHandle'),
+  sideNick: $('sideNick'),
+  sideStats: $('sideStats'),
+  sideDesc: $('sideDesc'),
+  sideFollow: $<HTMLButtonElement>('sideFollow'),
+  sideClose: $<HTMLButtonElement>('sideClose'),
+  sideTabComments: $<HTMLButtonElement>('sideTabComments'),
+  sideTabVideos: $<HTMLButtonElement>('sideTabVideos'),
+  sideRefresh: $<HTMLButtonElement>('sideRefresh'),
+  sideCancel: $<HTMLButtonElement>('sideCancel'),
+  sideVideos: $('sideVideos'),
+  sideVideosStatus: $('sideVideosStatus'),
+  sideVideosGrid: $('sideVideosGrid'),
+  sideVideosLoading: $('sideVideosLoading'),
+  sideVideosLoadingTitle: $('sideVideosLoadingTitle'),
+  sideVideosMore: $<HTMLButtonElement>('sideVideosMore'),
   inboxStatus: $('inboxStatus'),
   inboxList: $('inboxList'),
   inboxThread: $('inboxThread'),
@@ -743,8 +774,9 @@ el.profileFollow.addEventListener('click', () => {
         u.followState = r.followState;
         renderProfileHead();
         host.onFollowState?.(u.uniqueId, r.followState);
+        if (r.via) console.info(`[follow] @${u.uniqueId}: ${r.followState} · ${r.via === 'direct' ? 'asked directly, no browser' : "pressed in the server's browser"}`);
         // "none" after asking to follow = it did not take (the server's warning says why)
-        host.toast(r.followState === 'none' ? (followed ? `Unfollowed @${u.uniqueId}` : `Could not follow @${u.uniqueId}`) : r.followState === 'requested' ? `Follow request sent to @${u.uniqueId}` : `${followLabel(r.followState)} @${u.uniqueId}`, r.followState === 'none' && !followed);
+        host.toast(`${r.followState === 'none' ? (followed ? `Unfollowed @${u.uniqueId}` : `Could not follow @${u.uniqueId}`) : r.followState === 'requested' ? `Follow request sent to @${u.uniqueId}` : `${followLabel(r.followState)} @${u.uniqueId}`}${r.via === 'direct' ? ' · asked directly, no browser' : ''}`, r.followState === 'none' && !followed);
         for (const w of r.warnings) console.warn('[follow]', w);
       } catch (e) {
         host.toast(`Follow failed: ${errMsg(e)}`, true, 6000);
@@ -976,11 +1008,14 @@ el.inboxForm.addEventListener('submit', (e) => {
  * They show in a sheet that slides up over the lower two thirds of the video (see "the sheet" below);
  * it is not one of the panels above: the video is neither paused nor covered.
  */
-const comments = { item: undefined as FeedItem | undefined, list: [] as VideoComment[], cursor: 0, hasMore: false, total: undefined as number | undefined, ctl: undefined as AbortController | undefined, seq: 0 };
+const comments = { item: undefined as FeedItem | undefined, /** The video (id) whose comments were asked for, so a tab shown again does not ask twice */ asked: '', list: [] as VideoComment[], cursor: 0, hasMore: false, total: undefined as number | undefined, ctl: undefined as AbortController | undefined, seq: 0 };
 
 function commentsBusy(busy: boolean): void {
   el.commentsRefresh.classList.toggle('hidden', busy);
   el.commentsCancel.classList.toggle('hidden', !busy);
+  // (the same pair beside the video, on its Comments tab)
+  el.sideRefresh.classList.toggle('hidden', busy || side.tab !== 'comments');
+  el.sideCancel.classList.toggle('hidden', !busy || side.tab !== 'comments');
   el.commentsMore.disabled = busy;
 }
 function beginCommentsRead(): { seq: number; signal: AbortSignal } {
@@ -1117,12 +1152,51 @@ function renderComments(list: VideoComment[], append: boolean): void {
 function commentsTitle(): void {
   const n = comments.total ?? comments.item?.stats.comments;
   el.commentsTitle.textContent = n !== undefined ? `${host.fmtCount(n)} comments` : 'Comments';
+  el.sideTabComments.textContent = n !== undefined ? `Comments ${host.fmtCount(n)}` : 'Comments';
+}
+
+// While the comments are read the sheet says so itself, in the list where they are about to be
+// (and under the ones on show for "More comments"), with the step the server is on and a clock -
+// not on the status line, which sits above the sheet, over the video.
+let commentsLoadingTimer = 0;
+function showCommentsLoading(more: boolean): void {
+  window.clearInterval(commentsLoadingTimer);
+  const t0 = Date.now();
+  let step = '';
+  let askedAt = 0;
+  el.commentsLoading.classList.toggle('more', more);
+  el.commentsLoading.classList.remove('hidden');
+  el.commentsLoadingTitle.textContent = more ? 'Loading more comments…' : 'Loading the comments…';
+  const render = (): void => {
+    const waited = Date.now() - t0;
+    el.commentsLoadingDetail.textContent = [step, waited >= 3000 ? `${Math.round(waited / 1000)} s` : ''].filter(Boolean).join(' · ');
+  };
+  const timer = window.setInterval(() => {
+    render();
+    // what the server is doing about it, once the answer is not there at once
+    if (Date.now() - t0 < 700 || askedAt) return;
+    askedAt = Date.now();
+    void serverStep('POST /api/comments').then((s) => {
+      if (commentsLoadingTimer !== timer) return;
+      if (s !== undefined) step = s;
+      render();
+      window.setTimeout(() => (askedAt = 0), Math.max(0, 1500 - (Date.now() - askedAt)));
+    });
+  }, 500);
+  commentsLoadingTimer = timer;
+  render();
+}
+function hideCommentsLoading(): void {
+  window.clearInterval(commentsLoadingTimer);
+  commentsLoadingTimer = 0;
+  el.commentsLoading.classList.add('hidden');
 }
 
 async function loadComments(more: boolean): Promise<void> {
   const item = comments.item;
   if (!item?.author.uniqueId) return;
   const { seq, signal } = beginCommentsRead();
+  comments.asked = item.id;
   if (!more) {
     comments.list = [];
     comments.cursor = 0;
@@ -1130,9 +1204,11 @@ async function loadComments(more: boolean): Promise<void> {
     el.commentsList.innerHTML = '';
     el.commentsMore.classList.add('hidden');
   }
-  status(el.commentsStatus, more ? 'Loading more comments…' : 'Reading the comments…');
+  status(el.commentsStatus, '');
+  showCommentsLoading(more);
   try {
-    const r = await api.comments({ platform: host.platform.id, id: item.id, author: item.author.uniqueId, cursor: more ? comments.cursor : 0 }, signal);
+    // (quiet: the sheet shows this wait itself, see showCommentsLoading)
+    const r = await api.comments({ platform: host.platform.id, id: item.id, author: item.author.uniqueId, cursor: more ? comments.cursor : 0 }, signal, { label: 'Loading the comments', quiet: () => true });
     if (!endCommentsRead(seq) || comments.item !== item) return;
     comments.list = more ? comments.list.concat(r.comments) : r.comments;
     comments.cursor = r.cursor;
@@ -1150,12 +1226,19 @@ async function loadComments(more: boolean): Promise<void> {
       return;
     }
     status(el.commentsStatus, `Comments could not be read: ${errMsg(e)}`, true);
+  } finally {
+    // (a newer read has its own notice on show: that one stays)
+    if (seq === comments.seq) hideCommentsLoading();
   }
 }
 
 // ---- the sheet
-// It slides up from the bottom of its frame (the screen on phones, the video's card on wide screens)
-// to SHEET_SHARE of it, so the video stays in view above. The grab area (handle + header) drags it:
+// Wide screens with the Up next column on show: the comments take that column, top to bottom
+// (SocialHost.commentsSide), and the video beside them stays as it is - whole, and still tapped,
+// paused and swiped (the layer lets everything outside the sheet through). The list of next videos
+// is back when they close. Everywhere else:
+// It slides up from the bottom of its frame (the screen on phones, the video's card on wide screens
+// without that column) to SHEET_SHARE of it, so the video stays in view above. The grab area (handle + header) drags it:
 // down to close, up to the tall position (the frame less a strip of video at the top). A tap beside
 // the sheet, the close button and Escape / C (feed.ts) close it too. From the moment it starts to
 // open until it has slid away the host holds the feed on this video (SocialHost.onCommentsHold).
@@ -1182,6 +1265,8 @@ const sheet = {
   state: 'closed' as 'closed' | 'opening' | 'open' | 'closing',
   /** Pulled up to the tall position */
   tall: false,
+  /** Beside the video (over the Up next column) instead of over it */
+  side: false,
   timer: 0,
   /** px: the height it opens to, and the tall one */
   rest: 0,
@@ -1197,24 +1282,32 @@ const sheet = {
 /** Places the frame (over the video's card, or the whole screen) and works out the two heights. */
 function sheetMeasure(): void {
   const f = el.commentsFrame;
-  const card = host.videoCard?.();
+  const beside = host.commentsSide?.();
+  const card = beside ? undefined : host.videoCard?.();
+  const place = beside ?? card;
+  sheet.side = !!beside;
+  f.classList.toggle('side', !!beside);
+  el.comments.classList.toggle('side', !!beside);
   f.classList.toggle('card', !!card);
-  if (card) {
+  if (place) {
     const o = el.comments.getBoundingClientRect();
-    f.style.left = `${Math.round(card.left - o.left)}px`;
-    f.style.top = `${Math.round(card.top - o.top)}px`;
-    f.style.width = `${Math.round(card.width)}px`;
-    f.style.height = `${Math.round(card.height)}px`;
+    f.style.left = `${Math.round(place.left - o.left)}px`;
+    f.style.top = `${Math.round(place.top - o.top)}px`;
+    f.style.width = `${Math.round(place.width)}px`;
+    f.style.height = `${Math.round(place.height)}px`;
   } else f.style.left = f.style.top = f.style.width = f.style.height = '';
-  // the frame's top padding is the strip of video the tall sheet leaves
+  // the frame's top padding is the strip of video the tall sheet leaves (none beside the video)
   const pad = parseFloat(getComputedStyle(f).paddingTop) || 0;
   const room = f.clientHeight - pad;
   sheet.max = Math.max(160, Math.round(room));
-  sheet.rest = Math.min(sheet.max, Math.max(160, Math.round(f.clientHeight * SHEET_SHARE)));
+  // beside the video the comments take the whole column: one position, nothing to pull up to
+  sheet.rest = beside ? sheet.max : Math.min(sheet.max, Math.max(160, Math.round(f.clientHeight * SHEET_SHARE)));
   // the video's room starts under the notch / status bar (the padding is that plus SHEET_STRIP)
   const box = f.getBoundingClientRect();
   sheet.viewTop = box.top + Math.max(0, pad - SHEET_STRIP);
   sheet.frameBottom = box.bottom;
+  // (no longer beside the video - the window shrank: the sheet is the comments alone)
+  if (!sheet.side && side.tab !== 'comments') setSideTab('comments');
 }
 /** Shows `h` px of the sheet: up to the resting height it slides, above it it grows. */
 function sheetPlace(h: number, animate: boolean): void {
@@ -1224,7 +1317,8 @@ function sheetPlace(h: number, animate: boolean): void {
   s.classList.toggle('settling', animate);
   s.style.height = `${Math.max(sheet.rest, h)}px`;
   s.style.transform = `translate3d(0, ${Math.max(0, sheet.rest - h)}px, 0)`;
-  host.onCommentsView?.({ top: sheet.viewTop, bottom: sheet.frameBottom - h }, animate);
+  // (beside the video nothing of it is covered: the picture stays - or goes back - where it was)
+  host.onCommentsView?.(sheet.side ? { top: 0, bottom: Number.MAX_SAFE_INTEGER } : { top: sheet.viewTop, bottom: sheet.frameBottom - h }, animate && !sheet.side);
 }
 /** Slides the sheet to one of its positions and calls `then` when it is there. */
 function sheetSettle(h: number, then?: () => void): void {
@@ -1278,6 +1372,7 @@ export const commentsOpen = (): boolean => sheet.state !== 'closed';
 // The grab area follows the finger / mouse; the buttons in it keep their own taps.
 el.commentsGrab.addEventListener('pointerdown', (e) => {
   if (sheet.drag || !e.isPrimary || (e.pointerType === 'mouse' && e.button !== 0)) return;
+  if (sheet.side) return; // a column beside the video is closed with its ×, not dragged
   if (sheet.state !== 'open' && sheet.state !== 'opening') return;
   if ((e.target as HTMLElement).closest('button')) return;
   sheet.drag = { id: e.pointerId, y0: e.clientY, h0: sheet.shown, moved: false, samples: [] };
@@ -1379,7 +1474,224 @@ window.addEventListener('resize', sheetRelayout);
 window.addEventListener('orientationchange', sheetRelayout);
 window.visualViewport?.addEventListener('resize', sheetRelayout);
 
-/** Opens the comments sheet for `item` (the video in view); a different video starts a fresh read. */
+// ---- beside the video: who posted it, and two tabs (wide screens)
+// The column the comments take beside the video (sheet.side) opens with the account that posted the
+// video at its top - picture, name, followers, Follow - and two tabs under it: the video's comments,
+// and the account's videos (tap one to play them from there). The comment bubble opens it on
+// Comments, the avatar on Videos. The account's page (bio, messages, the big grid) is one tap on
+// the name away. On a phone none of this shows: the sheet there is the comments alone.
+const side = {
+  tab: 'comments' as 'comments' | 'videos',
+  /** The account whose videos the Videos tab holds (lower-cased handle), '' = none asked yet */
+  user: '',
+  info: undefined as UserSummary | undefined,
+  items: [] as FeedItem[],
+  offset: 0,
+  hasMore: false,
+  busy: false,
+  seq: 0,
+};
+const sideAuthor = (): FeedItem['author'] | undefined => comments.item?.author;
+const sideFollowState = (): FollowState | undefined => {
+  const a = sideAuthor();
+  if (!a) return undefined;
+  const known = host.followState?.(a);
+  return known && known !== 'unknown' ? known : side.info?.followState;
+};
+const isFollowed = (s: FollowState | undefined): boolean => s === 'following' || s === 'friends' || s === 'requested';
+
+function renderSideHead(): void {
+  const a = sideAuthor();
+  if (!a) return;
+  const u = side.info && side.user === (a.uniqueId || '').toLowerCase() ? side.info : undefined;
+  el.sideHandle.textContent = `@${u?.uniqueId || a.uniqueId || '?'}${u?.verified ? ' ✔' : ''}`;
+  el.sideNick.textContent = u?.nickname || a.nickname || '';
+  const pic = u?.avatar || a.avatar;
+  if (pic) el.sideAvatar.src = pic;
+  else el.sideAvatar.removeAttribute('src');
+  const stats: string[] = [];
+  if (u?.followers !== undefined) stats.push(`${host.fmtCount(u.followers)} followers`);
+  if (u?.likes !== undefined) stats.push(`${host.fmtCount(u.likes)} likes`);
+  if (u?.videos !== undefined) stats.push(`${host.fmtCount(u.videos)} videos`);
+  el.sideStats.textContent = stats.join(' · ');
+  el.sideDesc.textContent = comments.item?.desc || '';
+  el.sideDesc.classList.toggle('hidden', !comments.item?.desc);
+  const state = sideFollowState();
+  if (!el.sideFollow.classList.contains('busy')) el.sideFollow.textContent = followLabel(state);
+  el.sideFollow.classList.toggle('primary', !isFollowed(state));
+  el.sideFollow.classList.toggle('on', isFollowed(state));
+  el.sideFollow.classList.toggle('hidden', !host.platform.follow);
+}
+
+/** Shows one of the two tabs; what it holds is read the first time it is shown for this video / account. */
+function setSideTab(tab: 'comments' | 'videos'): void {
+  const changed = side.tab !== tab;
+  side.tab = tab;
+  const vids = tab === 'videos';
+  el.sideTabComments.classList.toggle('active', !vids);
+  el.sideTabVideos.classList.toggle('active', vids);
+  el.sideTabComments.setAttribute('aria-selected', String(!vids));
+  el.sideTabVideos.setAttribute('aria-selected', String(vids));
+  el.sideTabs.classList.toggle('second', vids);
+  el.commentsBody.classList.toggle('hidden', vids);
+  el.sideVideos.classList.toggle('hidden', !vids);
+  el.sideRefresh.classList.toggle('hidden', vids || !!comments.ctl);
+  el.sideCancel.classList.toggle('hidden', vids || !comments.ctl);
+  if (changed) {
+    // the tab that comes in slides in from its side (feed.css side-in)
+    const shown = vids ? el.sideVideos : el.commentsBody;
+    shown.classList.remove('from-left', 'from-right');
+    void shown.offsetWidth;
+    shown.classList.add(vids ? 'from-right' : 'from-left');
+  }
+  const item = comments.item;
+  if (!item) return;
+  if (!vids) {
+    if (comments.asked !== item.id) void loadComments(false);
+    return;
+  }
+  const handle = (item.author.uniqueId || '').toLowerCase();
+  if (side.user !== handle) void loadSideVideos(false);
+}
+
+async function loadSideVideos(more: boolean): Promise<void> {
+  const a = sideAuthor();
+  const user = a?.uniqueId;
+  if (!user || (side.busy && more)) return;
+  const handle = user.toLowerCase();
+  const seq = ++side.seq;
+  if (!more || side.user !== handle) {
+    more = false;
+    side.user = handle;
+    side.info = undefined;
+    side.items = [];
+    side.offset = 0;
+    side.hasMore = false;
+    el.sideVideosGrid.innerHTML = '';
+    el.sideVideosMore.classList.add('hidden');
+    el.sideVideos.scrollTop = 0;
+  }
+  side.busy = true;
+  status(el.sideVideosStatus, '');
+  el.sideVideosLoading.classList.toggle('more', more);
+  el.sideVideosLoading.classList.remove('hidden');
+  el.sideVideosLoadingTitle.textContent = more ? 'Loading more videos…' : `Loading the videos of @${user}…`;
+  el.sideVideosMore.disabled = true;
+  try {
+    // (quiet: the tab shows this wait itself, where the videos are about to be)
+    const r = await api.profile({ platform: host.platform.id, user, offset: more ? side.offset : 0, count: 24 }, { label: `Loading the videos of @${user}`, quiet: () => true });
+    if (seq !== side.seq || side.user !== handle) return;
+    side.info = r.user;
+    side.offset = r.offset + r.items.length;
+    side.hasMore = r.hasMore;
+    if (r.user.followState && r.user.followState !== 'unknown') host.onFollowState?.(r.user.uniqueId, r.user.followState);
+    renderSideHead();
+    const base = side.items.length;
+    const fresh = r.items.filter((it) => !side.items.some((x) => x.id === it.id));
+    side.items.push(...fresh);
+    fresh.forEach((it, i) => {
+      const tile = videoTile(it, () => host.play({ kind: 'profile', user, items: side.items.slice(), offset: side.offset, hasMore: side.hasMore }, base + i));
+      // the one that is playing beside the panel is marked, like TikTok's own
+      if (it.id === comments.item?.id) tile.classList.add('current');
+      el.sideVideosGrid.appendChild(tile);
+    });
+    el.sideVideosMore.classList.toggle('hidden', !side.hasMore || !fresh.length);
+    status(el.sideVideosStatus, side.items.length ? '' : r.warnings[0] || 'No videos to show');
+    for (const w of r.warnings) console.warn('[profile]', w);
+  } catch (e) {
+    if (seq !== side.seq) return;
+    if (!more) side.user = ''; // the tab asks again the next time it is shown
+    status(el.sideVideosStatus, `Could not load @${user}: ${errMsg(e)}`, true);
+  } finally {
+    if (seq === side.seq) {
+      side.busy = false;
+      el.sideVideosLoading.classList.add('hidden');
+      el.sideVideosMore.disabled = false;
+    }
+  }
+}
+
+/**
+ * The signed-in account's follow state of an account became known somewhere else on the page (the
+ * "+" on the avatar): the panel's Follow button and the account page's say the same.
+ */
+export function followStateChanged(user: string, state: FollowState): void {
+  const handle = user.toLowerCase();
+  if (side.info && side.user === handle) side.info.followState = state;
+  if (profile.info && profile.info.uniqueId.toLowerCase() === handle) {
+    profile.info.followState = state;
+    renderProfileHead();
+  }
+  if ((sideAuthor()?.uniqueId || '').toLowerCase() === handle) renderSideHead();
+}
+
+el.sideTabComments.addEventListener('click', () => setSideTab('comments'));
+el.sideTabVideos.addEventListener('click', () => setSideTab('videos'));
+el.sideVideosMore.addEventListener('click', () => void loadSideVideos(true));
+el.sideClose.addEventListener('click', () => closeComments());
+el.sideRefresh.addEventListener('click', () => void loadComments(false));
+el.sideCancel.addEventListener('click', () => {
+  if (cancelCommentsRead()) status(el.commentsStatus, comments.list.length ? 'Stopped.' : 'Stopped. Refresh reads the comments again.');
+});
+// The name and picture: the account's own page (bio, messages, the big grid). The video pauses behind it as always.
+el.sideAuthor.addEventListener('click', () => {
+  const user = sideAuthor()?.uniqueId;
+  if (user) void openProfile(user);
+});
+el.sideFollow.addEventListener('click', () => {
+  const a = sideAuthor();
+  if (!a?.uniqueId) return;
+  if (!host.isLoggedIn()) {
+    host.toast(`Sign in to ${host.platform.name} first to follow accounts`, true, 4000);
+    void host.openSessionPanel();
+    return;
+  }
+  const user = a.uniqueId;
+  const followed = isFollowed(sideFollowState());
+  pressed(
+    el.sideFollow,
+    async () => {
+      try {
+        const r = await api.follow({ platform: host.platform.id, user, id: a.id, follow: !followed });
+        if (side.info && side.user === user.toLowerCase()) side.info.followState = r.followState;
+        host.onFollowState?.(user, r.followState);
+        host.toast(`${r.followState === 'none' ? (followed ? `Unfollowed @${user}` : `Could not follow @${user}`) : r.followState === 'requested' ? `Follow request sent to @${user}` : `${followLabel(r.followState)} @${user}`}${r.via === 'direct' ? ' · asked directly, no browser' : ''}`, r.followState === 'none' && !followed);
+        for (const w of r.warnings) console.warn('[follow]', w);
+      } catch (e) {
+        host.toast(`Follow failed: ${errMsg(e)}`, true, 6000);
+      }
+      window.setTimeout(renderSideHead, 0); // (after the button has its own text back)
+    },
+    { label: followed ? 'Unfollowing' : 'Following' },
+  );
+});
+
+/**
+ * Opens the panel for `item` (the video in view) on one of its tabs. Beside the video (wide screens)
+ * that is the account, Comments and Videos; as a sheet (phones) it is the comments alone.
+ */
+function openSide(item: FeedItem, tab: 'comments' | 'videos'): void {
+  sheetOpen();
+  if (comments.item?.id !== item.id) {
+    cancelCommentsRead();
+    comments.item = item;
+    comments.asked = '';
+    comments.list = [];
+    comments.cursor = 0;
+    comments.hasMore = false;
+    comments.total = undefined;
+    el.commentsList.innerHTML = '';
+    el.commentsMore.classList.add('hidden');
+    status(el.commentsStatus, '');
+    el.commentsBody.scrollTop = 0;
+    commentsTitle();
+    for (const t of el.sideVideosGrid.querySelectorAll('.v-tile.current')) t.classList.remove('current');
+  }
+  renderSideHead();
+  setSideTab(sheet.side ? tab : 'comments');
+}
+
+/** Opens the comments of `item` (the video in view); a different video starts a fresh read. */
 export function openComments(item: FeedItem): void {
   if (!host.platform.social) {
     host.toast(`Comments are not available for ${host.platform.name} yet`);
@@ -1389,13 +1701,19 @@ export function openComments(item: FeedItem): void {
     host.toast('This video has no account to read the comments from');
     return;
   }
-  sheetOpen();
-  if (comments.item?.id === item.id && (comments.list.length || comments.ctl)) return;
-  comments.item = item;
-  comments.total = undefined;
-  el.commentsBody.scrollTop = 0;
-  commentsTitle();
-  void loadComments(false);
+  openSide(item, 'comments');
+}
+
+/**
+ * The avatar of the video in view: where the panel goes beside the video (wide screens, an app with
+ * comments), it opens there on the account's videos and true comes back; false = no such place, the
+ * caller opens the account's page instead.
+ */
+export function openAuthorBeside(item: FeedItem): boolean {
+  if (!host.platform.social || !item.author.uniqueId) return false;
+  if (sheet.state === 'closed' ? !host.commentsSide?.() : !sheet.side) return false;
+  openSide(item, 'videos');
+  return true;
 }
 
 el.commentsClose.addEventListener('click', () => closeComments());

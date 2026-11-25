@@ -292,10 +292,12 @@ interface CallOptions {
   envCode?: number;
   /** false: no signature (the Explore list answers without one, over a Chrome-like connection) */
   sign?: boolean;
+  /** POST: a write (a follow). Its body is empty - what it does is in the query, like the page's own request */
+  method?: 'GET' | 'POST';
   signal?: AbortSignal;
 }
 
-/** One GET (signed unless told otherwise); the parsed JSON, or GuestError saying how TikTok refused. */
+/** One GET (signed unless told otherwise) or POST; the parsed JSON, or GuestError saying how TikTok refused. */
 async function call(s: Session, path: string, query: Record<string, string | number>, o: CallOptions = {}): Promise<{ json: any; ms: number; bytes: number }> {
   const wait = lastCallAt + GAP_MS - Date.now();
   if (wait > 0) await abortable(new Promise<void>((r) => setTimeout(r, wait)), o.signal);
@@ -303,10 +305,11 @@ async function call(s: Session, path: string, query: Record<string, string | num
   s.calls += 1;
   const pairs = commonParams(s);
   for (const [k, v] of Object.entries(query)) pairs.push([k, String(v)]);
+  const post = o.method === 'POST';
   const qs =
     o.sign === false
       ? pairs.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&')
-      : signRequest(pairs, { userAgent: UA, msToken: s.jar.get('msToken') ?? '', sdkVersion: DEFAULT_SDK_VERSION, scmVersion: o.scm ?? signingAs, envCode: o.envCode }).query;
+      : signRequest(pairs, { userAgent: UA, msToken: s.jar.get('msToken') ?? '', sdkVersion: DEFAULT_SDK_VERSION, scmVersion: o.scm ?? signingAs, envCode: o.envCode, body: post ? '' : undefined }).query;
   const headers: Record<string, string> = {
     'User-Agent': UA,
     Accept: 'application/json, text/plain, */*',
@@ -321,8 +324,12 @@ async function call(s: Session, path: string, query: Record<string, string | num
     'sec-fetch-site': 'same-origin',
     priority: 'u=1, i',
   };
-  if (s.csrf) headers['x-secsdk-csrf-token'] = s.csrf;
-  const answer = await send(s.jar, 'GET', `${ORIGIN}${path}?${qs}`, headers, undefined, o.signal);
+  if (post) {
+    // As the probe sent it (research/tiktok_follow_direct_probe.ts, accepted 2026-11-25): the page's csrf token under this name, a form content type, an empty body.
+    headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8';
+    if (s.csrf) headers['tt-csrf-token'] = s.csrf;
+  } else if (s.csrf) headers['x-secsdk-csrf-token'] = s.csrf;
+  const answer = await send(s.jar, post ? 'POST' : 'GET', `${ORIGIN}${path}?${qs}`, headers, post ? '' : undefined, o.signal);
   const text = answer.body.toString('utf8');
   if (answer.status === 429) throw new GuestError('TikTok answered HTTP 429 (too many requests)', 'empty');
   if (!text.trim()) throw new GuestError(`TikTok answered HTTP ${answer.status} with an empty body`, 'empty');
@@ -357,7 +364,7 @@ export function commentAnswerUsable(json: any): boolean {
  * What is being read. Each kind has its own failure count and pause: TikTok refusing one path
  * (say, search) must not send the comments back to the browser.
  */
-export type GuestKind = 'comments' | 'replies' | 'explore' | 'profile' | 'posts' | 'video' | 'foryou' | 'search';
+export type GuestKind = 'comments' | 'replies' | 'explore' | 'profile' | 'posts' | 'video' | 'foryou' | 'search' | 'follow';
 
 interface KindState {
   calls: number;
@@ -611,6 +618,9 @@ export interface AccountGet {
   query: Record<string, string | number>;
   /** For the status line: "your For You videos", "videos matching ..." */
   what: string;
+  /** POST: a write as the account (a follow); the whole status text then, instead of "asking ... for <what>" */
+  method?: 'GET' | 'POST';
+  doing?: string;
   referer?: string;
   /** Is this JSON an answer? Default: anything beyond TikTok's bare "ok" envelope */
   usable?: (json: any) => boolean;
@@ -628,8 +638,8 @@ export async function accountGet(visit: AccountVisit, g: AccountGet): Promise<Gu
   kindState(g.kind).calls += 1;
   const referer = g.referer ?? `${ORIGIN}/foryou`;
   try {
-    say(`asking TikTok directly for ${g.what} (no browser: the account's sign-in, a signed request)`, 'asking TikTok directly (no browser)');
-    const r = await call(visit, g.path, { odinId: visit.odinId ?? '', user_is_login: 'true', ...g.query }, { referer, signal: g.signal });
+    say(g.doing ?? `asking TikTok directly for ${g.what} (no browser: the account's sign-in, a signed request)`, 'asking TikTok directly (no browser)');
+    const r = await call(visit, g.path, { odinId: visit.odinId ?? '', user_is_login: 'true', ...g.query }, { referer, method: g.method, signal: g.signal });
     const code = Number(r.json?.status_code ?? r.json?.statusCode ?? 0);
     if (code !== 0) throw new GuestError(`TikTok status ${code}: ${r.json.status_msg || r.json.statusMsg || 'unavailable'}`, 'status', code);
     if (!(g.usable ?? beyondEnvelope)(r.json)) throw new GuestError(`TikTok answered "ok" without ${g.what} (its soft refusal)`, 'empty');
@@ -641,6 +651,31 @@ export async function accountGet(visit: AccountVisit, g: AccountGet): Promise<Gu
       failed(g.kind, e.message, e.kind !== 'status', g.log);
       g.log(`account ${g.kind}: ${e.message}`);
     }
+    throw e;
+  }
+}
+
+/**
+ * A tiktok.com page as the account sees it (an account page then says whether the account follows
+ * it: `relation` in its data block). No signature: the Chrome-like connection and the cookies.
+ */
+export async function accountPage(visit: AccountVisit, kind: GuestKind, url: string, what: string, log: (m: string) => void, signal?: AbortSignal): Promise<{ html: string; status: number; ms: number }> {
+  const t0 = Date.now();
+  stats.calls += 1;
+  kindState(kind).calls += 1;
+  try {
+    say(`asking TikTok directly for ${what} (no browser)`, 'asking TikTok directly (no browser)');
+    const wait = lastCallAt + GAP_MS - Date.now();
+    if (wait > 0) await abortable(new Promise<void>((r) => setTimeout(r, wait)), signal);
+    lastCallAt = Date.now();
+    visit.calls += 1;
+    const answer = await send(visit.jar, 'GET', url, PAGE_HEADERS, undefined, signal);
+    const html = answer.body.toString('utf8');
+    if (answer.status >= 500 || !html.trim()) throw new GuestError(`TikTok answered HTTP ${answer.status}${html.trim() ? '' : ' with an empty page'}`, 'empty');
+    succeeded(kind, Date.now() - t0);
+    return { html, status: answer.status, ms: Date.now() - t0 };
+  } catch (e) {
+    if (e instanceof GuestError) failed(kind, e.message, true, log);
     throw e;
   }
 }

@@ -57,7 +57,7 @@ import { currentPlatform, PLATFORMS, rememberApp, type PlatformDef } from '../pl
 import { fileKey, getCached, itemKey, MAX_AGE as CACHE_MAX_AGE, overBudget, putCached, sweep, type CacheRole } from './mediaCache';
 import { accountIs, dropStoredVideos } from '../accountVideos';
 import { FeedPlayer, feedPlayerMode } from './player';
-import { closeComments, closeTopPanel, commentsOpen, forgetAccountResults, initSocial, openComments, openInbox, openProfile, openSearch, panelOpen, reopenPlayList, type PlayList } from './social';
+import { closeComments, closeTopPanel, commentsOpen, followStateChanged, forgetAccountResults, initSocial, openAuthorBeside, openComments, openInbox, openProfile, openSearch, panelOpen, reopenPlayList, type PlayList } from './social';
 
 // feed.html's failsafe reports whether this script ran at all
 (window as unknown as { streamAnywhereStarted: boolean }).streamAnywhereStarted = true;
@@ -174,6 +174,7 @@ const el = {
   appSub: $('appSub'),
   searchLabel: $('searchLabel'),
   upnextAuto: $<HTMLButtonElement>('upnextAuto'),
+  upnext: $('upnext'),
   upnextList: $('upnextList'),
   upnextStatus: $('upnextStatus'),
   upnextStatusTitle: $('upnextStatusTitle'),
@@ -536,9 +537,11 @@ el.navApp.title = `${P.name}: home screen (all apps)`;
 el.navApp.setAttribute('aria-label', `${P.name}: home screen`);
 onHomeTap(el.navApp);
 el.navInbox.addEventListener('click', () => (P.social ? pressed(el.navInbox, () => openInbox()) : toast(`Messages are not available for ${P.name}`)));
+// The avatar: who posted the video. Wide screens: beside the video, on the account's videos (with
+// the comments one tab away); elsewhere the account's page.
 el.actAuthor.addEventListener('click', () => {
   const cur = activeEntry();
-  if (cur?.item.author.uniqueId) void openProfile(cur.item.author.uniqueId);
+  if (cur?.item.author.uniqueId && !openAuthorBeside(cur.item)) void openProfile(cur.item.author.uniqueId);
 });
 // The comment bubble: the comments of the video in view (read on the server, cancellable; see social.ts).
 el.actComments.addEventListener('click', () => {
@@ -559,7 +562,7 @@ el.actFollow.addEventListener('click', () => {
     try {
       const r = await api.follow({ platform: P.id, user, id: author.id, follow: true });
       rememberFollowState(user, r.followState);
-      toast(r.followState === 'none' ? `Could not follow @${user}` : r.followState === 'requested' ? `Follow request sent to @${user}` : `Following @${user}`);
+      toast(`${r.followState === 'none' ? `Could not follow @${user}` : r.followState === 'requested' ? `Follow request sent to @${user}` : `Following @${user}`}${r.via === 'direct' ? ' · asked directly, no browser' : ''}`);
       for (const w of r.warnings) console.warn('[follow]', w);
     } catch (e) {
       toast(`Follow failed: ${errMsg(e)}`, true, 6000);
@@ -573,6 +576,7 @@ function rememberFollowState(user: string, s: FollowState): void {
   if (s === 'unknown') return;
   followKnown.set(user.toLowerCase(), s);
   for (const e of state.entries) if (e.item.author.uniqueId?.toLowerCase() === user.toLowerCase()) e.item.author.followState = s;
+  followStateChanged(user, s); // the panel beside the video and the account page say the same
 }
 const followStateOf = (a: FeedAuthor): FollowState | undefined => (a.uniqueId ? followKnown.get(a.uniqueId.toLowerCase()) : undefined) ?? a.followState;
 // Wide screens: the rail lists every app with the one in use marked; tapping another one switches to
@@ -612,6 +616,14 @@ initSocial({
   onPanelsChange: syncOverlayPause,
   onCommentsHold: holdForComments,
   onCommentsView: fitVideoAbove,
+  // Wide screens with the Up next column on show: the comments take exactly that column (the
+  // header's search box ends where it begins), so the video stays whole beside them. A column
+  // narrower than COMMENTS_SIDE_MIN (a nearly square window) is no place to read: the sheet then.
+  commentsSide: () => {
+    if (!el.app.classList.contains('wide') || el.app.classList.contains('no-upnext') || el.app.classList.contains('fullwindow')) return undefined;
+    const col = el.upnext.getBoundingClientRect();
+    return col.width >= COMMENTS_SIDE_MIN && col.height > 0 ? { left: col.left, top: col.top, width: col.width, height: col.height } : undefined;
+  },
   // Wide screens: the comments sheet goes over the video's own card (its place at rest: the track
   // may still be sliding to it). Phones: the sheet takes the screen.
   videoCard: () => {
@@ -633,6 +645,7 @@ initSocial({
     rememberFollowState(user, s);
     syncFollow(activeEntry());
   },
+  followState: (a) => followStateOf(a),
 });
 el.navProfile.addEventListener('click', () => onProfileIcon(el.navProfile));
 el.sessionClose.addEventListener('click', () => closeSessionPanel());
@@ -868,6 +881,8 @@ syncActionButtons();
 // touched: once the sheet is gone the video in view ends as usual and the next one follows, or it
 // loops, as chosen.
 let commentsHold = false;
+/** The comments go beside the video, over the Up next column, when that column is at least this wide (px) */
+const COMMENTS_SIDE_MIN = 220;
 /** Counts the times pending advances were dropped: a skip timer set before one of them does nothing. */
 let advanceEpoch = 0;
 /** A video repeats when auto-scroll is off - and, whatever the choice, while the comments are open. */
@@ -1269,7 +1284,7 @@ async function accountAction(req: TikTokAccountRequest, doing: string): Promise<
       rememberSignedIn(state.session);
     }
     ok = true;
-    if (req.action === 'direct') toast(req.on ? 'Test on: For You and search are asked without the browser for this account' : 'Test off: this account uses the browser again');
+    if (req.action === 'direct') toast(req.on ? 'Test on: For You, search and follow are asked without the browser for this account' : 'Test off: this account uses the browser again');
     else if (req.action === 'add') {
       // (a new account is the active one from now on, signed out: nothing of the previous one stays here either)
       cookiesOpen = false;
@@ -3532,7 +3547,7 @@ document.addEventListener('keydown', (e) => {
       break;
     case 'p':
     case 'P':
-      if (cur?.item.author.uniqueId) void openProfile(cur.item.author.uniqueId);
+      if (cur?.item.author.uniqueId && !openAuthorBeside(cur.item)) void openProfile(cur.item.author.uniqueId);
       break;
     case 'ArrowDown':
     case 'j':

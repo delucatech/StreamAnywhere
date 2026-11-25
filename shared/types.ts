@@ -466,6 +466,8 @@ export interface FollowResponse {
   user: string;
   followState: FollowState;
   warnings: string[];
+  /** TikTok: how the follow was made (see FeedResponse.via) */
+  via?: ReadVia;
 }
 
 export interface Conversation {

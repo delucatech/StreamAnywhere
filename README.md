@@ -89,7 +89,7 @@ through the server's `/api/media/:id` (`server/src/proxy.ts`).
 
 | App | The list of videos | The playable file | To the viewer |
 |---|---|---|---|
-| **TikTok** | **Explore**: TikTok's unsigned `api/explore/item_list` over a Chrome-like connection (`tlsBridge.ts`); when that fails, the same request over plain HTTPS, then from inside the server's headless browser, which then stays preferred for 15 min. **For You**: a signed-in headless Chrome on `tiktok.com/foryou`; the server reads the `api/recommend/item_list` answers that page receives and keeps 20 videos ready while someone watches (an account other than the main one can be switched to asking TikTok directly instead, without the browser: a test, see "For You and search without the browser"). **Profiles, comments, replies**: no browser - requests as a signed-out visitor, carrying the signature TikTok's page script would add (`tiktokSign.ts`) over the Chrome-like connection (`tiktokGuest.ts`); the headless browser when TikTok does not answer those. **Search**: the headless browser; for an account in that test, asked directly with the account's cookies (a guest gets no search answer). **Follow, messages**: the headless browser | Each variant's cookie-free `/aweme/v1/play` address (direct) and its cookie-bound `playAddr` (relay only). Items come with their formats; a pasted link or a search result without them goes through `POST /api/resolve` (TikTok's `item/detail` call as a guest first, the video's page behind it) | Direct, relay as fallback |
+| **TikTok** | **Explore**: TikTok's unsigned `api/explore/item_list` over a Chrome-like connection (`tlsBridge.ts`); when that fails, the same request over plain HTTPS, then from inside the server's headless browser, which then stays preferred for 15 min. **For You**: a signed-in headless Chrome on `tiktok.com/foryou`; the server reads the `api/recommend/item_list` answers that page receives and keeps 20 videos ready while someone watches (an account other than the main one can be switched to asking TikTok directly instead, without the browser: a test, see "For You, search and follow without the browser"). **Profiles, comments, replies**: no browser - requests as a signed-out visitor, carrying the signature TikTok's page script would add (`tiktokSign.ts`) over the Chrome-like connection (`tiktokGuest.ts`); the headless browser when TikTok does not answer those. **Search**: the headless browser; for an account in that test, asked directly with the account's cookies (a guest gets no search answer). **Follow**: the headless browser presses the button; for an account in that test, TikTok's own follow request, signed. **Messages**: the headless browser | Each variant's cookie-free `/aweme/v1/play` address (direct) and its cookie-bound `playAddr` (relay only). Items come with their formats; a pasted link or a search result without them goes through `POST /api/resolve` (TikTok's `item/detail` call as a guest first, the video's page behind it) | Direct, relay as fallback |
 | **YouTube** | **Shorts**: a hashtag's Shorts tab, listed by yt-dlp. **Search**: `youtubei/v1/search` (yt-dlp as fallback). **For You**: the TV API's home feed after the code sign-in; with cookies only, yt-dlp's `feed/recommended`. Channels: yt-dlp | `youtubei/v1/player` asked by the server (about 0.2 s); yt-dlp when that fails, with Deno for "made for kids" videos (one at a time, the video in view first). The answer is an H.264 picture-only file (up to 720p) and an AAC sound file, kept 1 h | Always the relay (the addresses are bound to the server's IP), in 4 MB pieces; two demuxers in step |
 | **Instagram** | Sign-in required. **Reels**: a rotation of public accounts whose profile pages are listed into a catalog. **For You**: the post codes of the account's `/reels/` page. All in one headless Chrome page | The post's embed page, fetched from inside that page: one MP4 with picture and sound | Direct, relay as fallback |
 | **Facebook** | **Reels**: public Pages' `/reels/` tabs over plain HTTPS, kept in a catalog. **For You**: the `FBUnifiedVideoContainerQuery` GraphQL query with the saved cookies. No browser | Progressive MP4s named in the same data: HD (720p) and SD (360p) | Direct, relay as fallback |
@@ -390,9 +390,26 @@ Open **`/feed.html`** (from the launcher; `?platform=youtube` for YouTube). It i
   hidden; the browser's fullscreen too where it allows it). **Exit full screen** (top right), **F** or Esc leaves it.
 - **Auto-scroll** (checkbox / **A**): when on, a finished video advances to the next one; when off,
   videos loop.
-- **Comments** (the bubble / **C**, TikTok): a white sheet slides up over the lower two thirds of
-  the video (on wide screens: of the video's own card) with the comment count, the comments and
-  their replies. The video goes on playing above it, or stays paused if it was, and its picture is
+- **Comments and the account, beside the video** (the bubble / **C**, the avatar / **P**; TikTok).
+  **On wide screens (2026-11-25) a panel takes the Up next column**, top to bottom, the way
+  tiktok.com lays a video out: at its top the account that posted the video (picture, name,
+  followers / likes / videos once known, Follow), under it two tabs - **Comments** (the count, the
+  comments and their replies) and **Videos** (the account's videos, three a row; a tap plays them
+  from there, with the account's videos as the Up next list). The bubble opens it on Comments, the
+  avatar on Videos; each tab reads what it holds the first time it is shown. It slides up as the
+  sheet does, the line under the tabs slides across and the tab that comes on show slides in from
+  its side. The video beside it stays whole and is still tapped, paused, liked and swiped
+  (`commentsSide` in `feed.ts`; the layer lets everything outside the panel through), and the list
+  of next videos is back when it closes (✕, Esc / **C**, or moving to another video). The name
+  opens the account's full page (bio, messages, the big grid), which also stays what a search
+  result or a phone opens. A column narrower than 220 px (a nearly square window), a window
+  without that column, and full-window mode use the sheet instead (comments only; the avatar
+  opens the account's page there). **While the comments are read, the notice
+  is in the list itself** - spinner, "Loading the comments…", the step the server is on and a
+  clock - where the first comment is about to be (under the ones on show for "More comments"),
+  not on the status line above the sheet (`showCommentsLoading` in `social.ts`). **On phones** a
+  white sheet slides up over the lower two thirds of the video (on a wide screen without the Up
+  next column: of the video's own card). The video goes on playing above it, or stays paused if it was, and its picture is
   fitted into the room the sheet leaves: made smaller and moved up, whole, so nothing of it is
   hidden behind the comments (`fitVideoAbove`: a transform on the canvas, the cover and the pause
   mark, following the sheet as it slides or is dragged; on phones the top bar and the action
@@ -531,7 +548,7 @@ the server's active account, each page remembers which account its videos were l
 (`localStorage`), and on a difference it drops them and loads the new account's. The home screen
 does the same for the feed it keeps ready.
 
-#### For You and search without the browser (a test, per account, never the main one)
+#### For You, search and follow without the browser (a test, per account, never the main one)
 
 Built 2026-11-25. The personalised For You is the last thing that needs the headless browser, and
 the browser is the heaviest thing on the small server. It can be asked from TikTok directly - the
@@ -564,9 +581,18 @@ signature, which TikTok could hold against it. So it is a switch per account, of
   directly, no browser" or "read in the server's browser" to its "+N new videos" line, and the
   search panel's result line ends the same way. `FeedResponse.via` / `SearchResponse.via` carry it
   (`direct` | `browser`), and the picker marks such an account "asks TikTok directly, no browser".
-- **Still through the browser for every account**: following and unfollowing, messages (the
-  inbox, a conversation, sending), the QR-code and window sign-ins, and the fallbacks behind the
-  guest reads (comments on the signed-in work page, the profile page). Profiles, comments,
+- **Follow and unfollow too (2026-11-25).** The account page as the account sees it names the
+  account (id, secUid) and says whether it is followed; then the page's own request, `POST
+  api/commit/follow/user/` (`type` / `action_type` 1 or 0), signed, with the page's csrf token in
+  `tt-csrf-token` and an empty body (`followDirect` in [`social.ts`](server/src/social.ts)). TikTok
+  took both from the PC: follow 1.0 s through the server's route, `follow_status` 1, the account
+  page agreeing afterwards; unfollow the same, back to 0. An account in the test also reads
+  account pages as itself, so the panel's Follow button shows the real state (a guest's page says
+  "not followed" for everyone). The probe: `research/tiktok_follow_direct_probe.ts`.
+- **Still through the browser for every account**: messages (the inbox, a conversation, sending),
+  the QR-code and window sign-ins, and the fallbacks behind the guest reads (comments on the
+  signed-in work page, the profile page). The main account also follows, unfollows and searches
+  through the browser. Profiles, comments,
   replies, Explore and video lookups are asked as a guest without a browser for every account,
   the main one included (next section).
 - **Fallback**: a refusal, an empty answer or "signed out" sends that request through the browser
@@ -666,7 +692,7 @@ How it works:
   feed), related videos, hashtag details and search suggestions.
 - **With an account's own session** (a For You and a search without the browser): tried on
   2026-11-25 with a spare account and built as a per-account test that the main account cannot be
-  switched to - see "For You and search without the browser" under "Several TikTok accounts"
+  switched to - see "For You, search and follow without the browser" under "Several TikTok accounts"
   above. Search is refused for a guest and answered for an account.
 - **Looking before trying** ([`server/src/tiktokWire.ts`](server/src/tiktokWire.ts), built
   2026-11-25): whether that is possible at all can be read off the signed-in browser without

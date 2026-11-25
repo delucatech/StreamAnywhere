@@ -65,6 +65,26 @@ export function activityFor(acts: ActivityEntry[], route: string | undefined, re
   return acts.find((a) => !a.ended && a.route === route && (!ref || !a.ref || a.ref === ref));
 }
 
+/**
+ * The step the server is on for one of this page's requests right now, in a few words - for a wait
+ * a page shows in a place of its own instead of on the status line (the comments, in their sheet).
+ * '' when the server names none; undefined when it could not be asked.
+ */
+export async function serverStep(route: string, ref?: string): Promise<string | undefined> {
+  const ctl = new AbortController();
+  const timer = window.setTimeout(() => ctl.abort(), ASK_TIMEOUT_MS);
+  try {
+    const res = await fetch(apiUrl('/api/activity'), { mode: 'cors', credentials: 'same-origin', cache: 'no-store', signal: ctl.signal });
+    if (!res.ok) return undefined;
+    const a = activityFor(((await res.json()) as ActivityResponse).activities, route, ref);
+    return a ? a.brief || shortStep(a.step) : '';
+  } catch {
+    return undefined;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 interface ServerView {
   /** The last answer */
   data?: ActivityResponse;
